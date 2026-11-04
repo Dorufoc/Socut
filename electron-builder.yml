@@ -1,0 +1,61 @@
+appId: com.focusnews.app
+productName: FocusNews
+copyright: Copyright © 2026 FocusNews
+
+directories:
+  output: release
+  buildResources: resources/build
+
+# 主进程/预加载只使用 electron 与 node 内置模块，渲染端依赖已被 Vite 打包，
+# 因此 files 白名单只带 out/ 与 package.json：既避免把 node_modules 打进安装包，
+# 也避免 resources/ 被 files 与 extraResources 双重包含（FFmpeg 会被复制两次）。
+files:
+  - out/**/*
+  - package.json
+
+extraResources:
+  - from: resources/ffmpeg
+    to: ffmpeg
+    filter:
+      - '**/*'
+  - from: resources/fonts
+    to: fonts
+    filter:
+      - '**/*'
+  # 运行时窗口/任务栏图标（windows.ts 的 appIconPath 依赖这个位置）
+  - from: resources/icons
+    to: icons
+    filter:
+      - 'icon.png'
+
+asar: true
+
+npmRebuild: false
+removePackageScripts: true
+compression: normal
+
+win:
+  icon: resources/icons/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+  requestedExecutionLevel: asInvoker
+  # 未配置证书：只跳签名，保留 exe 图标与元数据写入（electron-builder 日志明示的写法）。
+  # 代价：需要 rcedit（winCodeSign 包），已走 electron_builder_binaries_mirror 缓存到仓库 .cache/。
+  # 若该依赖不可达导致构建失败，退回 signAndEditExecutable: false（图标仍由 extraResources 的 icon.png 提供）。
+  signAndEditExecutable: true
+  signExecutable: false
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: FocusNews
+  artifactName: FocusNews-${version}-Setup-win-x64.${ext}
+  uninstallDisplayName: FocusNews 新闻字幕条
+
+# 离线交付：不发布任何更新源
+publish: null

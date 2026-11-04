@@ -1,0 +1,26 @@
+node_modules/
+out/
+dist/
+release/
+coverage/
+spikes/
+*.log
+npm-install.log
+
+# 下载缓存（FFmpeg 压缩包 / Electron / electron-builder 工具链），绝不入库
+.cache/
+
+# 打包取证用的临时安装/用户数据目录（scripts/verify-packaged.ps1 产出）
+.tmp-install/
+.tmp-appdata/
+.tmp-temp/
+
+# 由 scripts/fetch-ffmpeg.mjs / scripts/fetch-fonts.mjs 产出，不入库
+resources/ffmpeg/
+resources/fonts/
+
+# M0 验证产物
+docs/verification/artifacts/
+.vite/
+.DS_Store
+Thumbs.db
