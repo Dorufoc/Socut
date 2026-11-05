@@ -4,7 +4,7 @@ import path from 'node:path'
 import { CHANNELS } from '../shared/ipcChannels'
 import { APP_NAME, WINDOW_TITLE } from '../shared/constants'
 import { validateAllPresets } from '../shared/presets'
-import type { ExportRequest, Fps, Project, VideoMeta } from '../shared/types'
+import type { ExportRequest, Fps, MediaStripRequest, MediaStripResult, Project, VideoMeta } from '../shared/types'
 import type { AppInfo, EstimateInput } from '../shared/api'
 import { describeBinarySource, resolveFfmpegBinaries, userFontsDir } from './paths'
 import { ffmpegVersion } from './ffrun'
@@ -21,6 +21,7 @@ import { pickAndProbeVideo, pickManyAndProbeVideos, probeVideo } from './videoIm
 import { pickAndProbeWatermark } from './watermark'
 import { createPreviewUrl } from './media'
 import { ensureThumbRegistered, generateThumbnail, removeThumbnail, thumbUrlFor } from './thumbProtocol'
+import { generateStrip, removeStripsFor } from './stripProtocol'
 import { cancelCfr, convertToCfr } from './cfrTranscode'
 import { smokeConfig, verifySmokeReport, writeSmokeReport } from './smoke'
 import { installFrameIpc } from './export/frameChannel'
@@ -266,9 +267,25 @@ export function registerIpc(engine: ExportEngine): void {
     return reregistered ?? thumbUrlFor(mediaId)
   })
 
-  /** v2：素材移出池时回收缩略图文件（userData/thumbs）。 */
+  /** v2：素材移出池时回收缩略图与时间帧预览条（userData/thumbs 与 userData/strips）。 */
   ipcMain.handle(CHANNELS.mediaThumbRemove, async (_event, mediaId: string): Promise<void> => {
-    if (typeof mediaId === 'string' && mediaId.length > 0) await removeThumbnail(mediaId)
+    if (typeof mediaId === 'string' && mediaId.length > 0) {
+      await removeThumbnail(mediaId)
+      // 预览条是按「素材+区间+格数」命名的，只能按 mediaId 前缀整批回收
+      await removeStripsFor(mediaId)
+    }
+  })
+
+  /**
+   * v5：时间帧预览条（Thumbnail Strip）。主进程一次 FFmpeg 调用均匀抽帧并拼成一张长图，
+   * 命中磁盘缓存时不起子进程；失败（源不在/FFmpeg 缺失/抽帧报错）返回 url=null，
+   * 渲染层显示「无法预览」占位，不影响时间轴拖拽与剪辑。
+   */
+  ipcMain.handle(CHANNELS.mediaGenerateStrip, async (_event, request: MediaStripRequest): Promise<MediaStripResult> => {
+    if (typeof request !== 'object' || request === null) {
+      return { url: null, frames: 0, key: 'invalid', cached: false }
+    }
+    return generateStrip(request)
   })
 
   ipcMain.handle(CHANNELS.videoCfrConvert, async (event, target: string, fps: Fps, meta: VideoMeta) => {

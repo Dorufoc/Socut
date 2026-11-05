@@ -8,6 +8,8 @@ import type {
   FrameResponse,
   JobProgress,
   JobResult,
+  MediaStripRequest,
+  MediaStripResult,
   Project,
   SizeEstimate,
   VideoMeta,
@@ -235,6 +237,11 @@ export interface FocusNewsApi {
     thumbUrl(mediaId: string, url: string): Promise<string | null>
     /** v2：素材移出池时回收缩略图文件 */
     removeThumb(mediaId: string): Promise<void>
+    /**
+     * v5：时间帧预览条（Thumbnail Strip）：主进程按源区间均匀抽帧并 tile 拼成一张长图，
+     * 命中磁盘缓存不起子进程；不可用时 url=null（渲染层显示「无法预览」占位）。
+     */
+    strip(request: MediaStripRequest): Promise<MediaStripResult>
   }
   export: {
     estimate(input: EstimateInput): Promise<SizeEstimate>

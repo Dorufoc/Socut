@@ -237,3 +237,59 @@ describe('Timeline v2 媒体轨', () => {
     )
   })
 })
+
+/**
+ * v4：字幕轨只留一条上下更窄的示意条。
+ * 摆位就是这条字幕在当前画面的入点→出点；标签只放主标题；
+ * 播放头落在区间内时条内出现一条细游标，标出当前位置相对出入点的关系。
+ */
+describe('Timeline 字幕轨示意条', () => {
+  function seedTitled(): void {
+    const project = seed()
+    const clip = project.clips[0]!
+    clip.content = { title: '长三角一体化新规发布', subtitle: '省发展改革委负责人解读' }
+    useProjectStore.setState({ project, selectedClipId: clip.id, fonts: [] })
+  }
+
+  it('标签只放主标题，副标题与秒数读数不再占轨道空间', () => {
+    seedTitled()
+    const root = renderTimeline(vi.fn())
+
+    const card = root.querySelector('.clip-card') as HTMLElement
+    expect((card.querySelector('.clip-card__label') as HTMLElement).textContent).toBe('长三角一体化新规发布')
+    // 旧的副标题/预设名/秒数行彻底消失
+    expect(card.querySelector('.clip-card__meta')).toBeNull()
+    expect(card.textContent).not.toContain('省发展改革委负责人解读')
+    // 但信息不丢：完整读数仍在 title 里
+    expect(card.getAttribute('title')).toContain('00:00:02:00')
+    expect(card.getAttribute('title')).toContain('00:00:04:00')
+  })
+
+  it('播放头落在区间内才画游标，位置按同一 secToPx 口径落在条内', () => {
+    seedTitled()
+    const seekTo = vi.fn()
+    const root = renderTimeline(seekTo)
+
+    // 片段 2→4s，播放头在 0s（区间外）：没有游标
+    expect(root.querySelector('.clip-card__cursor')).toBeNull()
+    expect((root.querySelector('.clip-card') as HTMLElement).className).not.toContain('clip-card--onair')
+
+    act(() => {
+      useUiStore.setState({ displayTimeSec: 3 })
+    })
+
+    const cursor = root.querySelector('.clip-card__cursor') as HTMLElement
+    expect(cursor).toBeTruthy()
+    // 游标的 left 是相对条体原点的像素值（与全局播放头同一 secToPx 口径）
+    const offset = Number.parseFloat(cursor.style.left)
+    expect(Number.isFinite(offset)).toBe(true)
+    expect(offset).toBeGreaterThan(0)
+    expect((root.querySelector('.clip-card') as HTMLElement).className).toContain('clip-card--onair')
+  })
+
+  it('没有主标题时用可读的占位标签，而不是空白条', () => {
+    seed()
+    const root = renderTimeline(vi.fn())
+    expect((root.querySelector('.clip-card__label') as HTMLElement).textContent).toBe(TEXT.captions.noTitle)
+  })
+})

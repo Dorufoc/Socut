@@ -12,6 +12,7 @@ import {
   buildOverlayMp4MultiInputDirectPipe,
   buildProbeArgs,
   buildThumbnailArgs,
+  buildStripArgs,
   buildTransparentMovFromPipe,
   buildTransparentMovFromSeq,
   buildTransparentMovQtrle,
@@ -176,6 +177,59 @@ describe('v2 缩略图与多输入 trim+concat argv', () => {
     expect(args).toContain('scale=320:-2,setsar=1')
     expect(args.at(-1)).toBe('D:/thumbs/m1.jpg')
     expect(args).not.toContain('-progress')
+  })
+
+  /**
+   * v5 时间帧预览条（Thumbnail Strip）：一次调用完成「均匀抽帧 + 横向 tile 拼接」。
+   * 这里锁的是“不能逐格起进程”与“窗口必须就是片段的源区间”两条口径。
+   */
+  it('预览条：-ss/-t 都在 -i 前限定窗口，tile 格数与请求一致且不留缝', () => {
+    const args = buildStripArgs({
+      inputPath: 'D:/media/a.mp4',
+      outputPath: 'D:/strips/m1-abc.jpg',
+      sourceInSec: 2,
+      sourceOutSec: 8,
+      frames: 8,
+      frameWidth: 128
+    })
+    // 定位与时长都是**输入选项**（在 -i 之前）：关键帧快定位，不逐帧解码整片
+    expect(args.indexOf('-ss')).toBeLessThan(args.indexOf('-i'))
+    expect(args.indexOf('-t')).toBeLessThan(args.indexOf('-i'))
+    expect(args[args.indexOf('-ss') + 1]).toBe('2.000000')
+    expect(args[args.indexOf('-t') + 1]).toBe('6.000000')
+    // 滤镜链：重采样到 8 帧/6s → 缩宽 → 拼成 8x1 长图（padding/margin=0 即无缝）
+    const filter = args[args.indexOf('-vf') + 1]
+    expect(filter).toContain('fps=1.333333')
+    expect(filter).toContain('scale=128:-2')
+    expect(filter).toContain('setsar=1')
+    expect(filter).toContain('tile=8x1:padding=0:margin=0')
+    // 只要一张长图，不起进度管道（不是导出任务）
+    expect(args).toContain('-frames:v')
+    expect(args[args.indexOf('-frames:v') + 1]).toBe('1')
+    expect(args).not.toContain('-progress')
+    expect(args.at(-1)).toBe('D:/strips/m1-abc.jpg')
+  })
+
+  it('预览条：格数与时长退化时仍给 FFmpeg 合法正数（不出现 0 时长或 0 格）', () => {
+    const args = buildStripArgs({
+      inputPath: 'D:/media/a.mp4',
+      outputPath: 'D:/strips/x.jpg',
+      sourceInSec: 5,
+      sourceOutSec: 5.001,
+      frames: 0
+    })
+    expect(args[args.indexOf('-t') + 1]).toBe('0.040000')
+    expect(args[args.indexOf('-vf') + 1]).toContain('tile=1x1')
+    expect(args[args.indexOf('-ss') + 1]).toBe('5.000000')
+    // 负入点不会写进 argv（FFmpeg 会当错参）
+    const negative = buildStripArgs({
+      inputPath: 'D:/media/a.mp4',
+      outputPath: 'D:/strips/y.jpg',
+      sourceInSec: -3,
+      sourceOutSec: 2,
+      frames: 4
+    })
+    expect(negative[negative.indexOf('-ss') + 1]).toBe('0.000000')
   })
 
   const seg = (over: Partial<ConcatSegment> = {}): ConcatSegment => ({

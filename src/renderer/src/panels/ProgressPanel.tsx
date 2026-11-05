@@ -29,7 +29,7 @@ export function ProgressPanel(): ReactElement | null {
           <span className="group__title">任务进度</span>
           <span className="group__hint">{projectName || '未命名工程'}</span>
         </div>
-        <p className="hint">暂无任务。导出后可在这里查看逐帧进度与取消入口。</p>
+        <p className="hint">暂无任务</p>
       </section>
     )
   }
@@ -122,7 +122,7 @@ export function LastResultPanel(): ReactElement | null {
           </div>
           {/* 规格 §9：失败时除了 stderr 尾部，还要**附上完整命令行**（之前 argv 被采集了但从未展示） */}
           {lastResult.error?.argv && lastResult.error.argv.length > 0 ? (
-            <Expander title={`完整命令行（${lastResult.error.argv.length} 段）`} summary="可选中复制">
+            <Expander title={`完整命令行（${lastResult.error.argv.length} 段）`}>
               <div className="stack stack--tight">
                 <label className="switch">
                   <input
@@ -146,7 +146,7 @@ export function LastResultPanel(): ReactElement | null {
                 try {
                   const jobId = await retryLast()
                   if (jobId) setNotice(`已重新发起导出 ${jobId}`)
-                  else setNotice('无可重读的导出参数，请在导出面板重新设置')
+                  else setNotice('无可重试的导出参数，请在导出面板重新设置')
                 } catch (error) {
                   setNotice(`重试失败：${error instanceof Error ? error.message : String(error)}`)
                 }

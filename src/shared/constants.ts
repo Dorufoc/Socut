@@ -12,7 +12,9 @@ export const USER_DATA_DIRS = {
   projects: 'projects',
   logs: 'logs',
   /** v2：素材卡片缩略图缓存（与 media 池 id 同名 jpg） */
-  thumbs: 'thumbs'
+  thumbs: 'thumbs',
+  /** v5：媒体片段时间帧预览条（Thumbnail Strip）长图缓存，按 素材+区间+格数 命名 */
+  strips: 'strips'
 } as const
 
 export const FONTS_MANIFEST_FILE = 'fonts.json'

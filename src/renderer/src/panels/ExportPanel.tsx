@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactElement } from 'react'
-import { DEFAULT_FPS, RESOLUTION_PRESETS, fpsToString } from '@shared/constants'
+import { DEFAULT_FPS, fpsToString } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { formatBytes } from '@shared/sizeEstimate'
 import type { ExportKind, RenderJobSpec, SizeEstimate, TransparentCodec } from '@shared/types'
@@ -24,7 +24,6 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
   const exportScope = useUiStore((state) => state.exportScope)
   const setExportScope = useUiStore((state) => state.setExportScope)
   const setNotice = useUiStore((state) => state.setNotice)
-  const uiMode = useUiStore((state) => state.uiMode)
   const { start } = useExportJob()
 
   const [outputDir, setOutputDir] = useState<string>('')
@@ -229,8 +228,8 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
               value={frameDelivery}
               onChange={(event) => setFrameDelivery(event.target.value as 'pipe' | 'pngSequence')}
             >
-              <option value="pipe">管道直送 stdin（主路径）</option>
-              <option value="pngSequence">PNG 序列落盘（回退 / 便于排查）</option>
+              <option value="pipe" title="帧直接写入 FFmpeg stdin，不落盘">管道直送</option>
+              <option value="pngSequence" title="帧先落盘再编码，用于排查">PNG 序列落盘</option>
             </select>
           </label>
 
@@ -242,55 +241,40 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
               disabled={frameDelivery !== 'pipe'}
               onChange={(event) => setPipeTransport(event.target.value as 'raw' | 'png')}
             >
-              <option value="raw">未压缩 RGBA（默认，1080p30/10s 约 7 秒）</option>
-              <option value="png">带 alpha 的 PNG（字节少，但每帧多 ~30ms 压缩）</option>
+              <option value="raw" title="默认；1080p30/10s 约 7 秒">未压缩 RGBA</option>
+              <option value="png" title="字节少，但每帧多约 30ms 压缩">PNG（带 alpha）</option>
             </select>
           </label>
 
           <label className="field">
             <span className="field__label">透明出口编码</span>
             <select className="select" value={codec} onChange={(event) => setCodec(event.target.value as TransparentCodec)}>
-              <option value="prores4444">ProRes 4444（yuva444p10le）</option>
-              <option value="qtrle">qtrle 无损 RGBA（兼容模式）</option>
+              <option value="prores4444" title="yuva444p10le">ProRes 4444</option>
+              <option value="qtrle" title="无损 RGBA，兼容性最好">qtrle 无损</option>
             </select>
           </label>
 
           {/* 计划 §6：直接管道合成是可选后端，只在中间 MOV 真的成问题时开放勾选 */}
-          <label className="switch" title={directPipeAllowed ? '' : '仅在磁盘不足或 span > 5 分钟时可勾选'}>
+          <label className="switch" title={directPipeAllowed ? '跳过中间 MOV，直接管道交给 FFmpeg' : '默认关闭；磁盘不足或时长超 5 分钟时可勾选'}>
             <input
               type="checkbox"
               checked={directPipe && directPipeAllowed}
               disabled={!directPipeAllowed}
               onChange={(event) => setDirectPipe(event.target.checked)}
             />
-            <span>直接管道合成（不落中间 MOV）</span>
+            <span>直接管道合成</span>
           </label>
-          <span className="hint">
-            {directPipeAllowed
-              ? diskShort
-                ? '已开启条件：目标盘空间不足预估 ×1.5'
-                : '已开启条件：span 超过 5 分钟'
-              : '默认关闭（两阶段法）；磁盘不足或 span > 5 分钟时可勾选'}
-          </span>
 
           <button type="button" className="btn btn--block" disabled={baseDisabled || gate.blocked} onClick={() => void run('pngSequence')}>
             {TEXT.export.startPng}
           </button>
-
-          {uiMode === 'advanced' ? (
-            <div className="hint">
-              分辨率档：{RESOLUTION_PRESETS.map((preset) => preset.label).join(' / ')}
-            </div>
-          ) : null}
         </div>
       </Expander>
 
-      {gate.blocked ? (
-        <InfoBar tone="warning" message={`门禁：${gate.reason}（规格 §6：未确认不可继续）`} />
-      ) : null}
+      {gate.blocked ? <InfoBar tone="warning" message={gate.reason ?? '门禁未确认'} /> : null}
       {mediaMissing ? <InfoBar tone="error" message={TEXT.refVideoMissing.notice} /> : null}
       {!ffmpegAvailable ? <InfoBar tone="error" message="FFmpeg 不可用，导出已禁用" /> : null}
-      {exportScope === 'selected' ? <p className="hint">请先在时间轴选中一个片段。</p> : null}
+      {exportScope === 'selected' ? <p className="hint">请先选中一个片段</p> : null}
     </section>
   )
 }

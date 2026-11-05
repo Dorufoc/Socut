@@ -1,4 +1,13 @@
-/** 中文文案集中（模态提示、进度、错误）。规格 §6 的模态文案必须逐字使用。 */
+/**
+ * 界面文案集中（模态提示、进度、错误）。
+ *
+ * 两条文案纪律：
+ * 1. **规格 §6 的模态文案必须逐字使用**（非 16:9 / HDR / VFR / 大体积导出 / 文件不可用），
+ *    它们是验收证据的一部分，不参与下面的精简。
+ * 2. 其余按商业软件口径写：**标签短、说明少、一处只说一次**。
+ *    解释性内容只在 hover（title）里出现，面板里不放常驻说明书；
+ *    不写规格编号、FFmpeg 参数名、「分支/令牌/广播级」这类内部术语。
+ */
 export const TEXT = {
   appTitle: 'FocusNews 新闻字幕条',
 
@@ -52,8 +61,8 @@ export const TEXT = {
     resolution: '分辨率',
     fps: '帧率',
     followRef: '跟随参考视频',
-    audioCopy: '音频：直接复制（-c:a copy）',
-    audioAac: '音频：转码为 AAC 192k',
+    audioCopy: '音频：直接复制',
+    audioAac: '音频：转码 AAC 192k',
     audioTranscoded: '参考音频不可直接复制，已转码为 AAC 192k。',
     audioNone: '参考视频无音轨，输出无声。',
     estimate: '预估体积',
@@ -78,18 +87,35 @@ export const TEXT = {
     removeClip: '删除片段',
     /** v2 媒体轨 */
     splitClip: '拆分媒体段',
+    splitHint: '在播放头处拆分（Ctrl+B）',
     removeMediaClip: '删除媒体段',
-    emptyMedia: '媒体轨为空：从素材库把卡片拖上来，或导入时自动铺满全段。',
+    emptyMedia: '空轨：从素材库拖入',
     inPoint: '入点',
     outPoint: '出点',
     duration: '时长',
-    snapHint: '入出点已吸附到当前预览帧率的帧边界',
-    empty: '尚无片段，点击「新建片段」开始。'
+    empty: '暂无片段',
+    /** v4：字幕轨窄示意条的悬停读数（只给三个时间，不写操作说明） */
+    stripHint: (start: string, end: string, current: string) =>
+      `入点 ${start} → 出点 ${end} · 当前 ${current}`
+  },
+
+  /** 左侧「字幕」Tab：按时间顺序列出全部标题 */
+  captions: {
+    tab: '字幕',
+    title: '字幕',
+    count: (n: number) => `${n} 条`,
+    empty: '暂无字幕条',
+    emptyHint: '点「新建片段」或在预览里点选',
+    hint: '选中并跳到入点',
+    onAir: '正在显示',
+    noTitle: '未填写',
+    noSubtitle: '未填写'
   },
 
   // 检查器
   inspector: {
     preset: '预设样式',
+    presetCount: (n: number) => `${n} 套`,
     title: '主标题',
     subtitle: '副标题',
     text: '文字',
@@ -104,21 +130,29 @@ export const TEXT = {
     inDuration: '入场（秒）',
     outDuration: '出场（秒）',
     easing: '缓动',
-    textReveal: '逐字过渡跨度（字）',
+    textReveal: '逐字过渡（字）',
     /** 右侧「当前字幕条」检查器 */
     selectedClip: '当前字幕条',
     noneSelected: '未选择片段',
-    noneSelectedHint: '在时间轴点选一个片段，或直接点预览里的字幕条。',
+    noneSelectedHint: '点时间轴或预览选择一条',
     fontSizeTitle: '主标题字号',
     fontSizeSubtitle: '副标题字号',
-    fontScaleHint: '按预设字号缩放，仍受可读性硬上限约束',
-    applyAll: '把样式应用到全部字幕条',
-    applyAllHint: '预设 / 配色 / 字体 / 字号 / 动画全部复制，文字内容与入出点保留',
+    fontScaleHint: '相对预设字号缩放，受可读上限约束',
+    applyAll: '应用到全部',
+    applyAllHint: '复制样式到全部，文字与入出点不变',
     applyAllConfirmTitle: '应用到全部字幕条',
-    applyAllConfirmBody: (count: number) =>
-      `将把当前片段的预设、配色、字体、字号与动画复制到其余 ${count} 个字幕条，文字内容与入出点不变。`,
-    applyAllDone: (count: number) => `已应用到其余 ${count} 个字幕条`,
-    applyAllNoTarget: '工程里只有这一个片段，无需应用',
+    applyAllConfirmBody: (count: number) => `把当前样式复制到其余 ${count} 条；文字与入出点不变。`,
+    applyAllDone: (count: number) => `已应用到其余 ${count} 条`,
+    applyAllNoTarget: '只有一条字幕条，无需应用',
+    /** 切预设 / 清除自定义 */
+    customized: (count: number) => `已自定义 ${count} 项`,
+    resetAllCustom: '恢复预设默认',
+    resetAllCustomHint: '清除本条自定义，回到预设默认',
+    resetAllCustomTitle: '恢复预设默认',
+    resetAllCustomBody: (count: number) => `清除本条 ${count} 项自定义，回到预设默认；文字与入出点不变。`,
+    resetAllCustomDone: '已恢复预设默认',
+    presetSameTitle: '重新应用当前预设',
+    presetSameBody: (count: number) => `将清除本条 ${count} 项自定义，回到预设默认。`,
     tokens: {
       primary: '主色',
       accent: '强调色',
@@ -126,14 +160,16 @@ export const TEXT = {
       secondaryText: '副标题色',
       barBackground: '方框背景'
     },
-    resetTokens: '恢复预设配色'
+    resetTokens: '恢复预设配色',
+    resetTokensHint: '只回到预设的颜色与透明度',
+    fontFixedByPreset: (roles: string) => `该预设锁定了${roles}字体`
   },
 
   fonts: {
     import: '导入 TTF 字体',
     builtin: '内置',
     user: '用户导入',
-    loading: '字体加载中…导出暂时不可用',
+    loading: '字体加载中，导出暂不可用',
     remove: '移除',
     removeBuiltinForbidden: '内置字体不可移除',
     importFailed: '字体导入失败',
@@ -151,9 +187,9 @@ export const TEXT = {
   },
 
   errors: {
-    ffmpegMissing: (path: string) => `未找到 FFmpeg：${path}。请先执行 npm run fetch:ffmpeg。`,
+    ffmpegMissing: (path: string) => `未找到 FFmpeg：${path}（请执行 npm run fetch:ffmpeg）`,
     ffmpegExited: (code: number | null, tail: string) => `FFmpeg 异常退出（${code ?? '未知'}）。${tail}`,
-    alphaDropped: 'FFmpeg 提示所选 ProRes profile 不会编码 alpha（导出会被降级为不透明）。请检查编码参数。',
+    alphaDropped: '所选 ProRes profile 不编码 alpha，导出会被降级为不透明。请检查编码参数。',
     verifyFailed: (detail: string) => `产物校验未通过：${detail}`,
     frameTimeout: (index: number) => `第 ${index} 帧渲染超时，任务中止。`,
     diskFull: (need: string) => `磁盘可用空间不足，预计需要 ${need}。`,
@@ -165,13 +201,13 @@ export const TEXT = {
     pause: '暂停',
     fit: '等比',
     actual: '1:1',
-    compactMode: '紧凑分支（竖屏）',
+    compactMode: '紧凑（竖屏）',
     ultrawideMode: '超宽上限',
-    safeArea: '显示安全区',
-    pickHint: '点预览里的字幕条即可选中并编辑'
+    safeArea: '安全区',
+    pickHint: '点选字幕条'
   },
 
-  /** 主界面伸缩布局：区域名同时用于分隔线实时读数与无障碍 valuetext */
+  /** 主界面伸缩布局：区域名用于分隔线实时读数与无障碍朗读 */
   layout: {
     labels: {
       left: '素材栏',
@@ -180,11 +216,12 @@ export const TEXT = {
       stage: '预览区',
       timeline: '时间轴'
     },
-    splitterLeft: '拖动调整素材栏与预览的宽度（双击恢复默认，方向键微调）',
-    splitterRight: '拖动调整预览与字幕编辑的宽度（双击恢复默认，方向键微调）',
-    splitterTimeline: '拖动调整预览区与时间轴的高度（双击恢复默认，方向键微调）',
-    reset: '恢复默认布局',
-    resetHint: '布局比例记住在本机，下次启动自动恢复'
+    splitterLeft: '素材栏 / 预览',
+    splitterRight: '预览 / 字幕编辑',
+    splitterTimeline: '预览区 / 时间轴',
+    splitterHelp: '拖拽调整，双击复位',
+    reset: '默认布局',
+    resetHint: '布局比例记在本机，下次启动自动恢复'
   }
 } as const
 

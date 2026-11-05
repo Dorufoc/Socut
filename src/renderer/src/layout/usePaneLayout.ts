@@ -180,6 +180,7 @@ export function usePaneLayout(): PaneLayout {
         edge,
         orientation: spec.orientation,
         label: spec.label,
+        help: TEXT.layout.splitterHelp,
         value: spec.value,
         min: spec.min,
         max: spec.max,

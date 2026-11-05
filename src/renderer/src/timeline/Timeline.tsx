@@ -16,6 +16,8 @@ import { buildTicks, pickStep, pxToSec, secToPx } from './ruler'
  * 尺规与轨道空白处支持按住拖拽刮擦（pointer capture）：按下即定位当前帧，
  * 持续拖动时预览跟随鼠标位置逐帧变化；片段卡片自身的拖拽不受影响。
  * 素材库卡片可拖入媒体轨：拖拽悬停时高亮落点竖线，放下即在吸附位置插入片段。
+ * v4：字幕轨改为「窄示意条」——一条卡的摆位就是该字幕在当前画面的入点→出点，
+ * 标签只放主标题，条内细游标标出播放头落在区间的哪里（位置关系与全局播放头同源）。
  */
 
 type ScrubElement = HTMLDivElement
@@ -161,7 +163,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             type="button"
             className="btn btn--sm"
             disabled={!canSplit}
-            title="在播放头处拆分当前媒体片段（Ctrl+B）；两段都须不短于最小时长"
+            title={TEXT.timeline.splitHint}
             onClick={() => {
               const rightId = splitAtFrame(displayTime)
               if (!rightId) setNotice('播放头不在可拆分的媒体片段内，或拆出的半段不足最短时长')
@@ -183,9 +185,6 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
         <div className="timeline__meta mono">
           <span className="timeline__timecode">{secondsToTimecode(displayTime, project.fps)}</span>
           <span className="muted">总时长 {durationSec.toFixed(2)}s</span>
-          <span className="muted timeline__snap-hint" title={TEXT.timeline.snapHint}>
-            {TEXT.timeline.snapHint}
-          </span>
         </div>
       </div>
 
@@ -238,6 +237,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             onSelect={selectMediaClip}
             onMove={(start) => moveMediaClip(clip.id, start)}
             onTrim={(patch) => trimMediaClip(clip.id, patch)}
+            onSeek={seekTo}
           />
         ))}
         {dropSec !== null ? (
@@ -274,6 +274,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             widthPx={widthPx}
             fps={project.fps}
             selected={clip.id === selectedClipId}
+            playheadSec={displayTime}
             onSelect={selectClip}
             onChangeTimes={(start, end) => setClipTimes(clip.id, start, end)}
           />

@@ -5,6 +5,7 @@ import { durationSecToFrames, framesToDurationSec } from '@shared/fps'
 import { TEXT } from '@shared/i18n'
 import type { EasingKey } from '@shared/types'
 import { selectedClip, useProjectStore } from '../state/projectStore'
+import { useRevealClip } from '../hooks/useRevealClip'
 
 /**
  * 动画节奏面板（规格 §7）。
@@ -17,22 +18,30 @@ export function AnimationPanel(): ReactElement {
   const clip = useProjectStore(selectedClip)
   const fps = useProjectStore((state) => state.project.fps)
   const updateClip = useProjectStore((state) => state.updateClip)
+  const reveal = useRevealClip()
   if (!clip) {
     return <p className="hint">未选择片段。</p>
+  }
+
+  /** 节奏类参数写回后把播放头带到「看得见这个节奏」的帧（入场完成后第一帧） */
+  const patch = (next: Parameters<typeof updateClip>[1]): void => {
+    updateClip(clip.id, next)
+    reveal(clip.id)
   }
 
   // 1 帧对应的秒数：既作为 <input step>，也作为最小值，避免写入不足一帧的时长
   const frameSec = framesToDurationSec(1, fps)
   const inFrames = durationSecToFrames(clip.animation.inDuration, fps)
   const outFrames = durationSecToFrames(clip.animation.outDuration, fps)
-  const ratio = outFrames / Math.max(1, inFrames)
+  /** 区间限制不占版面，只在 hover 时给（min/max 本身已由 input 强制） */
+  const rangeHint = `最短 ${Number(frameSec.toFixed(4))}s · 最长 ${MAX_ANIMATION_SEC}s`
 
   const setSeconds = (key: 'inDuration' | 'outDuration', sec: number): void => {
     if (!Number.isFinite(sec)) return
     const clamped = Math.max(frameSec, Math.min(MAX_ANIMATION_SEC, sec))
     // 吸附到当前帧率的整帧：秒→帧→秒，UI 与工程文件都保持帧边界一致
     const snapped = framesToDurationSec(durationSecToFrames(clamped, fps), fps)
-    updateClip(clip.id, { animation: { ...clip.animation, [key]: snapped } })
+    patch({ animation: { ...clip.animation, [key]: snapped } })
   }
 
   const inValue = Number(clip.animation.inDuration.toFixed(4))
@@ -50,6 +59,7 @@ export function AnimationPanel(): ReactElement {
             max={MAX_ANIMATION_SEC}
             step={Number(frameSec.toFixed(4))}
             value={inValue}
+            title={rangeHint}
             onChange={(event) => setSeconds('inDuration', Number(event.target.value))}
           />
         </label>
@@ -62,6 +72,7 @@ export function AnimationPanel(): ReactElement {
             max={MAX_ANIMATION_SEC}
             step={Number(frameSec.toFixed(4))}
             value={outValue}
+            title={rangeHint}
             onChange={(event) => setSeconds('outDuration', Number(event.target.value))}
           />
         </label>
@@ -73,8 +84,7 @@ export function AnimationPanel(): ReactElement {
         <span className="anim-meter__out" style={{ flexGrow: outFrames }} />
       </div>
       <p className="hint mono">
-        按当前帧率折算：入场 {inFrames} 帧 · 出场 {outFrames} 帧 · 比 {ratio.toFixed(2)}
-        <span className="muted">（上限 {MAX_ANIMATION_SEC}s，最短 1 帧）</span>
+        入场 {inFrames} 帧 · 出场 {outFrames} 帧
       </p>
 
       <label className="field">
@@ -83,7 +93,7 @@ export function AnimationPanel(): ReactElement {
           className="select"
           value={clip.animation.easing}
           onChange={(event) =>
-            updateClip(clip.id, { animation: { ...clip.animation, easing: event.target.value as EasingKey } })
+            patch({ animation: { ...clip.animation, easing: event.target.value as EasingKey } })
           }
         >
           {EASING_KEYS.map((key) => (
@@ -102,7 +112,7 @@ export function AnimationPanel(): ReactElement {
           max={6}
           value={clip.animation.textRevealFrames}
           onChange={(event) =>
-            updateClip(clip.id, {
+            patch({
               animation: { ...clip.animation, textRevealFrames: Math.max(1, Number(event.target.value)) }
             })
           }
@@ -113,7 +123,7 @@ export function AnimationPanel(): ReactElement {
         <input
           type="checkbox"
           checked={clip.styleOverrides.compact === true}
-          onChange={(event) => updateClip(clip.id, { styleOverrides: { compact: event.target.checked } })}
+          onChange={(event) => patch({ styleOverrides: { compact: event.target.checked } })}
         />
         <span>强制竖屏紧凑分支</span>
       </label>

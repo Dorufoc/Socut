@@ -89,7 +89,11 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
           <span className="empty-state__glyph" aria-hidden="true">
             ▶
           </span>
-          <span>素材池为空。导入后可把卡片拖到时间轴媒体轨上排布多段参考视频。</span>
+          <span>
+            素材池为空
+            <br />
+            <span className="muted">导入后可拖到媒体轨</span>
+          </span>
         </div>
       ) : null}
 
@@ -147,7 +151,7 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
                       className="btn btn--sm"
                       disabled={missing}
                       onClick={() => onPlaceAtPlayhead(item.id)}
-                      title="把整段素材放到播放头位置"
+                      title="整段放入播放头处"
                     >
                       放到播放头
                     </button>
@@ -161,7 +165,7 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
                 </div>
               </div>
               {uiMode === 'advanced' ? (
-                <Expander title="枚级参数" summary={`${item.meta.videoCodec}${flags.vfr ? ` · VFR·${item.vfrPolicy}` : ''}`}>
+                <Expander title="素材参数" summary={`${item.meta.videoCodec}${flags.vfr ? ' · VFR' : ''}`}>
                   <div className="stack stack--tight">
                     <div className="row row--wrap">
                       <span className="chip mono">avg {item.meta.avgFrameRate.num}/{item.meta.avgFrameRate.den}</span>
@@ -191,7 +195,7 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
                       </button>
                     ) : null}
                     <label className="field">
-                      <span className="field__label">布局分支</span>
+                      <span className="field__label">布局模式</span>
                       <select
                         className="select select--compact"
                         value={item.compactMode}
@@ -199,10 +203,10 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
                           useProjectStore.getState().setMediaCompactMode(item.id, event.target.value as MediaItem['compactMode'])
                         }
                       >
-                        <option value="auto">自动（按显示宽高比）</option>
-                        <option value="standard">标准 16:9</option>
-                        <option value="compact">竖屏紧凑</option>
-                        <option value="ultrawide">超宽上限</option>
+                        <option value="auto">自动</option>
+                        <option value="standard">标准</option>
+                        <option value="compact">紧凑</option>
+                        <option value="ultrawide">超宽</option>
                       </select>
                     </label>
                   </div>
@@ -212,8 +216,6 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
           )
         })}
       </div>
-
-      <p className="hint">{TEXT.export.followRef}：叠加导出按各段素材的源参数逐段 trim 后拼接。</p>
     </section>
   )
 }

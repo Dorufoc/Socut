@@ -16,6 +16,7 @@ import type {
   WatermarkSettings
 } from '@shared/types'
 import { getPreset } from '@shared/presets'
+import { clipWithPresetDefaults, hasKeys } from '@shared/clipStyle'
 
 /** 工程状态（规格 §4.6）。所有时间值在写入时已吸附到帧边界，存储仍为秒。 */
 
@@ -60,6 +61,8 @@ export interface ProjectState {
    */
   applyStyleToAll: (sourceId: string) => number
   updateClip: (id: string, patch: Partial<Pick<SubtitleClip, 'content' | 'presetId' | 'fontId' | 'animation' | 'styleOverrides'>>) => void
+  /** 清除本条全部自定义参数，回到当前预设的默认配置（文字与入出点不动） */
+  resetClipStyle: (id: string) => void
   setClipTimes: (id: string, startTime: number, endTime: number) => void
 
   // ---------------------------------------------------------------- v2 素材池
@@ -281,19 +284,29 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const state = get()
     const clips = state.project.clips.map((clip) => {
       if (clip.id !== id) return clip
-      const next: SubtitleClip = { ...clip }
-      if (patch.content) next.content = { ...clip.content, ...patch.content }
-      if (patch.styleOverrides) next.styleOverrides = mergeOverrides(clip.styleOverrides, patch.styleOverrides)
-      if (patch.fontId) next.fontId = patch.fontId
-      if (patch.animation) next.animation = { ...clip.animation, ...patch.animation }
-      if (patch.presetId) {
-        next.presetId = patch.presetId
-        // 预设自带节奏与字体角色：切预设时把动画回到预设声明值
-        const preset = getPreset(patch.presetId as PresetId)
-        next.animation = { ...preset.animation }
-      }
-      return next
+      /**
+       * 切预设（含重复点当前预设）= 即时应用该预设并把**全部**自定义参数回到它的默认配置：
+       * 配色/透明度/渐变/字号缩放/紧凑清空、字体回默认、动画回预设声明的节奏；文字与入出点不动。
+       * 同一次调用里显式传了其他字段时，仍按调用者给的叠加在上面（不让 patch 默默丢字段）。
+       */
+      const base = patch.presetId
+        ? clipWithPresetDefaults({ ...clip }, getPreset(patch.presetId as PresetId))
+        : { ...clip }
+      if (patch.content) base.content = { ...base.content, ...patch.content }
+      if (patch.styleOverrides) base.styleOverrides = mergeOverrides(base.styleOverrides, patch.styleOverrides)
+      if (patch.fontId) base.fontId = patch.fontId
+      if (patch.animation) base.animation = { ...base.animation, ...patch.animation }
+      return base
     })
+    set({ project: withClips(state.project, clips), revision: state.revision + 1 })
+  },
+
+  /** 清除本条全部自定义，回到当前预设的默认配置（与切预设同一口径，不碰文字与入出点）。 */
+  resetClipStyle: (id) => {
+    const state = get()
+    const clips = state.project.clips.map((clip) =>
+      clip.id === id ? clipWithPresetDefaults(clip, getPreset(clip.presetId)) : clip
+    )
     set({ project: withClips(state.project, clips), revision: state.revision + 1 })
   },
 
@@ -540,13 +553,41 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
 function mergeOverrides(base: StyleOverrides, patch: StyleOverrides): StyleOverrides {
   const next: StyleOverrides = { ...base }
-  if (patch.tokens) next.tokens = { ...(base.tokens ?? {}), ...patch.tokens }
-  if (patch.barOpacity !== undefined) next.barOpacity = patch.barOpacity
+  /**
+   * `tokens` / `fontScale` 是**整组替换**（不是逐键合并）：面板负责交回「完整的自定义集合」，
+   * 等于预设声明的键不在里面（见 shared/clipStyle 的差集函数）。
+   * 逐键合并会把旧预设的陈旧同值覆盖留下来，切预设后它仍然压住新预设的配色。
+   */
+  if (patch.tokens !== undefined) {
+    if (hasKeys(patch.tokens)) next.tokens = patch.tokens
+    else delete next.tokens
+  }
+  if (patch.barOpacity !== undefined) {
+    // 回到不透明（1）等于没有覆盖，整键删掉而不是留个 1
+    if (Math.abs(patch.barOpacity - 1) >= 0.005) next.barOpacity = patch.barOpacity
+    else delete next.barOpacity
+  }
   if (patch.titleGradient) next.titleGradient = { ...base.titleGradient, ...patch.titleGradient }
   if (patch.subtitleGradient) next.subtitleGradient = { ...base.subtitleGradient, ...patch.subtitleGradient }
-  if (patch.compact !== undefined) next.compact = patch.compact
-  if (patch.fontScale) next.fontScale = { ...(base.fontScale ?? {}), ...patch.fontScale }
+  if (patch.compact !== undefined) {
+    if (patch.compact) next.compact = true
+    else delete next.compact
+  }
+  if (patch.fontScale !== undefined) {
+    // 100% 就是「没缩放」：这一层不依赖预设就能判定，直接在 store 层抹掉，
+    // 避免面板/旧工程递上来的 {title:1} 之类噪声永久占住一个自定义席位
+    const scales: { title?: number; subtitle?: number } = {}
+    if (isScaled(patch.fontScale.title)) scales.title = patch.fontScale.title
+    if (isScaled(patch.fontScale.subtitle)) scales.subtitle = patch.fontScale.subtitle
+    if (hasKeys(scales)) next.fontScale = scales
+    else delete next.fontScale
+  }
   return next
+}
+
+/** 字号缩放是否偏离 100%（与滑杆粒度一致：小于 0.5% 的抖动不算自定义） */
+function isScaled(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && Math.abs(value - 1) >= 0.005
 }
 
 export function selectedClip(state: ProjectState): SubtitleClip | null {

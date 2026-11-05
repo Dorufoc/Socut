@@ -3,7 +3,6 @@ import {
   DEFAULT_CLIP_DURATION_SEC,
   FPS_PRESETS,
   RESOLUTION_PRESETS,
-  fpsToRatio,
   fpsToString
 } from '@shared/constants'
 import { createClip, createDefaultProject, normalizeProject } from '@shared/projectSchema'
@@ -36,13 +35,15 @@ import { useMediaIntegrity } from './hooks/useMediaIntegrity'
 import { FontLoadingOverlay } from './dialog/FontLoadingOverlay'
 import { CompatModal } from './dialog/CompatModal'
 import { MediaLibraryPanel } from './panels/MediaLibraryPanel'
+import { CaptionListPanel } from './panels/CaptionListPanel'
 import { WatermarkPanel } from './panels/WatermarkPanel'
 
 /**
- * 主界面（WinUI 3 / Fluent）：标题栏 + 命令栏 + 左侧 Tab 壳（素材库/水印/导出/进度） + 中央预览 + 右侧字幕条检查器 + 双轨时间轴。
+ * 主界面（WinUI 3 / Fluent）：标题栏 + 命令栏 + 左侧 Tab 壳（素材库/水印/字幕/导出/进度） + 中央预览 + 右侧字幕条检查器 + 双轨时间轴。
  * 默认基础模式，只暴露高频入口；配色、字体、动画、编码与工程分辨率等低频项收进高级模式。
  * v2：左侧不再堆叠三块面板，同一时刻只展开当前 Tab；选中项写回 project.ui.leftTab 持久化。
  * v3：四条区域之间的三条分隔线可拖拽（usePaneLayout + Splitter），比例存本机 localStorage，冷启动恢复。
+ * v4：左侧新增「字幕」Tab（按时间顺序的标题列表，点击 = 选中 + 跳到入点）；时间轴字幕轨改为窄示意条。
  */
 
 export function App(): ReactElement {
@@ -91,6 +92,15 @@ export function App(): ReactElement {
   const registerHandle = useCallback((handle: { seekTime: (sec: number) => void; seekFrame: (f: number) => void }) => {
     seekRef.current = handle.seekTime
   }, [])
+
+  /**
+   * 把播放头跳转能力交给 uiStore：样式面板（配色/字体/动画/预设）改完参数后
+   * 用它把播放头落到「能看清当前样式」的帧上，避免预览看着没反应（片段入点在别处时）。
+   */
+  useEffect(() => {
+    useUiStore.getState().setSeekHandler(seekTo)
+    return () => useUiStore.getState().setSeekHandler(null)
+  }, [seekTo])
 
   /**
    * 快捷键（阶段 6）：
@@ -362,7 +372,7 @@ export function App(): ReactElement {
               type="button"
               className={`segmented__item${uiMode === 'basic' ? ' segmented__item--active' : ''}`}
               aria-pressed={uiMode === 'basic'}
-              title="基础模式：只显示常用入口"
+              title="只显示常用入口"
               onClick={() => setUiMode('basic')}
             >
               基础
@@ -371,7 +381,7 @@ export function App(): ReactElement {
               type="button"
               className={`segmented__item${uiMode === 'advanced' ? ' segmented__item--active' : ''}`}
               aria-pressed={uiMode === 'advanced'}
-              title="高级模式：配色、字体、动画与编码选项"
+              title="配色、字体、动画与编码选项"
               onClick={() => setUiMode('advanced')}
             >
               高级
@@ -451,6 +461,16 @@ export function App(): ReactElement {
               <button
                 type="button"
                 role="tab"
+                aria-selected={leftTab === 'captions'}
+                className={`rail__tab${leftTab === 'captions' ? ' rail__tab--active' : ''}`}
+                onClick={() => setLeftTab('captions')}
+              >
+                {TEXT.captions.tab}
+                <span className="rail__tab-badge">{project.clips.length > 0 ? project.clips.length : ''}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={leftTab === 'export'}
                 className={`rail__tab${leftTab === 'export' ? ' rail__tab--active' : ''}`}
                 onClick={() => setLeftTab('export')}
@@ -471,6 +491,7 @@ export function App(): ReactElement {
             <div className="rail__panels">
               {leftTab === 'media' ? <MediaLibraryPanel /> : null}
               {leftTab === 'watermark' ? <WatermarkPanel /> : null}
+              {leftTab === 'captions' ? <CaptionListPanel /> : null}
               {leftTab === 'export' ? (
                 <ExportPanel spec={spec} fontLoading={fontLoading} ffmpegAvailable={appInfo?.ffmpegAvailable ?? false} />
               ) : null}
@@ -540,23 +561,21 @@ export function App(): ReactElement {
         <span className="mono">FocusNews {appInfo?.version ?? ''}</span>
         <span className="muted mono">{appInfo ? appInfo.ffmpegSource : 'FFmpeg 检测中…'}</span>
         <span className="muted mono">
-          {project.resolution.width}×{project.resolution.height} · {fpsToString(project.fps)} ·{' '}
-          {fpsToRatio(project.fps).toFixed(3)}
+          {project.resolution.width}×{project.resolution.height} · {fpsToString(project.fps)}
         </span>
         <span className="statusbar__spacer" />
         {layout.ready ? (
           <span
             className="muted mono"
-            title={`${TEXT.layout.labels.left} ${layout.sizes.left} / ${TEXT.layout.labels.center} ${layout.sizes.center} / ${TEXT.layout.labels.right} ${layout.sizes.right} / ${TEXT.layout.labels.stage} ${layout.sizes.stage} / ${TEXT.layout.labels.timeline} ${layout.sizes.timeline}`}
+            title={`${TEXT.layout.labels.left} ${layout.sizes.left} · ${TEXT.layout.labels.center} ${layout.sizes.center} · ${TEXT.layout.labels.right} ${layout.sizes.right} · ${TEXT.layout.labels.stage} ${layout.sizes.stage} · ${TEXT.layout.labels.timeline} ${layout.sizes.timeline}`}
           >
-            {TEXT.layout.labels.left} {layout.sizes.left} · {TEXT.layout.labels.right} {layout.sizes.right} ·{' '}
-            {TEXT.layout.labels.timeline} {layout.sizes.timeline}
+            {layout.sizes.left} / {layout.sizes.right} / {layout.sizes.timeline}
           </span>
         ) : null}
         <button
           type="button"
           className="btn btn--sm btn--subtle"
-          title={`${TEXT.layout.resetHint}（任一分隔线双击即恢复）`}
+          title={TEXT.layout.resetHint}
           onClick={layout.resetLayout}
         >
           {TEXT.layout.reset}

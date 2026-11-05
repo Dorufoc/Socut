@@ -108,7 +108,9 @@ export function WatermarkPanel(): ReactElement {
             ✎
           </span>
           <span>
-            还没有水印。导入一张 PNG（建议带透明通道）后，叠加导出会把它放在画面左上角；透明字幕条出口不含水印。
+            还没有水印
+            <br />
+            <span className="muted">导入后叠在画面左上角</span>
           </span>
         </div>
       ) : (
@@ -144,10 +146,7 @@ export function WatermarkPanel(): ReactElement {
       )}
 
       {settings && readiness === 'unavailable' ? (
-        <InfoBar
-          tone="error"
-          message="图片当前不可读（已移动、删除或扩展名不支持）。请重新导入，或先关掉开关，否则叠加导出会被拦下。"
-        />
+        <InfoBar tone="error" message="图片不可读，请重新导入或先关掉开关" />
       ) : null}
 
       {baseBox && outBox ? (
@@ -171,24 +170,15 @@ export function WatermarkPanel(): ReactElement {
         </div>
       ) : null}
 
-      <p className="hint">
-        显示尺寸恒为原图 {percent}%（按 1080P 定义），输出非 1080P 时按高度比等比换算；
-        叠加导出以媒体分辨率为准，因此上表可能比实际画面略大或略小。
-      </p>
-
       {settings && uiMode === 'advanced' ? (
-        <Expander title="换算细节" summary="1080P 基准 / 尺寸与边距同源">
+        <Expander title="换算细节" summary={`原图 ${percent}% · 1080P 基准`}>
           <div className="stack stack--tight">
             <div className="row row--wrap">
               <span className="chip mono">尺寸系数 {WATERMARK_DISPLAY_SCALE}</span>
               <span className="chip mono">边距 {WATERMARK_MARGIN_PX}px</span>
               <span className="chip mono">基准 {WATERMARK_BASE_RESOLUTION.width}×{WATERMARK_BASE_RESOLUTION.height}</span>
             </div>
-            <p className="hint">
-              滤镜链为 <code>[n:v]format=rgba,scale=W:H[wm]</code> +{' '}
-              <code>[vsub][wm]overlay=X:Y</code>，永远叠在字幕条之上；
-              调色板 PNG 先转 rgba 以保住透明通道。
-            </p>
+            <p className="hint">输出非 1080P 时按高度等比换算；叠加出口以媒体分辨率为准。</p>
           </div>
         </Expander>
       ) : null}

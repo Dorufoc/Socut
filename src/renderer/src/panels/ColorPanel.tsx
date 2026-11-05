@@ -1,15 +1,22 @@
 import type { ReactElement } from 'react'
 import { COLOR_TOKEN_KEYS, isValidColor, mergeTokens, parseColor } from '@shared/colors'
+import { tokensDelta } from '@shared/clipStyle'
 import { TEXT } from '@shared/i18n'
 import { getPreset } from '@shared/presets'
-import type { ColorTokenKey, ColorTokens, GradientSpec } from '@shared/types'
+import type { ColorTokenKey, GradientSpec } from '@shared/types'
 import { selectedClip, useProjectStore } from '../state/projectStore'
+import { useRevealClip } from '../hooks/useRevealClip'
 import { Expander } from '../components/ui/Expander'
 
 /**
  * 配色面板（规格 §7：用户自定义作用于令牌层）。
  * 纯色与双色线性渐变均可用；方框背景色与透明度可调。
  * 本组件只负责内容，外层标题由检查器的 Expander 提供。
+ *
+ * 两条纪律：
+ * - **只写差集**：等于预设声明的色值不存进覆盖（旧版把合并后的整套令牌整体回写，
+ *   切预设时这些陈旧键会压住新预设的配色，看起来就像「点了预设没反应」）；
+ * - **改完就落到可见帧**：每个写回后调 reveal()，保证预览区立即反映新参数。
  */
 
 const TOKEN_LABEL: Record<ColorTokenKey, string> = {
@@ -95,6 +102,7 @@ function GradientEditor({
 export function ColorPanel(): ReactElement {
   const clip = useProjectStore(selectedClip)
   const updateClip = useProjectStore((state) => state.updateClip)
+  const reveal = useRevealClip()
   const preset = clip ? getPreset(clip.presetId) : null
   if (!clip || !preset) {
     return <p className="hint">未选择片段。</p>
@@ -102,10 +110,10 @@ export function ColorPanel(): ReactElement {
   const effective = mergeTokens(preset.tokens, clip.styleOverrides.tokens)
   const opacity = Math.round((clip.styleOverrides.barOpacity ?? 1) * 100)
 
-  /** 令牌层覆盖：只改单个键，其余保持预设声明值 */
+  /** 令牌层覆盖：只保留真正偏离预设的键，其余交给预设声明 */
   const patchToken = (key: ColorTokenKey, value: string): void => {
-    const tokens = { ...effective, [key]: value } as ColorTokens
-    updateClip(clip.id, { styleOverrides: { tokens } })
+    updateClip(clip.id, { styleOverrides: { tokens: tokensDelta(preset, clip.styleOverrides.tokens, key, value) } })
+    reveal(clip.id)
   }
 
   return (
@@ -142,7 +150,10 @@ export function ColorPanel(): ReactElement {
           max={100}
           value={opacity}
           aria-label={TEXT.inspector.barOpacity}
-          onChange={(event) => updateClip(clip.id, { styleOverrides: { barOpacity: Number(event.target.value) / 100 } })}
+          onChange={(event) => {
+            updateClip(clip.id, { styleOverrides: { barOpacity: Number(event.target.value) / 100 } })
+            reveal(clip.id)
+          }}
         />
         <span className="mono slider-row__value">{opacity}%</span>
       </div>
@@ -152,12 +163,18 @@ export function ColorPanel(): ReactElement {
           <GradientEditor
             label={`${TEXT.inspector.gradient} · ${TEXT.inspector.title}`}
             value={clip.styleOverrides.titleGradient}
-            onChange={(next) => updateClip(clip.id, { styleOverrides: { titleGradient: next } })}
+            onChange={(next) => {
+              updateClip(clip.id, { styleOverrides: { titleGradient: next } })
+              reveal(clip.id)
+            }}
           />
           <GradientEditor
             label={`${TEXT.inspector.gradient} · ${TEXT.inspector.subtitle}`}
             value={clip.styleOverrides.subtitleGradient}
-            onChange={(next) => updateClip(clip.id, { styleOverrides: { subtitleGradient: next } })}
+            onChange={(next) => {
+              updateClip(clip.id, { styleOverrides: { subtitleGradient: next } })
+              reveal(clip.id)
+            }}
           />
         </div>
       </Expander>
@@ -165,7 +182,13 @@ export function ColorPanel(): ReactElement {
       <button
         type="button"
         className="btn btn--sm"
-        onClick={() => updateClip(clip.id, { styleOverrides: { tokens: preset.tokens, barOpacity: 1 } })}
+        title="只回到预设声明的颜色与不透明度（字体、字号、动画不变）"
+        onClick={() => {
+          // 空令牌集 + barOpacity 1 等于删键（见 projectStore.mergeOverrides）：
+          // 颜色重新由预设声明接管，不会留下一个「看起来像自定义」的陈旧值
+          updateClip(clip.id, { styleOverrides: { tokens: {}, barOpacity: 1 } })
+          reveal(clip.id)
+        }}
       >
         {TEXT.inspector.resetTokens}
       </button>

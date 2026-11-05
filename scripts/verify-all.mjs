@@ -139,7 +139,7 @@ async function main() {
   for (const project of ['node', 'web', 'tests']) {
     await step(`typecheck:${project}`, node, [tsc, '--noEmit', '-p', `tsconfig.${project}.json`])
   }
-  await step('vitest（317 用例，node + dom 两套）', node, [vitest, 'run'])
+  await step('vitest（384 用例，node + dom 两套）', node, [vitest, 'run'])
 
   // --- CLI 集成冒烟（不依赖 Electron）---
   await step('CLI 冒烟：1080p30/10s 透明 MOV', node, ['scripts/smoke-export.mjs', '--width', '1920', '--height', '1080', '--fps', '30/1', '--seconds', '10'])

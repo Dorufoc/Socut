@@ -1,8 +1,10 @@
 import type { ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
 import { BRAND_FONT_IMPORT_HINTS, FONT_SCALE_MAX, FONT_SCALE_MIN } from '@shared/constants'
+import { fontScaleDelta } from '@shared/clipStyle'
 import { getPreset } from '@shared/presets'
 import { selectedClip, useProjectStore } from '../state/projectStore'
+import { useRevealClip } from '../hooks/useRevealClip'
 import { Expander } from '../components/ui/Expander'
 
 /** 字体面板（规格 §4.5）：内置 + 用户导入，片段保存 fontId 而非字体名。 */
@@ -12,6 +14,7 @@ export function FontPanel(): ReactElement {
   const fonts = useProjectStore((state) => state.fonts)
   const updateClip = useProjectStore((state) => state.updateClip)
   const setFonts = useProjectStore((state) => state.setFonts)
+  const reveal = useRevealClip()
 
   const preset = clip ? getPreset(clip.presetId) : null
   const fixedRoles = preset
@@ -20,12 +23,16 @@ export function FontPanel(): ReactElement {
 
   const scaleOf = (role: 'title' | 'subtitle'): number => clip?.styleOverrides.fontScale?.[role] ?? 1
 
-  /** 片段级字号缩放：只写本片段，缩放后仍过硬上限（见 presetResolver.clampScale） */
+  /**
+   * 片段级字号缩放：只写本片段，缩放后仍过硬上限（见 presetResolver.clampScale）。
+   * 写的是差集：回到 100% 的角色从覆盖里删键，不给下一个预设留陈旧缩放。
+   */
   const setScale = (role: 'title' | 'subtitle', value: number): void => {
     if (!clip) return
     updateClip(clip.id, {
-      styleOverrides: { fontScale: { ...(clip.styleOverrides.fontScale ?? {}), [role]: value } }
+      styleOverrides: { fontScale: fontScaleDelta(clip.styleOverrides.fontScale, role, value) }
     })
+    reveal(clip.id)
   }
 
   const builtin = fonts.filter((f) => f.source === 'builtin')
@@ -69,6 +76,7 @@ export function FontPanel(): ReactElement {
           onChange={(event) => {
             if (!clip) return
             updateClip(clip.id, { fontId: event.target.value })
+            reveal(clip.id)
           }}
         >
           <option value="">请选择</option>
@@ -80,9 +88,7 @@ export function FontPanel(): ReactElement {
         </select>
       </label>
       {fixedRoles.length > 0 ? (
-        <p className="hint">
-          当前预设为 {fixedRoles.join(' / ')} 角色固定了字体（如财经数据的等宽数字），该角色不随片段字体变化。
-        </p>
+        <p className="hint">{TEXT.inspector.fontFixedByPreset(fixedRoles.join(' / '))}</p>
       ) : null}
 
       {(['title', 'subtitle'] as const).map((role) => (
@@ -95,18 +101,23 @@ export function FontPanel(): ReactElement {
             step={5}
             value={Math.round(scaleOf(role) * 100)}
             disabled={!clip}
+            title={TEXT.inspector.fontScaleHint}
             aria-label={role === 'title' ? TEXT.inspector.fontSizeTitle : TEXT.inspector.fontSizeSubtitle}
             onChange={(event) => setScale(role, Number(event.target.value) / 100)}
           />
           <span className="mono slider-row__value">{Math.round(scaleOf(role) * 100)}%</span>
         </div>
       ))}
-      <p className="hint">{TEXT.inspector.fontScaleHint}</p>
       {clip && (scaleOf('title') !== 1 || scaleOf('subtitle') !== 1) ? (
         <button
           type="button"
           className="btn btn--sm"
-          onClick={() => updateClip(clip.id, { styleOverrides: { fontScale: { title: 1, subtitle: 1 } } })}
+          onClick={() => {
+            if (!clip) return
+            // 空集合 = 删键（见 projectStore.mergeOverrides），不留 fontScale:{1,1} 这种噪声
+            updateClip(clip.id, { styleOverrides: { fontScale: {} } })
+            reveal(clip.id)
+          }}
         >
           字号恢复 100%
         </button>
@@ -143,7 +154,7 @@ export function FontPanel(): ReactElement {
               </div>
             </div>
           ))}
-          <div className="hint">下载后点上方「导入字体」选择 TTF/OTF 即可，导入后永久生效（片段只记 fontId）。</div>
+          <div className="hint">下载后点上方「导入字体」即可。</div>
         </div>
       </Expander>
     </div>

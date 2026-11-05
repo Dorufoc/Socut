@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
+import { fpsToString } from '@shared/constants'
 import { sourceTimeOf } from '@shared/mediaClips'
 import { computeWatermarkGeometry } from '@shared/ffmpegArgs'
 import type { RenderJobSpec } from '@shared/types'
@@ -30,6 +31,9 @@ import { FontLoadingOverlay } from '../dialog/FontLoadingOverlay'
  */
 
 type RefVideoState = 'idle' | 'loading' | 'ready' | 'failed'
+
+/** 宽高比分支的内部枚举不直接上界面，换成两个字的人话。 */
+const MODE_LABEL: Record<string, string> = { standard: '标准', compact: '紧凑', ultrawide: '超宽' }
 
 export interface PreviewStageProps {
   spec: RenderJobSpec | null
@@ -252,15 +256,13 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
         <div className="stage__badges">
           {spec ? (
             <span className="chip mono">
-              {spec.width}×{spec.height} · {spec.fps.num}/{spec.fps.den} · {spec.aspectMode}
+              {spec.width}×{spec.height} · {fpsToString(spec.fps)} · {MODE_LABEL[spec.aspectMode] ?? spec.aspectMode}
             </span>
           ) : null}
-          {videoReady ? <span className="chip chip--ok">媒体轨叠加</span> : null}
-          {watermarkStyle ? <span className="chip chip--ok">水印已叠加</span> : null}
-          {videoState === 'failed' ? <span className="chip chip--warn">参考视频无法预览（编码不受支持）</span> : null}
+          {videoReady ? <span className="chip chip--ok">媒体叠加</span> : null}
+          {watermarkStyle ? <span className="chip chip--ok">水印叠加</span> : null}
+          {videoState === 'failed' ? <span className="chip chip--warn">参考视频不可预览</span> : null}
         </div>
-
-        <div className="stage__hint">{TEXT.preview.pickHint}</div>
       </div>
 
       {spec === null ? <div className="overlay-loading">正在准备渲染引擎…</div> : <FontLoadingOverlay />}

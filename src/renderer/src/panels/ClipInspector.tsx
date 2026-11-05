@@ -1,10 +1,12 @@
 import { useState, type ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
 import { getPreset } from '@shared/presets'
+import { styleOverrideCount } from '@shared/clipStyle'
 import { secondsToTimecode } from '@shared/timecode'
 import { askConfirm } from '../dialog/ask'
 import { selectedClip, useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
+import { useRevealClip } from '../hooks/useRevealClip'
 import { Expander } from '../components/ui/Expander'
 import { PresetPicker } from './PresetPicker'
 import { TextPanel } from './TextPanel'
@@ -23,20 +25,45 @@ import { AnimationPanel } from './AnimationPanel'
  *
  * 底部的「把样式应用到全部字幕条」是唯一会跨片段生效的操作，且**跳过文字内容与入出点**：
  * 用户明确要求「除文字内容之外的所有内容」应用，故 preset / 配色 / 字体 / 字号 / 动画都复制。
+ *
+ * 紧邻的「恢复预设默认」只作用于本条：清除全部自定义参数、回到当前预设的默认配置，
+ * 并把播放头带到能看清结果的帧（与切预设同一口径，因此也有二次确认）。
  */
 export function ClipInspector(): ReactElement {
   const clip = useProjectStore(selectedClip)
   const clips = useProjectStore((state) => state.project.clips)
   const fps = useProjectStore((state) => state.project.fps)
   const applyStyleToAll = useProjectStore((state) => state.applyStyleToAll)
+  const resetClipStyle = useProjectStore((state) => state.resetClipStyle)
   const setNotice = useUiStore((state) => state.setNotice)
   const uiMode = useUiStore((state) => state.uiMode)
   const setUiMode = useUiStore((state) => state.setUiMode)
+  const reveal = useRevealClip()
   const [busy, setBusy] = useState(false)
 
   const preset = clip ? getPreset(clip.presetId) : null
   const index = clip ? clips.findIndex((item) => item.id === clip.id) + 1 : 0
   const others = Math.max(0, clips.length - 1)
+  /** 本条偏离预设默认多少项：驱动「恢复预设默认」的显隐与确认文案 */
+  const customizations = clip && preset ? styleOverrideCount(preset, clip.styleOverrides) : 0
+
+  const runResetStyle = async (): Promise<void> => {
+    if (!clip || !preset || busy) return
+    const ok = await askConfirm(
+      TEXT.inspector.resetAllCustomTitle,
+      TEXT.inspector.resetAllCustomBody(customizations),
+      TEXT.inspector.resetAllCustom
+    )
+    if (!ok) return
+    setBusy(true)
+    try {
+      resetClipStyle(clip.id)
+      reveal(clip.id)
+      setNotice(TEXT.inspector.resetAllCustomDone)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const runApplyAll = async (): Promise<void> => {
     if (!clip || busy) return
@@ -125,7 +152,17 @@ export function ClipInspector(): ReactElement {
         >
           {TEXT.inspector.applyAll}
         </button>
-        <p className="hint">{TEXT.inspector.applyAllHint}</p>
+        {clip && customizations > 0 ? (
+          <button
+            type="button"
+            className="btn btn--block btn--subtle"
+            disabled={busy}
+            title={TEXT.inspector.resetAllCustomHint}
+            onClick={() => void runResetStyle()}
+          >
+            {TEXT.inspector.resetAllCustom}（{customizations}）
+          </button>
+        ) : null}
       </section>
     </div>
   )

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { FPS_29_97, FPS_30, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
+import { DEFAULT_FONT_ID, FPS_29_97, FPS_30, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
 import { createDefaultProject } from '@shared/projectSchema'
+import { getPreset } from '@shared/presets'
 import { snapTimeToFrame } from '@shared/fps'
 import type { MediaItem, Project, VideoMeta } from '@shared/types'
 import { useProjectStore, timelineDurationSec } from './projectStore'
@@ -236,5 +237,119 @@ describe('时间轴与帧率联动', () => {
     useProjectStore.getState().setFps(FPS_30)
     const back = useProjectStore.getState().project.mediaClips.find((c) => c.id === clip.id)!
     expect(back.timelineStartSec).toBe(snapTimeToFrame(after.timelineStartSec, FPS_30))
+  })
+})
+
+/**
+ * 切预设 / 清除自定义的 store 口径（用户明确要求）：
+ * 点预设 = 即时应用该预设 + 把全部自定义参数还原到它的默认配置，文字与入出点不动。
+ * 面板层的二次确认不改变这个口径，只决定要不要发出这次 patch。
+ */
+describe('切预设与清除自定义（预览必须回到该预设默认形态）', () => {
+  const seedEdited = (): string => {
+    freshProject()
+    const store = useProjectStore.getState()
+    const id = store.addClip(0)!
+    store.updateClip(id, { presetId: 'breakingRed' })
+    store.updateClip(id, {
+      styleOverrides: { tokens: { primary: '#101010' }, barOpacity: 0.7, fontScale: { title: 1.4 }, compact: true }
+    })
+    store.updateClip(id, { fontId: 'builtin-notosanssc-900' })
+    return id
+  }
+  const clipOf = (id: string) => useProjectStore.getState().project.clips.find((clip) => clip.id === id)!
+
+  it('切预设即时应用，并把配色/透明度/字号缩放/紧凑/字体全部回到新预设默认', () => {
+    const id = seedEdited()
+    const before = clipOf(id)
+    // 先确认自定义真的写进去了，否则后面的断言会空转
+    expect(before.styleOverrides.tokens?.primary).toBe('#101010')
+    expect(before.fontId).toBe('builtin-notosanssc-900')
+
+    const revisionBefore = useProjectStore.getState().revision
+    useProjectStore.getState().updateClip(id, { presetId: 'calmEditorial' })
+
+    const after = clipOf(id)
+    expect(after.presetId).toBe('calmEditorial')
+    expect(after.styleOverrides).toEqual({})
+    expect(after.fontId).toBe(DEFAULT_FONT_ID)
+    expect(after.animation.inDuration).toBe(getPreset('calmEditorial').animation.inDuration)
+    expect(after.animation.outDuration).toBe(getPreset('calmEditorial').animation.outDuration)
+    // revision 必须动：预览重建与自动保存都靠它
+    expect(useProjectStore.getState().revision).toBe(revisionBefore + 1)
+  })
+
+  it('文字内容与入出点不属于样式：切预设一律不动', () => {
+    const id = seedEdited()
+    useProjectStore.getState().updateClip(id, { content: { title: '必须留下', subtitle: '也要留下' } })
+    const before = clipOf(id)
+
+    useProjectStore.getState().updateClip(id, { presetId: 'globalSimple' })
+
+    const after = clipOf(id)
+    expect(after.content).toEqual({ title: '必须留下', subtitle: '也要留下' })
+    expect({ start: after.startTime, end: after.endTime }).toEqual({ start: before.startTime, end: before.endTime })
+  })
+
+  it('重复点当前预设同样清空自定义（store 单一口径，确认弹窗由面板负责）', () => {
+    const id = seedEdited()
+    expect(clipOf(id).presetId).toBe('breakingRed')
+
+    useProjectStore.getState().updateClip(id, { presetId: 'breakingRed' })
+
+    expect(clipOf(id).styleOverrides).toEqual({})
+    expect(clipOf(id).fontId).toBe(DEFAULT_FONT_ID)
+  })
+
+  it('同一次调用里显式传的覆盖仍然生效（不让 patch 默默丢字段）', () => {
+    freshProject()
+    const id = useProjectStore.getState().addClip(0)!
+    useProjectStore.getState().updateClip(id, {
+      presetId: 'breakingRed',
+      styleOverrides: { tokens: { primary: '#101010' }, barOpacity: 0.8, fontScale: { title: 1.3 } }
+    })
+    const after = clipOf(id)
+    expect(after.presetId).toBe('breakingRed')
+    expect(after.styleOverrides.tokens?.primary).toBe('#101010')
+    expect(after.styleOverrides.barOpacity).toBe(0.8)
+    expect(after.styleOverrides.fontScale?.title).toBe(1.3)
+  })
+
+  it('resetClipStyle 只清当前片段，其他片段的自定义不受牵连', () => {
+    freshProject()
+    const store = useProjectStore.getState()
+    const first = store.addClip(0)!
+    const second = store.addClip(5)!
+    useProjectStore.getState().updateClip(first, { styleOverrides: { tokens: { primary: '#101010' } } })
+    useProjectStore.getState().updateClip(second, { styleOverrides: { tokens: { accent: '#202020' } } })
+
+    useProjectStore.getState().resetClipStyle(first)
+
+    expect(clipOf(first).styleOverrides).toEqual({})
+    expect(clipOf(second).styleOverrides.tokens?.accent).toBe('#202020')
+  })
+
+  it('覆盖是整组替换：空令牌集等于撤销这一层，不留 {tokens:{}} 噪声', () => {
+    const id = seedEdited()
+    useProjectStore.getState().updateClip(id, { styleOverrides: { tokens: {} } })
+    const after = clipOf(id)
+    expect('tokens' in after.styleOverrides).toBe(false)
+    // 其他层（透明度/字号/紧凑）仍然保留：只撤销令牌这一层
+    expect(after.styleOverrides.barOpacity).toBe(0.7)
+    expect(after.styleOverrides.fontScale?.title).toBe(1.4)
+    expect(after.styleOverrides.compact).toBe(true)
+  })
+
+  it('回到「没有偏离」的值就删键：不透明 1、紧凑 false、字号 100% 都不留在工程里', () => {
+    const id = seedEdited()
+    useProjectStore.getState().updateClip(id, {
+      styleOverrides: { barOpacity: 1, compact: false, fontScale: { title: 1 } }
+    })
+    const after = clipOf(id)
+    expect('barOpacity' in after.styleOverrides).toBe(false)
+    expect('compact' in after.styleOverrides).toBe(false)
+    expect('fontScale' in after.styleOverrides).toBe(false)
+    // 令牌层没动，仍然在
+    expect(after.styleOverrides.tokens?.primary).toBe('#101010')
   })
 })

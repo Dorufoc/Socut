@@ -103,13 +103,36 @@ root（position:absolute，left=right=布局边距，bottom=8vh，flex-direction
 ## 与用户覆盖的关系（规格 §7：自定义作用于令牌层）
 
 `SubtitleClip.styleOverrides` 只允许作用于**令牌层与少数显式参数**：
-`tokens`（5 个配色键）、`barOpacity`、`titleGradient` / `subtitleGradient`（双色线性渐变 + 角度）、`compact`。
-颜色非法（非 `#RGB/#RGBA/#RRGGBB/#RRGGBBAA/rgb()/rgba()`）在归一化阶段被丢弃，布局树与动画节奏不可被用户改坏。
+`tokens`（5 个配色键）、`barOpacity`、`titleGradient` / `subtitleGradient`（双色线性渐变 + 角度）、`compact`、`fontScale`。
+颜色非法（非 `#RGB/#RGBA/#RRGGBB/#RRGGBBAA/rgb()/rgba()`）在归一化阶段被丢弃，布局树不可被用户改坏。
+
+### 覆盖只存「偏离预设的那部分」（`shared/clipStyle.ts`）
+
+- 面板写入时走**差集**：等于预设声明的色值不存进 `tokens`（旧版把合并后的整套令牌整体回写，
+  切预设时这些陈旧键会照样生效并压住新预设的配色 → 「点了预设但预览没反应」）；
+- `mergeOverrides` 对 `tokens` / `fontScale` 是**整组替换**，空集合直接删键；
+  `barOpacity` 回到 1、`compact` 关掉、字号回到 100% 同样删键，工程 JSON 里不留「看似自定义」的噪声；
+- `styleOverrideCount(preset, overrides)` 是「已自定义 N 项」与确认弹窗的唯一口径。
+
+### 切预设 = 即时应用 + 还原默认（用户明确要求）
+
+`updateClip(…, { presetId })` 走 `clipWithPresetDefaults`：`styleOverrides` 清空、
+`fontId` 回 `DEFAULT_FONT_ID`、`animation` 回预设声明的节奏；**文字内容与入出点不动**。
+重复点当前预设同样清空，面板层因此先弹二次确认（与「应用到全部」同一纪律）。
+检查器底部另有一个「恢复预设默认（N）」按钮，走同一个 `resetClipStyle` 入口。
+
+### 改完必须看得见
+
+所有样式入口（文字/配色/字体/字号/动画/预设）写回后都调 `useRevealClip`：
+若播放头不在所选片段「入场完成 → 出场开始」的窗口内，就把播放头落到入场后的第一帧
+（判定在纯函数 `revealTargetSec` 里；**播放中不动播放头**，也不打断用户手动定位）。
 
 ## 评审清单（M2-8 / M4-7 用）
 
 1. 8 套 × {360p, 720p, 1080p, 2K, 4K, 9:16, 21:9} 布局快照已由 `tests/presets.test.ts` 覆盖，
-   包括「副标题在上、左缘对齐、更矮更窄」的结构契约；
+   包括「副标题在上、左缘对齐、更矮、不越过右边距」的结构契约；
 2. 视觉检查已脚本化：`npm run visual:check`（8 预设 × 3 文案，出图 + 指标 + 退出码）；
    逐帧动画评审表仍可用 `FOCUSNEWS_REVIEW_SHEET=<png>` 产出 8 预设 × 7 关键帧的动画总览；
-3. 任何「弹跳、回弹、缩放、旋转」类动效一律视为缺陷（曲线表已从源头禁止）。
+3. 任何「弹跳、回弹、缩放、旋转」类动效一律视为缺陷（曲线表已从源头禁止）；
+4. 自定义参数与预设的关系由 `tests/clipStyle.test.ts` + `projectStore.test.ts`「切预设与清除自定义」
+   + `PresetPicker.test.tsx` / `ClipInspector.test.tsx` 共同守住（差集写入、切预设还原、播放头落到可见帧）。

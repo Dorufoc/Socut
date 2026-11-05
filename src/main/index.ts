@@ -10,6 +10,7 @@ import { resolveFfmpegBinaries, tempRoot } from './paths'
 import { initSmoke, smokeConfig } from './smoke'
 import { installMediaProtocol, registerMediaScheme } from './media'
 import { installThumbProtocol, registerThumbScheme } from './thumbProtocol'
+import { installStripProtocol, registerStripScheme } from './stripProtocol'
 import { log } from './log'
 
 /**
@@ -22,9 +23,10 @@ import { log } from './log'
 
 const engine = new ExportEngine()
 
-// 自定义媒体协议必须在 app ready 之前声明（参考视频预览 + 素材库缩略图）
+// 自定义媒体协议必须在 app ready 之前声明（参考视频预览 + 素材库缩略图 + 时间帧预览条）
 registerMediaScheme()
 registerThumbScheme()
+registerStripScheme()
 
 /**
  * 自动化取证专用（仅开发）：把 userData 换到隔离目录。
@@ -66,6 +68,7 @@ async function bootstrap(): Promise<void> {
 
   installMediaProtocol()
   installThumbProtocol()
+  installStripProtocol()
 
   // 冒烟模式（开发）：先读环境，再在渲染侧主动上报时校验并退出
   initSmoke()

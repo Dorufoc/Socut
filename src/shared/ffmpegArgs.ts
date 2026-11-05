@@ -162,6 +162,59 @@ export function buildThumbnailArgs(inputPath: string, outputPath: string, atSec:
   ]
 }
 
+/**
+ * 时间帧预览条（Thumbnail Strip）：一次调用完成「均匀抽帧 + 横向无缝拼接」。
+ *
+ * 为什么不逐帧起 N 个进程：每格一次 FFmpeg 冷启动会把导入/缩放卡成明显卡顿，
+ * 而 `fps=… ,scale=… ,tile=Nx1` 在一条滤镜链里就能产出**一张长图**。
+ *
+ * 口径说明：
+ * - `-ss` / `-t` 放在 `-i` **之前**：关键帧快速定位，只为缩略图服务，不要求帧精确；
+ *   时间读数与 seek 一律用渲染层给的数学区间 `[sourceInSec, sourceOutSec]`，
+ *   所以格子边界与 tooltip 永远自洽（不会因为 FFmpeg 落在前一个关键帧而错位）。
+ * - `scale=W:-2` 按比例缩小（-2 保证高为偶数，JPEG 必需），`setsar=1` 去掉 SAR 干扰；
+ * - `tile=Nx1` 以 padding/margin=0 拼接，格与格无缝，整体就是一条连续时间带；
+ * - `-frames:v 1` 只要这一张。
+ */
+export interface StripArgsInput {
+  inputPath: string
+  outputPath: string
+  /** 源入点（秒） */
+  sourceInSec: number
+  /** 源出点（秒）：预览条覆盖整个片段区间 */
+  sourceOutSec: number
+  /** 拼接格数（由卡片宽度与密度档位算出） */
+  frames: number
+  /** 每帧像素宽 */
+  frameWidth?: number
+}
+
+export function buildStripArgs(input: StripArgsInput): string[] {
+  const frames = Math.max(1, Math.round(input.frames))
+  // 下限 40ms：不足一帧的区间不值得抽帧，但必须给 FFmpeg 一个正数时长
+  const duration = Math.max(0.04, input.sourceOutSec - input.sourceInSec)
+  const width = Math.max(16, Math.round(input.frameWidth ?? 128))
+  return [
+    '-hide_banner',
+    '-y',
+    '-loglevel',
+    'error',
+    '-ss',
+    formatSec(Math.max(0, input.sourceInSec)),
+    '-t',
+    formatSec(duration),
+    '-i',
+    input.inputPath,
+    '-frames:v',
+    '1',
+    '-vf',
+    `fps=${formatSec(frames / duration)},scale=${width}:-2,setsar=1,tile=${frames}x1:padding=0:margin=0`,
+    '-q:v',
+    '6',
+    input.outputPath
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // 水印（Watermark）：1080P 基准 → 原图 32% → 左上角 30px，随输出分辨率等比换算
 // ---------------------------------------------------------------------------

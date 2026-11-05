@@ -24,7 +24,10 @@ import { SPLITTER_KEY_STEP_PX, type PaneEdge } from '@shared/paneLayout'
 export interface SplitterProps {
   edge: PaneEdge
   orientation: 'vertical' | 'horizontal'
+  /** 短标签（同时用无障碍朗读）：如「素材栏 / 预览」 */
   label: string
+  /** 操作提示：只进 hover tooltip，不占版面 */
+  help?: string
   /** 受治理区域的当前像素 */
   value: number
   min: number
@@ -49,6 +52,7 @@ export function Splitter({
   edge,
   orientation,
   label,
+  help,
   value,
   min,
   max,
@@ -152,7 +156,7 @@ export function Splitter({
       aria-valuemax={Math.round(upper)}
       aria-valuenow={now}
       aria-valuetext={hudText(now)}
-      title={label}
+      title={help ? `${label} · ${help}` : label}
       tabIndex={0}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}

@@ -53,6 +53,22 @@ export function userThumbPath(mediaId: string): string {
   return path.join(app.getPath('userData'), USER_DATA_DIRS.thumbs, `${safe}.jpg`)
 }
 
+/** v5：时间帧预览条缓存目录（userData/strips）。 */
+export function userStripsDir(): string {
+  return path.join(app.getPath('userData'), USER_DATA_DIRS.strips)
+}
+
+/**
+ * v5：某次预览条请求的长图路径。
+ * 文件名 = 安全化的 mediaId 前缀 + 缓存令牌：前者让「素材移出池」能按前缀回收它的全部预览条，
+ * 后者保证同素材不同区间/不同格数互不覆盖。两段都只留安全字符，不接受外部拼路径。
+ */
+export function userStripPath(mediaId: string, token: string): string {
+  const safe = mediaId.replace(/[^\w-]/g, '_').slice(0, 64) || 'media'
+  const safeToken = token.replace(/[^\w-]/g, '').slice(0, 32) || 'strip'
+  return path.join(userStripsDir(), `${safe}-${safeToken}.jpg`)
+}
+
 /** 任务临时根目录（app.getPath('temp') 下，规格 §5.3 要求统一清理）。 */
 export function tempRoot(): string {
   return path.join(app.getPath('temp'), TEMP_ROOT)

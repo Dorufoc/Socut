@@ -37,6 +37,8 @@ export const CHANNELS = {
   mediaThumbUrl: 'media:thumbUrl',
   /** v2：素材移出池时回收 userData/thumbs 里的 jpg */
   mediaThumbRemove: 'media:thumbRemove',
+  /** v5：主进程均匀抽帧并拼成时间帧预览条（Thumbnail Strip）长图 */
+  mediaGenerateStrip: 'media:generateStrip',
   videoCfrConvert: 'video:cfrConvert',
 
   exportEstimate: 'export:estimate',

@@ -369,6 +369,36 @@ export interface MediaClip {
 }
 
 /**
+ * 时间帧预览条（Thumbnail Strip）的一次生成请求（v5）。
+ *
+ * 这是**运行时派生数据，不写进工程 JSON**：长图内容取决于「素材 + 源区间 + 格数」，
+ * 而格数又取决于卡片当前的像素宽（缩放级别）。一旦落盘就会过期（换机器、改入出点、
+ * 拖宽轨道后都是另一张图），与水印几何同一纪律：只存输入，不存结果。
+ */
+export interface MediaStripRequest {
+  /** 素材池 id（缓存回收与文件命名的前缀） */
+  mediaId: string
+  /** 抽帧用的实际文件（VFR 转 CFR 后为转换产物） */
+  path: string
+  sourceInSec: number
+  sourceOutSec: number
+  /** 拼接格数（主进程不信任这个值，会自己再夹一次上限） */
+  frames: number
+}
+
+/** 生成结果：失败（源文件不在 / FFmpeg 缺失 / 抽帧报错）统一 url=null，渲染层显示占位符。 */
+export interface MediaStripResult {
+  /** focusnews-strip://<token>；不可用时 null */
+  url: string | null
+  /** 主进程实际使用的格数（可能与请求不同，渲染层以此为准） */
+  frames: number
+  /** 缓存令牌：同一 key 二次请求不会重跑 FFmpeg */
+  key: string
+  /** 命中磁盘缓存（本轮未起子进程） */
+  cached: boolean
+}
+
+/**
  * 水印（Watermark）：一张本机图片作为台标叠加在合成画面的左上角（仅叠加出口）。
  * 显示尺寸与偏移**不**存在这里——它们由 `computeWatermarkGeometry` 按
  * 「1080P 基准 + 原图 32% + 30px 边距」随输出分辨率实时换算，避免工程里留下过期像素。
@@ -400,8 +430,8 @@ export interface Project {
   mediaClips: MediaClip[]
   /** 水印设置；缺省 = 未导入水印（合成链与旧工程逐字节一致） */
   watermark?: WatermarkSettings
-  /** UI 状态（不参与渲染）；leftTab 不跨会话保持也能，写回后能 */
-  ui?: { leftTab?: 'media' | 'watermark' | 'export' | 'progress' } & Record<string, unknown>
+  /** UI 状态（不参与渲染）；leftTab 记住上次离开左侧栏的位置，随工程走 */
+  ui?: { leftTab?: 'media' | 'watermark' | 'captions' | 'export' | 'progress' } & Record<string, unknown>
   /**
    * @deprecated v1 遗留字段，`normalizeProject` 自动迁移到 `media/mediaClips`，写入时不再产出。
    * 保留类型为 ftype 旧工程 JSON 能直接反序列化。

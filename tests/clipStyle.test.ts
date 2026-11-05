@@ -1,147 +1,191 @@
 import { describe, expect, it } from 'vitest'
-import { BUILTIN_FONTS, FONT_SCALE_MAX, FONT_SCALE_MIN, FPS_30 } from '@shared/constants'
-import { applyClipStyleToAll, createClip, createDefaultProject, normalizeProject } from '@shared/projectSchema'
-import { buildProjectPlan } from '@shared/presetResolver'
-import type { FontRecord, Project } from '@shared/types'
+import { DEFAULT_FONT_ID, FPS_30 } from '@shared/constants'
+import { createClip, createDefaultProject, normalizeProject } from '@shared/projectSchema'
+import { getPreset } from '@shared/presets'
+import { framesToDurationSec } from '@shared/fps'
+import type { SubtitleClip } from '@shared/types'
+import {
+  clipWithPresetDefaults,
+  fontScaleDelta,
+  hasKeys,
+  revealTargetSec,
+  sameColor,
+  styleOverrideCount,
+  tokensDelta
+} from '@shared/clipStyle'
 
 /**
- * 片段级样式操作（右侧检查器的两个核心行为）：
- * - 单片段修改只落 `styleOverrides` / `content` / `animation` / `fontId`，不波及别段；
- * - 「应用到全部」复制**除文字与入出点之外**的一切（用户明确要求）。
+ * 片段自定义覆盖的洁净度法则 + 预览可见性判定（纯函数）。
+ *
+ * 锁住三条会导致「改了没反应 / 切预设没生效」的行为：
+ * 1. 等于预设声明的值**不能**留在覆盖里（否则它会跟着下一个预设压住它的配色）；
+ * 2. 切预设 = 整层清空 + 字体/动画回预设默认，文字与入出点一律不动；
+ * 3. 播放头不在「能看清当前样式」的窗口内时，编辑要把播放头带过去（播放中则不打扰）。
  */
 
-const FONT_INDEX: FontRecord[] = BUILTIN_FONTS.map((meta) => ({
-  ...meta,
-  source: 'builtin',
-  bytes: 1024,
-  sha1: '',
-  importedAt: '2026-01-01T00:00:00.000Z'
-}))
+const preset = getPreset('breakingRed')
 
-function projectWithThreeClips(): Project {
-  const project = createDefaultProject('批量应用')
-  project.resolution = { width: 1920, height: 1080 }
-  project.fps = FPS_30
-  project.clips = [0, 1, 2].map((index) => {
-    const clip = createClip({ startTime: index * 4, fps: FPS_30 })
-    clip.content = { title: `第 ${index + 1} 段主标题`, subtitle: `第 ${index + 1} 段副标题` }
-    return clip
-  })
-  return project
+function clipOf(patch: Partial<SubtitleClip> = {}): SubtitleClip {
+  const clip = createClip({ startTime: 0, fps: FPS_30 })
+  return { ...clip, ...patch }
 }
 
-describe('应用到全部字幕条（保留文字与入出点）', () => {
-  it('预设 / 配色 / 字体 / 字号 / 动画被复制，文字与时间轴不动', () => {
-    const project = projectWithThreeClips()
-    const source = project.clips[0]!
-    const second = project.clips[1]!
-    const third = project.clips[2]!
-    source.presetId = 'breakingRed'
-    source.fontId = FONT_INDEX[3]!.fontId
-    source.styleOverrides = {
-      tokens: { primary: '#123456', accent: '#ffcc00' },
-      barOpacity: 0.72,
-      fontScale: { title: 1.25, subtitle: 0.9 },
-      titleGradient: { enabled: true, from: '#ffffff', to: '#9ec7ff', angleDeg: 45 }
-    }
-    source.animation = { ...source.animation, inDuration: 0.4, outDuration: 0.24, easing: 'outExpo' }
-
-    const before = project.clips.map((clip) => ({ ...clip.content, start: clip.startTime, end: clip.endTime }))
-    const { project: next, count } = applyClipStyleToAll(project, source.id)
-
-    expect(count).toBe(2)
-    for (const [index, clip] of next.clips.entries()) {
-      // 文字与入出点严格保留
-      expect({ ...clip.content, start: clip.startTime, end: clip.endTime }).toEqual(before[index])
-      if (index === 0) continue
-      expect(clip.presetId).toBe('breakingRed')
-      expect(clip.fontId).toBe(source.fontId)
-      expect(clip.styleOverrides.tokens).toEqual({ primary: '#123456', accent: '#ffcc00' })
-      expect(clip.styleOverrides.barOpacity).toBe(0.72)
-      expect(clip.styleOverrides.fontScale).toEqual({ title: 1.25, subtitle: 0.9 })
-      expect(clip.styleOverrides.titleGradient?.angleDeg).toBe(45)
-      expect(clip.animation.inDuration).toBe(0.4)
-      expect(clip.animation.easing).toBe('outExpo')
-    }
-    expect(second.id).not.toBe(source.id)
-    // 纯函数：原工程不被就地改写（未应用到的那份引用保持原样）
-    expect(third.presetId).toBe('stackedNews')
-    expect(next.clips[2]!.presetId).toBe('breakingRed')
+describe('颜色等价（sameColor）', () => {
+  it('缩写十六进制、全写与 rgb() 归一到同一颜色', () => {
+    expect(sameColor('#F00', '#ff0000')).toBe(true)
+    expect(sameColor('#ff0000', 'rgb(255, 0, 0)')).toBe(true)
+    expect(sameColor('#12345E', '#12345e')).toBe(true)
   })
 
-  it('复制是深拷贝：改源片段的令牌不会串到其他片段', () => {
-    const project = projectWithThreeClips()
-    const source = project.clips[0]!
-    source.styleOverrides = { tokens: { primary: '#101010' }, fontScale: { title: 1.4 } }
-    const { project: next } = applyClipStyleToAll(project, source.id)
-
-    const applied = next.clips[1]!
-    applied.styleOverrides.tokens!.primary = '#aaaaaa'
-    applied.styleOverrides.fontScale!.title = 2
-
-    expect(next.clips[0]!.styleOverrides.tokens!.primary).toBe('#101010')
-    expect(next.clips[0]!.styleOverrides.fontScale!.title).toBe(1.4)
-    expect(next.clips[2]!.styleOverrides.tokens!.primary).toBe('#101010')
-  })
-
-  it('只有一个片段时不动工程（count=0，引用不变）', () => {
-    const project = projectWithThreeClips()
-    project.clips = [project.clips[0]!]
-    const result = applyClipStyleToAll(project, project.clips[0]!.id)
-    expect(result.count).toBe(0)
-    expect(result.project).toBe(project)
-  })
-
-  it('源片段 id 不存在时安全返回', () => {
-    const project = projectWithThreeClips()
-    const result = applyClipStyleToAll(project, 'does-not-exist')
-    expect(result.count).toBe(0)
-    expect(result.project).toBe(project)
+  it('不同色、无法解析或缺值都算不同（宁保守地把覆盖留着）', () => {
+    expect(sameColor('#12345E', '#12345F')).toBe(false)
+    expect(sameColor('not-a-color', '#12345E')).toBe(false)
+    expect(sameColor(undefined, '#12345E')).toBe(false)
+    expect(sameColor(undefined, undefined)).toBe(true)
   })
 })
 
-describe('字号缩放的归一化', () => {
-  const withScale = (fontScale: unknown): Project => {
-    const project = projectWithThreeClips()
-    const raw = JSON.parse(JSON.stringify(project)) as Record<string, unknown>
-    const clips = raw['clips'] as Array<Record<string, unknown>>
-    clips[0]!['styleOverrides'] = { fontScale }
-    return normalizeProject(raw)!
-  }
+describe('令牌差集（tokensDelta）', () => {
+  it('只留下真正偏离预设的键，其余一个都不写', () => {
+    const next = tokensDelta(preset, undefined, 'primary', '#101010')
+    expect(next).toEqual({ primary: '#101010' })
+  })
 
-  it('合法值保留，越界值夹到上下限，接近 1 视为未设置', () => {
-    expect(withScale({ title: 1.5 }).clips[0]!.styleOverrides.fontScale).toEqual({ title: 1.5 })
-    expect(withScale({ title: 99 }).clips[0]!.styleOverrides.fontScale).toEqual({ title: FONT_SCALE_MAX })
-    expect(withScale({ subtitle: 0.1 }).clips[0]!.styleOverrides.fontScale).toEqual({ subtitle: FONT_SCALE_MIN })
-    expect(withScale({ title: 1 }).clips[0]!.styleOverrides.fontScale).toBeUndefined()
-    expect(withScale({ title: 1.0005 }).clips[0]!.styleOverrides.fontScale).toBeUndefined()
-    expect(withScale({ title: 'big' }).clips[0]!.styleOverrides.fontScale).toBeUndefined()
-    expect(withScale({ title: 1.02, subtitle: 1.2 }).clips[0]!.styleOverrides.fontScale).toEqual({ title: 1.02, subtitle: 1.2 })
+  it('改回预设声明的色值等于撤销自定义（键消失，而不是留一个同值）', () => {
+    const next = tokensDelta(preset, { primary: '#101010' }, 'primary', preset.tokens.primary)
+    expect(next).toEqual({})
+  })
+
+  it('顺手清掉历史遗留的同值覆盖（旧版整套回写留下的脏键）', () => {
+    const legacy = { accent: preset.tokens.accent, text: '#abcdef' }
+    const next = tokensDelta(preset, legacy, 'barBackground', '#101010')
+    expect(next).toEqual({ text: '#abcdef', barBackground: '#101010' })
+    expect('accent' in next).toBe(false)
+  })
+
+  it('其他片段的自定义键不受影响（差集只针对本次改动的键）', () => {
+    const previous = { primary: '#101010', secondaryText: '#eeeeee' }
+    expect(tokensDelta(preset, previous, 'primary', '#202020')).toEqual({
+      primary: '#202020',
+      secondaryText: '#eeeeee'
+    })
   })
 })
 
-describe('字号缩放对解析结果的作用', () => {
-  const planFor = (fontScale?: { title?: number; subtitle?: number }) => {
-    const project = projectWithThreeClips()
-    project.clips = [project.clips[0]!]
-    project.clips[0]!.content = { title: '长三角一体化新规发布', subtitle: '省发展改革委负责人解读' }
-    if (fontScale) project.clips[0]!.styleOverrides = { fontScale }
-    const plan = buildProjectPlan({ project, scope: { kind: 'timeline' }, fontIndex: FONT_INDEX })
-    return plan.clips[0]!
-  }
-
-  it('115% 后字号等比变大，且副标题不因主标题缩放而变', () => {
-    const base = planFor()
-    const scaled = planFor({ title: 1.15 })
-    expect(scaled.fonts.title.sizePx).toBeCloseTo(base.fonts.title.sizePx * 1.15, 2)
-    expect(scaled.fonts.subtitle.sizePx).toBe(base.fonts.subtitle.sizePx)
+describe('字号缩放差集（fontScaleDelta）', () => {
+  it('写 130% 只留 title，回到 100% 就删键', () => {
+    expect(fontScaleDelta(undefined, 'title', 1.3)).toEqual({ title: 1.3 })
+    expect(fontScaleDelta({ title: 1.3 }, 'title', 1)).toEqual({})
   })
 
-  it('缩放后仍受可读性硬上限约束，不会无限放大', () => {
-    const base = planFor()
-    const huge = planFor({ title: FONT_SCALE_MAX })
-    // 1080p 标准档：宽度 6.2% / 高度 6.6% 两道硬上限，取小者
-    expect(huge.fonts.title.sizePx).toBeLessThanOrEqual(Math.min(1920 * 0.062, 1080 * 0.066) + 1e-6)
-    expect(huge.fonts.title.sizePx).toBeGreaterThan(base.fonts.title.sizePx)
+  it('滑杆粒度内的抖动（<0.5%）不算自定义，也不带出等于 1 的噪声', () => {
+    expect(fontScaleDelta({ subtitle: 1.001 }, 'title', 1.002)).toEqual({})
+  })
+})
+
+describe('自定义项计数（styleOverrideCount）', () => {
+  it('干净的片段是 0 项；等于预设的令牌不计入', () => {
+    expect(styleOverrideCount(preset, {})).toBe(0)
+    expect(styleOverrideCount(preset, { tokens: { primary: preset.tokens.primary } })).toBe(0)
+    expect(styleOverrideCount(preset, { barOpacity: 1 })).toBe(0)
+    expect(styleOverrideCount(preset, { fontScale: { title: 1 } })).toBe(0)
+    expect(styleOverrideCount(preset, { titleGradient: { enabled: false, from: '#fff', to: '#000', angleDeg: 90 } })).toBe(0)
+  })
+
+  it('配色 / 透明度 / 渐变 / 字号 / 紧凑各自计数', () => {
+    const overrides = {
+      tokens: { primary: '#101010', accent: preset.tokens.accent },
+      barOpacity: 0.8,
+      titleGradient: { enabled: true, from: '#ffffff', to: '#9ec7ff', angleDeg: 90 },
+      fontScale: { title: 1.3, subtitle: 1 },
+      compact: true
+    } as const
+    // primary 1 + barOpacity 1 + 渐变 1 + title 缩放 1 + 紧凑 1 = 5（accent 与 subtitle 等于默认不计）
+    expect(styleOverrideCount(preset, overrides)).toBe(5)
+  })
+})
+
+describe('切预设 = 回到该预设的默认配置', () => {
+  it('清空全部自定义、字体回默认、动画回预设声明', () => {
+    const source = clipOf({
+      presetId: 'stackedNews',
+      fontId: 'builtin-notosanssc-900',
+      styleOverrides: { tokens: { primary: '#101010' }, barOpacity: 0.6, fontScale: { title: 1.5 } },
+      animation: { inDuration: 0.9, outDuration: 0.2, easing: 'linear', textRevealFrames: 6, displacement: { x: '0', y: '0' } }
+    })
+    const next = clipWithPresetDefaults(source, preset)
+    expect(next.presetId).toBe(preset.id)
+    expect(next.styleOverrides).toEqual({})
+    expect(next.fontId).toBe(DEFAULT_FONT_ID)
+    expect(next.animation.inDuration).toBe(preset.animation.inDuration)
+    expect(next.animation.outDuration).toBe(preset.animation.outDuration)
+    expect(next.animation.easing).toBe(preset.animation.easing)
+  })
+
+  it('文字内容与入出点不属于样式，一律保持', () => {
+    const source = clipOf({
+      startTime: 4,
+      endTime: 9,
+      content: { title: '必须留下', subtitle: '也必须留下' },
+      styleOverrides: { tokens: { primary: '#101010' } }
+    })
+    const next = clipWithPresetDefaults(source, preset)
+    expect(next.content).toEqual({ title: '必须留下', subtitle: '也必须留下' })
+    expect({ start: next.startTime, end: next.endTime }).toEqual({ start: 4, end: 9 })
+  })
+
+  it('displacement 是引用型字段，重置后与预设声明对象不是同一个引用（防止共享可变对象）', () => {
+    const next = clipWithPresetDefaults(clipOf(), preset)
+    expect(next.animation.displacement).toEqual(preset.animation.displacement)
+    expect(next.animation.displacement).not.toBe(preset.animation.displacement)
+  })
+})
+
+describe('编辑后把播放头带到看得见的帧（revealTargetSec）', () => {
+  const clip = clipOf({ startTime: 10, endTime: 15 })
+  const inSec = clip.animation.inDuration
+  const outSec = clip.animation.outDuration
+
+  it('播放中不动播放头（时钟自己在走，跳帧反而打断观感）', () => {
+    expect(revealTargetSec(clip, FPS_30, 0, true)).toBeNull()
+  })
+
+  it('已经落在「入场完成 → 出场开始」窗口内不动，边界也算在内', () => {
+    expect(revealTargetSec(clip, FPS_30, 10 + inSec, false)).toBeNull()
+    expect(revealTargetSec(clip, FPS_30, 12, false)).toBeNull()
+    expect(revealTargetSec(clip, FPS_30, 15 - outSec, false)).toBeNull()
+  })
+
+  it('窗口之外（片段还没开始 / 已经出场）落到入场完成后的第一帧', () => {
+    expect(revealTargetSec(clip, FPS_30, 0, false)).toBeCloseTo(10 + inSec, 6)
+    expect(revealTargetSec(clip, FPS_30, 14.9, false)).toBeCloseTo(10 + inSec, 6)
+    // 入场过程中也不算「看得见」：停在擦除没走完的帧上看不出最终样式
+    expect(revealTargetSec(clip, FPS_30, 10.2, false)).toBeCloseTo(10 + inSec, 6)
+  })
+
+  it('极短片段不会把播放头推到片段之外', () => {
+    const oneFrame = framesToDurationSec(1, FPS_30)
+    const tiny = clipOf({ startTime: 0, endTime: oneFrame })
+    const target = revealTargetSec(tiny, FPS_30, 5, false)!
+    expect(target).toBeGreaterThanOrEqual(0)
+    expect(target).toBeLessThan(oneFrame)
+  })
+})
+
+describe('hasKeys（覆盖集合是否还有内容）', () => {
+  it('空对象算没有内容，undefined 也算没有', () => {
+    expect(hasKeys({})).toBe(false)
+    expect(hasKeys(undefined)).toBe(false)
+    expect(hasKeys({ primary: '#fff' })).toBe(true)
+  })
+})
+
+describe('与工程归一化同一口径', () => {
+  it('normalizeProject 同样丢弃等于 1 的字号缩放（两层都不会积累噪声）', () => {
+    const project = createDefaultProject('覆盖洁净度')
+    project.clips = [clipOf({ styleOverrides: { fontScale: { title: 1, subtitle: 1.2 }, tokens: {} } })]
+    const normalized = normalizeProject(project)
+    expect(normalized?.clips[0]?.styleOverrides.fontScale).toEqual({ subtitle: 1.2 })
+    expect(normalized?.clips[0]?.styleOverrides.tokens).toBeUndefined()
   })
 })

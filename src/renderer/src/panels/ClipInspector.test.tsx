@@ -3,6 +3,7 @@ import { act } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { FPS_30 } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
+import { getPreset } from '@shared/presets'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import type { Project } from '@shared/types'
 import { ClipInspector } from './ClipInspector'
@@ -32,7 +33,7 @@ afterEach(() => {
   cleanup()
   act(() => {
     useProjectStore.setState({ project: createDefaultProject('空'), selectedClipId: null, fonts: [] })
-    useUiStore.setState({ dialogQueue: [], notice: null, uiMode: 'basic' })
+    useUiStore.setState({ dialogQueue: [], notice: null, uiMode: 'basic', seekHandler: null })
   })
 })
 
@@ -138,4 +139,75 @@ describe('ClipInspector（右侧当前字幕条）', () => {
     expect(colorHeader?.getAttribute('aria-expanded')).toBe('true')
     expect(colorHeader?.closest('.expander')?.className).toContain('expander--open')
   })
+
+  /**
+   * 用户要求：改完参数预览区要**及时响应**。
+   * 两件事缺一不可：写回的是真正偏离预设的差集（否则切预设时被旧值拖住），
+   * 以及播放头落到能看清样式的帧（否则片段还没开始时预览看着毫无变化）。
+   */
+  it('改配色：只写偏离预设的令牌，并把播放头落到入场完成后的可见帧', () => {
+    const project = seed(1)
+    const clipId = project.clips[0]!.id
+    const presetPrimary = getPreset(clipOf(clipId).presetId).tokens.primary
+    const seeks: number[] = []
+
+    act(() => {
+      useUiStore.setState({ uiMode: 'advanced', displayTimeSec: 0, playing: false })
+    })
+    useUiStore.getState().setSeekHandler((sec: number) => {
+      seeks.push(sec)
+    })
+    render(<ClipInspector />)
+    fireEvent.click(screen.getByText(TEXT.inspector.color))
+
+    fireEvent.change(screen.getByLabelText(TEXT.inspector.tokens.primary), { target: { value: '#101010' } })
+
+    const after = clipOf(clipId)
+    // 只有被改动的一个键进了覆盖，其余五个预设声明值一个都没写
+    expect(after.styleOverrides.tokens).toEqual({ primary: '#101010' })
+    // 播放头从 0s（入场未完）被带到入场完成后的第一帧
+    expect(seeks).toEqual([after.startTime + after.animation.inDuration])
+
+    // 改回预设声明色 = 撤销这一项，不能留下一个「看起来像自定义」的同值
+    fireEvent.change(screen.getByLabelText(TEXT.inspector.tokens.primary), { target: { value: presetPrimary } })
+    expect('tokens' in clipOf(clipId).styleOverrides).toBe(false)
+  })
+
+  it('恢复预设默认：先二次确认，确认后清空本条自定义并提示完成', async () => {
+    const project = seed(1)
+    const clipId = project.clips[0]!.id
+    act(() => {
+      useProjectStore.getState().updateClip(clipId, {
+        styleOverrides: { tokens: { primary: '#101010' }, barOpacity: 0.5 }
+      })
+      useUiStore.setState({ uiMode: 'advanced' })
+    })
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: /恢复预设默认/ }))
+    const prompt = useUiStore.getState().dialogQueue[0]
+    expect(prompt?.dialog.kind).toBe('confirm')
+    // 确认之前不许生效
+    expect(clipOf(clipId).styleOverrides.tokens?.primary).toBe('#101010')
+
+    await act(async () => {
+      prompt?.resolve('ok')
+      useUiStore.getState().shiftPrompt()
+    })
+
+    expect(clipOf(clipId).styleOverrides).toEqual({})
+    expect(useUiStore.getState().notice).toBe(TEXT.inspector.resetAllCustomDone)
+    // 文字不属于样式，仍然保留
+    expect(clipOf(clipId).content.title).toBe('第 1 段标题')
+  })
+
+  it('没有自定义时不显示「恢复预设默认」按钮', () => {
+    seed(1)
+    render(<ClipInspector />)
+    expect(screen.queryByRole('button', { name: /恢复预设默认/ })).toBeNull()
+  })
 })
+
+function clipOf(id: string) {
+  return useProjectStore.getState().project.clips.find((clip) => clip.id === id)!
+}

@@ -446,19 +446,6 @@ textarea {
   backdrop-filter: blur(8px);
 }
 
-.stage__hint {
-  position: absolute;
-  left: 8px;
-  bottom: 8px;
-  z-index: 3;
-  padding: 2px 8px;
-  border-radius: var(--radius-control);
-  background: rgba(20, 20, 20, 0.55);
-  font-size: 11px;
-  color: var(--text-tertiary);
-  pointer-events: none;
-}
-
 /* 播放控制栏 */
 
 .transport {
@@ -1394,16 +1381,6 @@ input[type='color']:disabled {
   white-space: nowrap;
 }
 
-.preset-card__desc {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  font-size: 10.5px;
-  line-height: 1.4;
-  color: var(--text-tertiary);
-}
-
 .preset-card__swatches {
   flex: none;
   display: flex;
@@ -1839,13 +1816,6 @@ input[type='color']:disabled {
   color: var(--text-secondary);
 }
 
-.timeline__snap-hint {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 300px;
-}
-
 .timeline__ruler {
   position: relative;
   flex: none;
@@ -1941,17 +1911,24 @@ input[type='color']:disabled {
   background: #9ecbff;
 }
 
+/*
+ * 字幕轨的示意条（v4）：上下很窄的一条，摆位 = 当前画面的入点→出点区间。
+ * 垂直居中靠 top:50% + translateY，车道多高都不会错位；标签单行省略。
+ */
 .clip-card {
   position: absolute;
-  top: 10px;
-  height: 56px;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 22px;
+  display: flex;
+  align-items: center;
   overflow: hidden;
-  padding: 6px 10px 6px 9px;
+  padding: 0 9px;
   border: 1px solid var(--stroke-control);
   border-left: 3px solid var(--accent);
-  border-radius: 6px;
+  border-radius: 4px;
   background: linear-gradient(180deg, #303030, #292929);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   cursor: grab;
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
@@ -1962,24 +1939,34 @@ input[type='color']:disabled {
 
 .clip-card--selected {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-ring), 0 6px 16px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 0 0 1px var(--accent-ring), 0 2px 8px rgba(0, 0, 0, 0.45);
 }
 
-.clip-card__title {
-  font-size: 12px;
+/* 播放头落在本条区间内：提亮一档，与条内细游标一起读出“正在播这一条” */
+.clip-card--onair {
+  background: linear-gradient(180deg, #3a3f46, #2e3238);
+}
+
+.clip-card__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  letter-spacing: 0.01em;
 }
 
-.clip-card__meta {
-  margin-top: 2px;
-  font-size: 10px;
-  color: var(--text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* 当前位置游标：left 由 JS 按 secToPx 与条体原点算出，与全局播放头同一口径 */
+.clip-card__cursor {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-ring);
+  pointer-events: none;
 }
 
 .clip-card__handle {
@@ -1992,10 +1979,6 @@ input[type='color']:disabled {
   transition: background-color 120ms ease;
 }
 
-.clip-card:hover .clip-card__handle {
-  background: rgba(255, 255, 255, 0.1);
-}
-
 .clip-card__handle--left {
   left: 0;
   border-radius: 4px 0 0 4px;
@@ -2004,6 +1987,103 @@ input[type='color']:disabled {
 .clip-card__handle--right {
   right: 0;
   border-radius: 0 4px 4px 0;
+}
+
+.clip-card:hover .clip-card__handle {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* ------------------------------------------------------------------ 左侧「字幕」列表 */
+
+.caption-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: caption;
+}
+
+.caption-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--stroke-card);
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.caption-item:hover {
+  background: var(--bg-card-soft);
+  border-color: var(--stroke-control);
+}
+
+/* 选中项：左边一整条强调色，与右侧检查器“当前字幕条”呼应 */
+.caption-item--active {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* 播放头落在这一条的区间内 */
+.caption-item--onair {
+  border-color: var(--accent-ring);
+}
+
+.caption-item__index {
+  flex: none;
+  min-width: 18px;
+  padding: 1px 4px;
+  border-radius: var(--radius-control);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.caption-item__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.caption-item__title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.caption-item__sub {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.caption-item__meta {
+  margin-top: 1px;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.caption-item__onair-tag {
+  color: var(--accent);
 }
 
 /* ------------------------------------------------------------------ 模态与遮罩 */
@@ -2067,9 +2147,10 @@ input[type='color']:disabled {
    v2 双轨时间轴与素材库（阶段 3/4）：左侧 Tab 壳、素材卡片、媒体轨、落点高亮
    ========================================================================== */
 
-/* 左侧 Tab 壳：同一时刻只展开当前面板（素材库 / 导出 / 进度） */
+/* 左侧 Tab 壳：同一时刻只展开当前面板（素材库 / 水印 / 字幕 / 导出 / 进度） */
 .rail__tabs {
   display: flex;
+  flex-wrap: wrap; /* 5 个 Tab 在窄侧栏（最小 232px）里换行而不是被裁切 */
   gap: 2px;
   border-bottom: 1px solid var(--divider);
   margin: -12px -12px 10px;
@@ -2078,8 +2159,9 @@ input[type='color']:disabled {
 
 .rail__tab {
   flex: 1 1 auto;
+  min-width: 0;
   position: relative;
-  padding: 9px 6px 8px;
+  padding: 9px 5px 8px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -2312,10 +2394,7 @@ input[type='color']:disabled {
   pointer-events: none;
 }
 
-.clip-card {
-  top: 6px;
-  height: 50px;
-}
+/* v4：字幕轨示意条自己居中，不再需要旧双轨区块的 top/height 覆盖 */
 
 .timeline__track--media {
   background-color: #1c2226;
@@ -2341,13 +2420,17 @@ input[type='color']:disabled {
   z-index: 4;
 }
 
-/* 媒体轨片段卡片 */
+/*
+ * 媒体轨片段卡片：底图是主进程一次抽帧拼好的时间帧预览条（长图），
+ * 拉满卡片宽度 → 每格覆盖的时间 = 片段时长 / 格数（需求明确不要求保持原始比例）。
+ * 文字不再占位，而是贴在底部的渐变遮罩上，预览条再花也不影响读素材名与源入出点。
+ */
 .media-clip-card {
   position: absolute;
   top: 5px;
   height: 52px;
   overflow: hidden;
-  padding: 5px 10px 5px 9px;
+  padding: 0;
   border: 1px solid var(--stroke-control);
   border-left: 3px solid #7aa2f7;
   border-radius: 6px;
@@ -2367,6 +2450,17 @@ input[type='color']:disabled {
   opacity: 0.7;
 }
 
+/* 预览条长图：object-fit: fill 把 N 格均摊到卡片宽度，格与格无缝衔接 */
+.media-clip-card__strip {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+}
+
 .media-clip-card__thumb {
   position: absolute;
   inset: 0;
@@ -2374,6 +2468,67 @@ input[type='color']:disabled {
   height: 100%;
   object-fit: cover;
   opacity: 0.32;
+  pointer-events: none;
+}
+
+/* 抽不出帧 / 还在生成时的占位：斜纹底 + 图标 + 一句话，而不是一个黑洞 */
+.media-clip-card__fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.035) 0 6px,
+    transparent 6px 12px
+  );
+  pointer-events: none;
+}
+
+.media-clip-card__fallback-glyph {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.media-clip-card__fallback-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 悬停读数：位置与文本由 JS 命令式写入（不走 React 状态，指针移动不重渲染） */
+.media-clip-card__hint {
+  position: absolute;
+  top: 3px;
+  padding: 1px 6px;
+  border: 1px solid var(--stroke-control);
+  border-radius: var(--radius-control);
+  background: rgba(16, 18, 20, 0.92);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.media-clip-card__hint--visible {
+  opacity: 1;
+}
+
+.media-clip-card__label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 9px 8px 3px 7px;
+  /* 底部渐变遮罩：保证长图任何颜色上都能读清文字 */
+  background: linear-gradient(180deg, rgba(12, 14, 16, 0), rgba(12, 14, 16, 0.82) 62%);
   pointer-events: none;
 }
 
@@ -2421,10 +2576,6 @@ input[type='color']:disabled {
 /* ------------------------------------------------------------------ 自适应与偏好 */
 
 @media (max-width: 1240px) {
-  .timeline__snap-hint {
-    display: none;
-  }
-
   .titlebar__project {
     max-width: 130px;
   }

@@ -94,7 +94,7 @@
 | 主进程批量导入 + 枚级缩略图协议 | `video:pickManyAndProbe`（多选逐文件探测，单文件失败不阻断整批）；`thumbProtocol.ts`：ffmpeg 抽帧落 `userData/thumbs/<mediaId>.jpg`，`focusnews-thumb://<mediaId>` 仅读已登记项；移出池回收文件 | `tests/ffmpegArgs.test.ts`（缩略图 argv 快照）；应用内启动路径随 `npm run verify:all` 门禁通过 |
 | 素材池/媒体轨 store 动作 | `projectStore`：addMedia/removeMedia/relocateMedia/ack 枚级、insert/move/trim/remove/splitAtFrame；时长恒等式 `timelineEnd-timelineStart === sourceOut-sourceIn` 唯一写入口 | `src/renderer/src/state/projectStore.test.ts`（13 例）+ `tests/mediaClips.test.ts`（纯函数：拆分/仅重叠右移/时间↔源换算） |
 | 旧工程迁移 | `normalizeProject` v1→v2：`refVideo` 折叠为 `media[0]` + 覆盖整段的 mediaClip，旧字段不回流 | `tests/projectSchema.test.ts`（迁移两组） |
-| 左侧 Tab 壳 + 素材库 | `App.tsx` rail__tabs（素材库/水印/导出/进度，同一时刻只展开一个）；卡片拖拽携带 `application/x-focusnews-media` | `Timeline.test.tsx` v2 媒体轨 4 例 + `FOCUSNEWS_SHOT` 可出图 |
+| 左侧 Tab 壳 + 素材库 | `App.tsx` rail__tabs（素材库/水印/字幕/导出/进度，同一时刻只展开一个；v4 后 5 个，窄侧栏里自动换行而不被裁切）；卡片拖拽携带 `application/x-focusnews-media` | `Timeline.test.tsx` v2 媒体轨 4 例 + `FOCUSNEWS_SHOT` 可出图 |
 | 水印（Watermark）模块 | 左侧新增「水印」Tab + `WatermarkPanel`：导入本机图片（`watermark:pick` 用 ffprobe 取原图宽高）、启用/停用/移除；`ffmpegArgs.computeWatermarkGeometry` 以 1080P 为基准（显示尺寸 = 原图 32%，距顶/左各 30px）按输出高度等比换算，四条合成路径统一作为**最后一层** overlay 叠在字幕条之上；预览用同一函数定位 `<img>`（不进 Canvas，透明出口永不烧录台标） | `tests/watermark.test.ts`（几何/argv/图片解析/持久化 20 例）+ `WatermarkPanel.test.tsx`（导入/开关/移除/读数 9 例）+ `tests/ffmpegPipeline.test.ts`（真机 FFmpeg 取像素判定：两阶段单输入 / trim+concat 拼接 / 直管道 3 例） |
 | 双轨时间轴 + 落点高亮 | 媒体轨/字幕轨共享尺规与播放头；拖拽悬停显示吸附落点竖线；拆分按钮 + `canSplitMediaClipAt` 纯谓词 | `Timeline.test.tsx`（拆分启用/禁用/选中/尺规跟随） |
 | 预览按 mediaClip 切源 | `PreviewStage`：播放头落在哪段，`<video>` 就换那枚源文件，`currentTime` 按 `sourceTimeOf` 换算；段间空隙回棋盘格；无 mediaClips 时保留 v1 兼容 | 逐像素一致性（M1-7）仍走同一 `renderFrame`，本次重跑通过 |
@@ -111,6 +111,33 @@
 | 拖拽实时反馈与双向拖拽 | 指针捕获 + 命令式写 CSS 变量（拖拽中**不重渲染**外层界面），HUD 气泡显示「被治理区域 + 邻居」的 px 与百分比；同一条线同时改两区（时间轴 +40 ↔ 预览 −40） | `Splitter.test.tsx`（按下/跟随/抬起、钳制、方向系数、键盘、双击复位、ARIA 读数）+ `usePaneLayout.test.tsx`（拖拽期间渲染次数不变、变量已生效） |
 | 布局偏好持久化 | `shared/paneLayout` 存比例（与分辨率无关）+ `layout/panePrefs` 落 `localStorage` 键 `focusnews.layout.panes.v1`（带版本）；脏数据/隐私模式/配额异常一律回落默认，不阻断渲染 | `tests/paneLayout.test.ts`（像素↔比例往返、脏数据丢弃）+ `panePrefs.test.ts`（读写/删除/异常存储 5 例）+ `usePaneLayout.test.tsx`（冷启动默认、按比例恢复、窗口缩放保持比例、恢复默认清存档） |
 | 预览叠加层绑定画面框 | 伸缩布局会把预览区拖成任意宽高比，而目标分辨率比例不变：`containFrameRect`（`render/hitTest.ts`，内缩 `STAGE_INSET_PX`）算出**与目标分辨率同比例**的画面框，Canvas / 参考视频 / 水印 / 角标 / 提示语全部装进同一个 `.stage__frame`；`usePreviewLoop` 另监听 Canvas 盒子，尺寸一变就置脏重画（否则暂停态下浏览器只能把旧位图非等比拉伸到新盒子 → 画面被压扁）；点选 `displayToNative` 改用画面框为 rect（拿容器盒子算会把黑边算进画面） | `tests/hitTest.test.ts`「画面框」6 例（比例只由目标分辨率决定、容器内不越界、扁/高容器居中装入、比边距还小时不为负、水印相对画面占比不变、点选不再有黑边偏差）；逐像素一致性（M1-7）在 `verify:all` 重跑仍通过（dpr 1.5 / blitSize 1440x810）；`FOCUSNEWS_SHOT=spikes/artifacts/ui-stage-frame.png` 可见棋盘格即为 16:9 画面矩形 |
+
+## 字幕条自定义参数与预设联动（v3.1）的机器化验收
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 编辑即响应（配色 / 字体 / 字号 / 渐变 / 透明度 / 动画 / 文字） | 全部走 `updateClip` → `revision` 自增 → `usePreviewSpec` 重建 → `usePreviewLoop` 置脏重画；写回的是**差集**（`clipStyle.tokensDelta` / `fontScaleDelta`），等于预设声明的值不存进覆盖，`mergeOverrides` 对 tokens/fontScale 整组替换且空集/同值删键 | `tests/clipStyle.test.ts`（差集/删键/计数 19 例）+ `projectStore.test.ts`「切预设与清除自定义」7 例 + `ClipInspector.test.tsx`「改配色：只写偏离预设的令牌」 |
+| 切预设即时应用 + 还原默认 | `updateClip` 见到 `presetId` 走 `clipWithPresetDefaults`：`styleOverrides` 清空、`fontId` 回 `DEFAULT_FONT_ID`、`animation` 回预设声明；文字与入出点不动。重复点当前预设同样还原，`PresetPicker` 先弹二次确认；检查器底部「恢复预设默认（N）」走 `resetClipStyle` | `PresetPicker.test.tsx` 5 例（切预设无确认即还原、同预设确认前不改/取消不改、无自定义不弹窗）+ `ClipInspector.test.tsx` 恢复默认 2 例 |
+| 改动落在看得见的帧 | `clipStyle.revealTargetSec`（纯函数）判定「入场完成→出场开始」窗口，`useRevealClip` 通过 `uiStore.seekHandler`（App 注册）跳转；播放中与已可见时不动播放头 | `tests/clipStyle.test.ts`「编辑后把播放头带到看得见的帧」4 例 + `ClipInspector.test.tsx` 断言 seekHandler 收到 `startTime + inDuration` |
+
+## 字幕轨示意条与左侧「字幕」Tab（v4）的机器化验收
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 字幕轨只留一条上下更窄的示意条 | `ClipCard` 不再渲染副标题/预设名/秒数行：摆位本身就是该字幕在当前画面的**入点→出点**区间（与全局播放头同一 `secToPx` 口径）；CSS 高度 56/50px → 22px 并用 `top:50% + translateY` 居中；入出点拖拽手柄与平移保留；完整读数不丢，进 `title` / `aria-label` | `Timeline.test.tsx`「Timeline 字幕轨示意条」3 例（标签只有主标题、旧 meta 行消失但 title 里仍有时间码、无主标题时用可读占位）；`FOCUSNEWS_SHOT=spikes/artifacts/ui-caption-strip.png` 已出图 |
+| 当前位置相对出入点的可视化 | 播放头落在区间内时条内画一条细游标（`clip-card__cursor`，left 由 `secToPx(playhead) - left` 给出）并提亮条体（`clip-card--onair`） | 同上：区间外无游标、区间内有游标且 left 为有限正像素值 |
+| 左侧「字幕」Tab：按时间顺序的标题列表 | 新 `CaptionListPanel`（`leftTab === 'captions'`）；面板内显式 `sort(startTime)`（不依赖片段写入顺序）；每项 = 主标题 + 副标题 + 入点→出点时间码 + 预设名，播放头落在区间内的项标「正在显示」 | `CaptionListPanel.test.tsx` 7 例（乱序工程仍按时间输出、每项含主/副标题、空态、选中态 aria-pressed、onAir 只标一条） |
+| 点一条 = 选中 + 跳到入点（预览与轨道同步） | `selectClip(id)` → 右侧检查器随即显示；`uiStore.seekHandler`（App 注册的 `seekTo`，含 `setDisplayTime`）落到 `clip.startTime`；播放中先 `setPlaying(false)`（与时间轴刮擦接管播放头同一口径，否则跳过去立刻被时钟带走） | `CaptionListPanel.test.tsx`：seek 收到入点秒、播放中点击先暂停、无 seekHandler 时仍选中不抛异常 |
+
+## 媒体轨时间帧预览条（Thumbnail Strip，v5）的机器化验收
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 按片段时长均匀抽帧并覆盖整个 `[sourceIn, sourceOut]` | 主进程**一次** FFmpeg 调用：`-ss/-t`（输入选项，关键帧快定位）限定窗口 + `fps=N/duration` 重采样 + `scale=128:-2,setsar=1,tile=Nx1:padding=0:margin=0` 横向无缝拼接；密度由卡片像素宽决定（每约 44px 一格），走**档位** `[3,4,6,8,10,12,16,20,24]` 并夹到区间内真实帧数 | `tests/ffmpegArgs.test.ts` argv 快照 2 例（-ss/-t 在 -i 前、tile 格数与 fps、退化输入）；真机实证：8 格→1024x72、24 格→3072x72、不足格数时补位仍出图、`-ss` 越过片尾 → 退出码 -22 不产图 |
+| 预览条作为卡片底图，文字不丢 | `.media-clip-card__strip` 拉满卡片（`object-fit: fill`，需求明确不要求保持原始比例）；素材名与源入出点移到底部渐变遮罩上 | `MediaClipCard.test.tsx`（请求参数与格数、长图铺底、无占位符时不重复请求） |
+| 悬停读数 + 点一格跳转 | 位置→时间用 `stripTimeAtFraction`（与拖拽同一口径吸附帧边界，同时给源坐标与时间轴坐标）；读数与位置**命令式**写入（指针移动不重渲染）；跳转仅在「按下与抬起位移 ≤ 3px」时发生 | `tests/mediaStrip.test.ts`（两端/中点/越界钳制/非整帧吸附）+ `MediaClipCard.test.tsx`（悬停读数、点击跳转、拖拽不跳转、手柄不跳转） |
+| 失败占位 | `url=null`（源不在 / FFmpeg 缺失 / 抽帧报错 / 区间越界）时卡片显示斜纹底 + 图标 + 「无法预览」；素材已移出则单独文案且不发请求；失败结果也进缓存，不会重轰炸主进程 | `MediaClipCard.test.tsx` 两组用例；门禁实测：`spikes/tmp-integration/gate-userdata/strips/` 生成 3 张长图（命名 `<mediaId>-<16位令牌>.jpg`） |
+| 缓存与性能 | 三层：会话内存缓存（key 含**实际文件路径**，换源不换轨必频失效）→ 主进程同 token 并发合并 → 磁盘缓存 `userData/strips`（命中不起子进程，超 240 个按 mtime 淘汰）；渲染侧并发闸门 `STRIP_MAX_CONCURRENT=2` | `tests/mediaStrip.test.ts`（键含 path、令牌稳定且只含十六进制、前缀安全化）+ `MediaClipCard.test.tsx`（同 key 不重请、改入出点重请、逐像素拖宽不跨档不重请）；`verify:all` 20/20 且应用内冒烟真实跑过这条链路 |
 
 ## 重跑取证的最短路径
 

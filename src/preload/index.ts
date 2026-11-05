@@ -9,6 +9,8 @@ import type {
   Fps,
   JobProgress,
   JobResult,
+  MediaStripRequest,
+  MediaStripResult,
   Project,
   VideoMeta
 } from '../shared/types'
@@ -73,7 +75,13 @@ const api = {
     thumbUrl: (mediaId: string, url: string) =>
       ipcRenderer.invoke(CHANNELS.mediaThumbUrl, mediaId, url) as Promise<string | null>,
     /** v2：素材移出池时回收缩略图文件 */
-    removeThumb: (mediaId: string) => ipcRenderer.invoke(CHANNELS.mediaThumbRemove, mediaId) as Promise<void>
+    removeThumb: (mediaId: string) => ipcRenderer.invoke(CHANNELS.mediaThumbRemove, mediaId) as Promise<void>,
+    /**
+     * v5：时间帧预览条（Thumbnail Strip）。主进程一次抽帧并拼成一张长图，
+     * 命中磁盘缓存不起子进程；失败时 url=null，卡片显示占位符。
+     */
+    strip: (request: MediaStripRequest) =>
+      ipcRenderer.invoke(CHANNELS.mediaGenerateStrip, request) as Promise<MediaStripResult>
   },
   export: {
     estimate: (input: EstimateInput) => ipcRenderer.invoke(CHANNELS.exportEstimate, input),

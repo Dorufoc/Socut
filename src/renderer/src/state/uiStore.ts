@@ -6,8 +6,8 @@ import { detectCompat } from '@shared/probe'
 
 export type UiMode = 'basic' | 'advanced'
 
-/** 左侧栏 Tab（v2）：素材库 / 水印 / 导出 / 进度；写入 project.ui.leftTab 持久化。 */
-export type LeftTab = 'media' | 'watermark' | 'export' | 'progress'
+/** 左侧栏 Tab：素材库 / 水印 / 字幕列表 / 导出 / 进度；写入 project.ui.leftTab 持久化。 */
+export type LeftTab = 'media' | 'watermark' | 'captions' | 'export' | 'progress'
 
 export type CompatDialogContent =
   | { kind: 'non169'; label: string }
@@ -39,6 +39,12 @@ export interface UiState {
   notice: string | null
   /** v2：左侧栏当前 Tab（冷启动默认素材库；会话内切换会写回工程） */
   leftTab: LeftTab
+  /**
+   * 预览播放头跳转句柄（由 App 在挂载时注册）。
+   * 样式面板改完参数后要把播放头落到「能看清当前样式」的帧上，否则改动发生在
+   * 片段区间外，用户看到的是“改了但预览没反应”。不进任何持久化。
+   */
+  seekHandler: ((sec: number) => void) | null
 
   setPlaying: (playing: boolean) => void
   setDisplayTime: (sec: number) => void
@@ -53,6 +59,7 @@ export interface UiState {
   refVideoMissing: boolean
   setRefVideoMissing: (missing: boolean) => void
   setLeftTab: (tab: LeftTab) => void
+  setSeekHandler: (handler: ((sec: number) => void) | null) => void
   pushPrompt: (prompt: DialogPrompt) => void
   shiftPrompt: () => void
   beginFontLoad: () => void
@@ -71,6 +78,7 @@ export const useUiStore = create<UiState>((set) => ({
   refVideoMissing: false,
   missingMediaIds: [],
   leftTab: 'media',
+  seekHandler: null,
   dialogQueue: [],
   fontLoadingCount: 0,
   notice: null,
@@ -84,6 +92,7 @@ export const useUiStore = create<UiState>((set) => ({
   setMissingMediaIds: (ids) => set({ missingMediaIds: ids, refVideoMissing: ids.length > 0 }),
   setRefVideoMissing: (missing) => set({ refVideoMissing: missing }),
   setLeftTab: (tab) => set({ leftTab: tab }),
+  setSeekHandler: (handler) => set({ seekHandler: handler }),
   pushPrompt: (prompt) => set((state) => ({ dialogQueue: [...state.dialogQueue, prompt] })),
   shiftPrompt: () => set((state) => ({ dialogQueue: state.dialogQueue.slice(1) })),
   beginFontLoad: () => set((state) => ({ fontLoadingCount: state.fontLoadingCount + 1 })),
