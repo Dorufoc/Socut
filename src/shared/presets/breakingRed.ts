@@ -1,31 +1,32 @@
 import type { Preset } from '../types'
 import {
   INSET,
-  buildBadgePlate,
+  buildSubtitleAbove,
   makeCompactPatches,
   makeUltrawidePatches,
   type TextTier
 } from './layout'
 
 /**
- * 突发新闻：红色徽标板——左侧整高黄色块承担“突发”识别，右侧标题副标题。
- * 徽标块比细竖条更有冲击力，但不用满宽红条压住整幅画面。
+ * 突发新闻：红色主条 + 上方深红副标题小条，左侧整高黄色徽标块。
+ * 副标题条更矮更窄且左缘对齐主条，形成“红色标题牌 + 暗红信息条”的突发版式。
  */
 
 const maxWidth = 'min(1220px@1080p, 66%)' as const
+const minWidth = 'min(440px@1080p, 29%)' as const
 const title: TextTier = { size: 'clamp(44px@1080p, 5.6vh, 82px@1080p)', maxLines: 2, tracking: '1.4px@1080p' }
-const subtitle: TextTier = { size: 'clamp(23px@1080p, 2.7vh, 40px@1080p)', maxLines: 1, tracking: '0.3px@1080p' }
+const subtitle: TextTier = { size: 'clamp(23px@1080p, 2.7vh, 40px@1080p)', maxLines: 2, tracking: '0.3px@1080p' }
 
 export const breakingRed: Preset = {
   id: 'breakingRed',
   name: '突发新闻',
-  description: '整高黄色徽标块 + 红色单板，6 帧急入场；力度最强但不铺满画面。',
+  description: '红色主条 + 暗红副标题条 + 整高黄色徽标块；6 帧急入场，力度最强。',
   tokens: {
     primary: '#C4141E',
     accent: '#FFD400',
     text: '#FFFFFF',
     secondaryText: '#FFE9E9',
-    barBackground: 'rgba(100, 10, 14, 0.94)'
+    barBackground: '#1A0A0C'
   },
   fonts: {
     title: { builtinKey: 'auto', weight: 900, fallbackBuiltinKey: 'builtin-notosanssc-900' },
@@ -40,16 +41,18 @@ export const breakingRed: Preset = {
     ruleLeadInFrames: 1
   },
   safeArea: 'title',
-  layout: buildBadgePlate({
+  layout: buildSubtitleAbove({
     leftInset: INSET.side,
     bottomInset: INSET.bottom,
     maxWidth,
-    minWidth: 'min(500px@1080p, 34%)',
+    minWidth,
+    subMaxWidth: minWidth,
+    gapY: '6px@1080p',
     title,
     subtitle,
-    innerGap: '5px@1080p',
-    plate: { fill: 'primary', paddingX: '28px@1080p', paddingY: '14px@1080p' },
-    badge: { width: '104px@1080p', token: 'accent' }
+    titlePlate: { fill: 'primary', paddingX: '28px@1080p', paddingY: '14px@1080p' },
+    subtitlePlate: { fill: 'barBackground', paddingX: '32px@1080p', paddingY: '9px@1080p', minWidth: '160px@1080p' },
+    titleBlock: { width: '14px@1080p', gap: '18px@1080p', token: 'accent' }
   }),
   patches: {
     compact: makeCompactPatches({ title, subtitle }),

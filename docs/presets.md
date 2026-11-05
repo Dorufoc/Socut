@@ -1,30 +1,36 @@
 # 8 套预设的视觉规格（规格 §7）
 
-实现位置：`src/shared/presets/*.ts`，由 `presets/base.ts` 的 `buildStackLayout()` 统一装配，
-`validatePreset()`（`src/shared/presetSchema.ts`）在启动自检与单测中强制校验下列纪律。
+实现位置：`src/shared/presets/*.ts`，由 `src/shared/presets/layout.ts` 的
+`buildSubtitleAbove()` 统一装配；`validatePreset()`（`src/shared/presetSchema.ts`）
+在启动自检与单测中强制校验下列纪律。
 
-## 共用结构（层叠分层，非「单框双行」）
+## 共用结构（副标题独立矩形在上，主标题矩形在下）
 
 ```
-root（position:absolute，left=safe-title-side，bottom=safe-title-bottom，flex-direction:column）
-  ├─ decoration  装饰线（above：主条上方的细强调线，可按 fadeEnd 端部渐隐）
-  │               或 leftBlock：主条内部的竖向强调色块
-  ├─ primaryBar  主条（row，align-items:center，fill=primary，padding=paddingX）
-  │    ├─ decoration(block)  左侧色块（仅 leftBlock 方案）
-  │    └─ title(text)        主标题：字号 clamp(...)、字距 tracking、单行省略
-  ├─ secondaryBar 副条（row，margin-left=stackOffsetX，margin-top=-overlapY → 与主条叠压）
-  │    └─ subtitle(text)     副标题：字号更小，单行省略
-  └─ decoration（below：部分预设改为底部细线，align-self:flex-end）
+root（position:absolute，left=right=布局边距，bottom=8vh，flex-direction:column，gap=6px）
+  ├─ secondaryBar  副标题矩形（副标题专用，纯色填充）
+  │    ├─ maxWidth = 主条 minWidth（不会比主条宽）
+  │    ├─ padding = 主条左块宽 + 间距（文字与主标题共左线）
+  │    └─ subtitle(text)  字号更小（约主标题 0.4–0.48），可两行
+  └─ primaryBar    主标题矩形（宽度随标题自适应）
+       ├─ decoration(block)  可选：左侧强调块/徽标，撑满整条高度
+       └─ title(text)        主标题：字号 clamp(...)、字距 tracking、最多两行
 ```
 
-绘制顺序 = 树的**前序遍历**顺序（`layoutTree.ts` 收集 → `renderer.ts` 落笔），因此天然形成
-「装饰线 → 背景条 → 主条 → 文字 → 副条」的层叠关系。
+- **副标题必须在上**：两块独立纯色矩形，不融合、不放在主标题下方。
+- **左缘严格对齐**：`secondaryBar.x === primaryBar.x`（回归测试逐例断言）。
+- **副标题更小**：`secondaryBar.h < primaryBar.h`，且副标题矩形不得超过主条宽度。
+- 绘制顺序 = 树的**前序遍历**顺序（`layoutTree.ts` 收集 → `renderer.ts` 落笔）。
 
 ## 动画纪律（全部预设共同满足，测试逐条断言）
 
-动画形态统一为**整体从左到右擦除**：一个片段只有一条绝对擦除线（由片段 root 盒算出），
-条块 / 色块 / 装饰线 / 文字遮罩全部被同一对 x 边界裁切，几何尺寸逐帧完全不变。
+动画形态统一为**整体从左到右擦除**：一个片段只有一条绝对擦除线，
+条块 / 色块 / 文字全部被同一对 x 边界裁切，几何尺寸逐帧完全不变。
 不做位移、不做淡入（`displacement` 字段保留只为旧工程可打开，渲染不再消费）。
+
+**擦除线跨度 = 实际绘制内容的横向包络**（`layers.contentBoundsOf()`），不是 root 盒：
+条宽自适应后，root 仍占满“画宽减边距”，拿它当跨度会让窄条在入场早期整条弹出。
+`hitTest` 也用同一份包络，保证“看到的位置 = 点得到的位置”。
 
 | 项 | 约束 | 实现 |
 |---|---|---|
@@ -32,54 +38,63 @@ root（position:absolute，left=safe-title-side，bottom=safe-title-bottom，fle
 | 出场 | 比入场快 30%–40%（比例 0.55–0.72），左边界向右推进把整条擦去 | `outDuration / inDuration` 受 `OUT_RATIO_RANGE` 校验；`wipeFrom` |
 | 文字 | **逐字渐隐渐现**：每个字符按索引错峰，进度与擦除同源 | `textRevealFrames` 解释为「同时过渡的字符数」，`layers.charStagger()` |
 | 曲线 | 禁弹跳/过冲：只允许 `outQuad/outCubic/outQuart/outQuint/outExpo/smootherstep/linear` | `isOvershootFree()` 采样 64 点验证值域与单调性 |
-| 锚定 | 默认底部标题安全区（部分强刺激预设用动作安全区） | `safeArea` + `safe-title-bottom` / `safe-bottom` |
+| 锚定 | 所有预设统一 8vh 底部锚点 | `INSET.bottom = '8vh'` |
 | 装饰线 | 可提前 `ruleLeadInFrames` 入场，但自身也是左→右生长 | `animation.ruleLeadInFrames` |
 
 ## 编辑入口：选中 → 右侧检查器
 
 - **选中是唯一入口**：时间轴点片段、或直接在预览里点字幕条，都会写到同一个 `selectedClipId`。
   预览点击走 `render/hitTest.ts`：用与绘制同一份擦除线（`layers.sweepOf`）判定“当下真正可见的像素”，
-  所以片段区间外、擦除未盖到的地方、装饰线还没长到的地方都点不中；点空白处不会取消选中。
+  所以片段区间外、擦除未盖到的地方都点不中；点空白处不会取消选中。
 - **右侧检查器只作用于当前片段**：文字、预设、配色令牌、方框透明度、渐变、字体、字号缩放、动画节奏全部写回该片段。
 - **字号缩放**：`styleOverrides.fontScale{title,subtitle}` 是相对预设值的乘法（50%–200%），缩放后仍过
-  `fontSizeCapPx` 的宽/高硬上限，因此 4K 与竖屏下不会失控；归一化时与 1 相差不到 0.5% 视为未设置。
+  `fontSizeCapPx` 的宽/高硬上限；归一化时与 1 相差不到 0.5% 视为未设置。
 - **应用到全部**：`projectSchema.applyClipStyleToAll` 把预设 / 配色 / 字体 / 字号 / 动画复制到其余片段，
-  **文字内容与入出点保留**；必须先过二次确认，工程里只有一个片段时直接提示无需应用。
+  **文字内容与入出点保留**；必须先过二次确认。
 
-## 标题区域宽度与副条自适应
+## 宽度 / 边距 / 换行
 
-- **层叠顺序：副条在上、主条在下**（先入树 = 视觉在上），副条可用 `stackOffsetX` 向右错位；
-  两段的重叠由主条的 `-overlapY` 上边距实现（主条后画，压住副条下沿）。
-- **标题区域（主条）长度 = 预览宽度 − 左右相等边距**：root 同时声明 `left` 与 `right` 为同一个**布局边距**令牌，
-  主条用 `width:100%` 填满它。因此左右边距天然相等，且与文字长短无关。
-- **边距 = 安全区 × `LAYOUT_INSET_SCALE`（当前 0.5）**：安全区（SMPTE/EBU）仍用于预览辅助线与硬约束，
-  但条块实际摆放贴得更近——1080p 标题档左右各 **96px**（主条 1728px）、底部 **54px**。
-  要再改只需调一个常量（`src/shared/constants.ts`）。
-- 主条**不设任何宽度上限**：任何 `maxWidth` 都会压缩宽度、把右侧边距撑大，直接破坏「左右相等」；
-  所以 compact / ultrawide 分支补丁都不再给主条加宽度（超宽档只限制副条 ≤ 70%）。
-- 副条按文字自适应（hug），上限为 `subBarWidth`；文字过长时在条内换行
-  （标题 3 行 / 副标题 2 行），到上限仍放不下时末行以「…」收尾。
-- 条高用 `minHeight`（= 原条高令牌）：单行时与旧版像素一致，多行时按行数长高。
+- **条宽随文字自适应**：主条 / 副标题条都 hug 内容；极短文案用 `minWidth` 保底视觉重量，
+  长文案达到 `maxWidth`（`min(1180px@1080p, 64%)` 一档）后不再变宽，只在条内换行。
+- **左缘 = 标题安全区内缩（10%）× `LAYOUT_INSET_SCALE`（0.5）= 画宽 5%**：1080p 下 96px；
+  副标题矩形与主条矩形共用同一个左缘。
+- **底部锚点 = 8vh**（1080p 下 86px）：所有预设一致，切换预设不上下跳，也不越过 overscan。
+- 副标题条 `maxWidth` 与主条 `minWidth` 取同一令牌，保证「副标题矩形不比主条宽」；
+  两行副标题时条高按行数增长，但仍低于主条。
+- 标题最多 2 行（`financial/person` 为 1 行），副标题最多 2 行；超出以「…」收尾，不静默丢字。
 - 布局测量与绘制共用 `TextMeasurer.wrap()`，不存在「布局按 2 行、绘制按 3 行」的错位。
 
 ## 分支
 
-- **竖屏紧凑（displayRatio < 1.2）**：主条仍是「满宽减等边距」、副条上限 94%、字号按 0.78 收缩（clamp 的 preferred 与 max 同时收缩），副标题强制单行省略。
-- **超宽（displayRatio > 2.0）**：主条保持满宽减等边距（压宽会破坏左右相等），只把副条收到 `min(声明宽度, 70%)`，避免横向拉扯失控。
+- **竖屏紧凑（displayRatio < 1.2）**：主条/副条 maxWidth 92%，标题与副标题单行省略，字号按 0.78 收缩。
+- **超宽（displayRatio > 2.0）**：主条 maxWidth ≤ 56%，副条 ≤ 34%，避免横向被拉成一条横贯全屏的色带。
 - 字号还受**按显示宽度的硬上限**约束（标准 6.2%、紧凑 7.5%），保证 360p→4K→9:16→21:9 全程可读（验收第 9 条）。
 
 ## 逐套参数
 
 | # | id | 名称 | 令牌（primary / accent / text / secondaryText / barBackground） | 结构要点 | 入场→出场（秒） | 曲线 | 遮罩 | 字重 | 备注 |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | `policyAuthority` | 时政权威 | #143A6B / #C9A227 / #FFF / #E8EDF5 / rgba(10,26,48,.86) | 上方金线 22% 宽、主条 58vw、副条错位 28px@1080p、叠压 6px | 0.30 → 0.18 | outQuart | 3 帧 | 衬线主标题（回退思源宋体 Bold），字距 1.6 | 庄重克制，位移 -36px |
-| 2 | `stackedNews` | 层叠新闻 | #0E2E52 / #2F7BD1 / #FFF / #CFE0F5 / rgba(20,62,108,.9) | 左侧强调色块 12px、主副条明显错位 46px、叠压 10px | 0.27 → 0.17 | outCubic | 3 帧 | 黑体 700/400 | 最典型的新闻联播式层叠（仅风格参考） |
-| 3 | `calmEditorial` | 冷静版 | #2A2E35 / #7C8A99 / #F2F4F7 / #BCC6D1 / rgba(58,64,72,.82) | 主条下方 2px 细分割线（34% 宽、右端渐隐 0.6）、条宽 50vw | 0.30 → 0.19 | outQuint | 3 帧 | 500/400 | 低饱和、留白多，垂直入场 14px |
-| 4 | `financeData` | 财经数据 | #10233F / #E8912D / #FFF / #FFD9A0 / rgba(16,35,63,.88) | 左侧琥珀色块 14px、副条 58% 宽、字距 1px | 0.27 → 0.16 | outQuart | 2 帧 | 黑体 700 + **副条锁定等宽字体角色** | 数字对齐；该角色不被片段字体覆盖 |
-| 5 | `globalSimple` | 国际简洁 | #F5F6F8 / #D0202A / #101418 / #3B4450 / rgba(228,232,237,.94) | 亮白主条 + 深色字、上方短促红线 14% | 0.33 → 0.21 | smootherstep | 3 帧 | 700/400 | 跨平台最中性的一套；条内文字为深色系 |
-| 6 | `localWarm` | 地方台暖色 | #B33A17 / #E9A13B / #FFF8EE / #F6D9A8 / rgba(120,45,20,.84) | 上方暖橙装饰线 20%（端部渐隐 0.4）、副条错位 34px | 0.30 → 0.18 | outQuart | 3 帧 | 700/400 | 民生新闻；建议搭配双色渐变文字（面板开启） |
-| 7 | `breakingRed` | 突发新闻 | #C4141E / #FFD400 / #FFF / #FFE9E9 / rgba(122,12,18,.92) | 左侧黄色色块 18px、主条满宽减等边距、副条 54% 反错位 | 0.20 → 0.12 | outExpo | 2 帧 | 900/500，字距 2.4 | 锚定**动作安全区**、擦除入场，力度最强但仍无弹跳 |
-| 8 | `personProfile` | 人物条 | #14283F / #6FA8DC / #FFF / #D6E4F3 / rgba(30,58,95,.8) | 左细色块 8px + 20px 留白、主条满宽减等边距、副条 78% 宽 | 0.36 → 0.22 | smootherstep | 3 帧 | 500/400，字距 3 | 姓名 + 职务双段，节奏最从容 |
+| 1 | `policyAuthority` | 时政权威 | #12345E / #D4AF37 / #FFF / #E6EDF7 / #0A1B2E | 金色左条 6px、衬线主标题、副标题金调小条 | 0.30 → 0.18 | outQuart | 3 帧 | 衬线 700 / 500，字距 1.1 | 庄重克制 |
+| 2 | `stackedNews` | 层叠新闻 | #0E2E52 / #2F7BD1 / #FFF / #D7E6F8 / #164A80 | 加宽蓝色左块 14px、浅蓝副标题条 | 0.27 → 0.17 | outCubic | 3 帧 | 黑体 700/400 | 最典型的广播双台阶 |
+| 3 | `calmEditorial` | 冷静版 | #2A2E35 / #8FA3B8 / #F5F7FA / #CBD5E1 / #171B21 | 4px 灰色细条、无饰线、深灰副标题条 | 0.30 → 0.19 | outQuint | 3 帧 | 500/400 | 低饱和、信息优先 |
+| 4 | `financeData` | 财经数据 | #0F223C / #F0A33A / #FFF / #FFC978 / #08182B | 10px 琥珀左条、上方琥珀等宽读数条 | 0.27 → 0.16 | outQuart | 2 帧 | 700 + **读数锁定等宽字体** | 数字对齐 |
+| 5 | `globalSimple` | 国际简洁 | #F2F4F6 / #C81E28 / #101418 / #3B4450 / #E4E8ED | 浅色主条 + 深色字、红色副标题条 | 0.33 → 0.21 | smootherstep | 3 帧 | 700/500 | 红色小条作边界锚点 |
+| 6 | `localWarm` | 地方台暖色 | #B23A18 / #F0B44E / #FFF8EE / #FFE2B8 / #7A2C12 | 6px 圆角主条、8px 暖橙左条、深暖副标题条 | 0.30 → 0.18 | outQuart | 3 帧 | 700/400 | 民生新闻，亲和 |
+| 7 | `breakingRed` | 突发新闻 | #C4141E / #FFD400 / #FFF / #FFE9E9 / #1A0A0C | 14px 黄色徽标左块、暗红副标题条 | 0.20 → 0.12 | outExpo | 2 帧 | 900/500，字距 1.4 | 力度最强但无弹跳 |
+| 8 | `personProfile` | 人物条 | #172B45 / #6FA8DC / #FFF / #D8E6F5 / #101F31 | 5px 蓝色左条、姓名字号 88 上限、职务副标题条 | 0.36 → 0.22 | smootherstep | 3 帧 | 700/400，字距 1.6 | 姓名大、职务小 |
+
+## 视觉检查（新增）
+
+`npm run visual:check` 会用生产同一套 `buildRenderJob → computeClipBoxes → renderFrame`
+渲染 **8 套预设 × 短/常规/长模拟文案**，输出：
+
+- `spikes/artifacts/visual-check/sheet.png`：8×3 总览（人眼复核）；
+- `spikes/artifacts/visual-check/<preset>-<variant>.png`：单例全帧；
+- `spikes/artifacts/visual-check/report.json`：逐例指标与失败项。
+
+自动断言：文字占条宽比、右侧空白、条高/字号/行数、上下内边距、底边距、左右安全区、
+标题/副标题对比度，以及「副标题在上、左缘对齐、更矮更窄、不宽于主条、文字共左线」。
+任一不达标时进程以退出码 1 结束。
 
 ## 与用户覆盖的关系（规格 §7：自定义作用于令牌层）
 
@@ -89,11 +104,8 @@ root（position:absolute，left=safe-title-side，bottom=safe-title-bottom，fle
 
 ## 评审清单（M2-8 / M4-7 用）
 
-1. 8 套 × {360p, 720p, 1080p, 2K, 4K, 9:16, 21:9} 布局快照已由 `tests/presets.test.ts` 覆盖；
-2. 逐帧评审表已可一键产出（命令见 `docs/verification/M0.md` 的「逐帧动画评审表」一节）：
-   `FOCUSNEWS_REVIEW_SHEET=<png>` 跑一次应用，得到 8 预设 × 7 关键帧（入场起/中/末 · 静止 · 出场前/中/末）
-   的 3700×2600 总览图，画面由生产同一套 `renderFrame` 以原生 1080p 渲染后缩排，背景为 FFmpeg
-   testsrc2 合成的 1080p 画面帧（未使用任何版权素材）。**叠压关系是否清楚、装饰线是否廉价、
-   揭字是否「网页感」仍需人看**，工具只保证每一帧都是真实导出像素；
-   用真实拍摄素材的观感评审需交付方提供素材。
+1. 8 套 × {360p, 720p, 1080p, 2K, 4K, 9:16, 21:9} 布局快照已由 `tests/presets.test.ts` 覆盖，
+   包括「副标题在上、左缘对齐、更矮更窄」的结构契约；
+2. 视觉检查已脚本化：`npm run visual:check`（8 预设 × 3 文案，出图 + 指标 + 退出码）；
+   逐帧动画评审表仍可用 `FOCUSNEWS_REVIEW_SHEET=<png>` 产出 8 预设 × 7 关键帧的动画总览；
 3. 任何「弹跳、回弹、缩放、旋转」类动效一律视为缺陷（曲线表已从源头禁止）。

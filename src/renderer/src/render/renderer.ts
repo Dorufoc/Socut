@@ -1,7 +1,7 @@
 import { ACTION_SAFE_RATIO, TITLE_SAFE_RATIO } from '@shared/constants'
 import type { LayoutBox, RenderJobSpec } from '@shared/types'
 import { motionAt } from './animation'
-import { drawBar, drawRule, drawText, sweepOf, type DrawContext, type WipeSweep } from './layers'
+import { drawBar, drawRule, drawText, contentBoundsOf, sweepOf, type DrawContext, type WipeSweep } from './layers'
 
 /**
  * 唯一像素生产者（规格 §4.3 / §11 纪律 6）。
@@ -51,11 +51,10 @@ export function renderFrame(
     if (globalFrame < clip.startFrame || globalFrame >= clip.endFrame) continue
     const motion = motionAt(clip.animation, globalFrame - clip.startFrame)
     if (!motion.visible) continue
-    // 整条字幕共用一条擦除线：由 root 盒（boxes[0]）与动画比例算出绝对 x，
-    // 所有层（条/色块/线/文字遮罩）都在这条线右侧才可见（规格 §7“整体左→右擦除”）。
-    const root = clip.boxes[0]
-    if (!root) continue
-    const sweep: WipeSweep = sweepOf(motion, root)
+    // 整条字幕共用一条擦除线：边界取**实际绘制内容**的并集，而不是 root 盒。
+    // 条宽现在随文字自适应；若仍用 root（画宽减边距）当擦除跨度，窄条会在入场 20% 时
+    // 就已整条显露，看起来像“瞬间弹出”。用内容并集才能让擦除速度与条宽成正比。
+    const sweep: WipeSweep = sweepOf(motion, contentBoundsOf(clip.boxes))
     // boxes 已是前序遍历结果 = 规格 §7 的分层绘制顺序
     for (const box of clip.boxes) {
       drawBox(ctx, box, sweep, motion.ruleReveal, motion.textStaggerChars)

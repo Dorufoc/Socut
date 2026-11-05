@@ -1,31 +1,31 @@
 import type { Preset } from '../types'
 import {
   INSET,
-  buildSinglePlate,
+  buildSubtitleAbove,
   makeCompactPatches,
   makeUltrawidePatches,
   type TextTier
 } from './layout'
 
 /**
- * 地方台暖色：赭红圆角单板 + 暖橙左条 + 端部渐隐饰线。
- * 圆角与暖色让版式更亲和，但结构仍是「一板两层」，不做满宽。
+ * 地方台暖色：砖红圆角主条 + 上方深暖色副标题小条；圆角更亲和，但两块的左缘严格对齐。
  */
 
 const maxWidth = 'min(1160px@1080p, 63%)' as const
+const minWidth = 'min(380px@1080p, 26%)' as const
 const title: TextTier = { size: 'clamp(42px@1080p, 5.3vh, 76px@1080p)', maxLines: 2, tracking: '1px@1080p' }
-const subtitle: TextTier = { size: 'clamp(22px@1080p, 2.6vh, 38px@1080p)', maxLines: 1, tracking: '0.2px@1080p' }
+const subtitle: TextTier = { size: 'clamp(22px@1080p, 2.2vh, 34px@1080p)', maxLines: 2, tracking: '0.2px@1080p' }
 
 export const localWarm: Preset = {
   id: 'localWarm',
   name: '地方台暖色',
-  description: '赭红圆角单板 + 暖橙左条，端部渐隐饰线；民生新闻常用，亲和而不刺眼。',
+  description: '砖红圆角主条 + 深暖色副标题小条；民生新闻常用，亲和而不刺眼。',
   tokens: {
     primary: '#B23A18',
     accent: '#F0B44E',
     text: '#FFF8EE',
     secondaryText: '#FFE2B8',
-    barBackground: 'rgba(90, 34, 16, 0.92)'
+    barBackground: '#7A2C12'
   },
   fonts: {
     title: { builtinKey: 'auto', weight: 700, fallbackBuiltinKey: 'builtin-notosanssc-700' },
@@ -40,25 +40,18 @@ export const localWarm: Preset = {
     ruleLeadInFrames: 2
   },
   safeArea: 'title',
-  layout: buildSinglePlate({
+  layout: buildSubtitleAbove({
     leftInset: INSET.side,
     bottomInset: INSET.bottom,
     maxWidth,
-    minWidth: '340px@1080p',
+    minWidth,
+    subMaxWidth: minWidth,
+    gapY: '6px@1080p',
     title,
     subtitle,
-    innerGap: '5px@1080p',
-    plate: { fill: 'primary', paddingX: '32px@1080p', paddingY: '15px@1080p', radius: '6px@1080p' },
-    leftBlock: { width: '8px@1080p', gap: '20px@1080p', token: 'accent' },
-    rule: {
-      placement: 'above',
-      width: '38%',
-      height: '4px@1080p',
-      gap: '9px@1080p',
-      token: 'accent',
-      opacity: 0.95,
-      fadeEnd: 0.5
-    }
+    titlePlate: { fill: 'primary', paddingX: '32px@1080p', paddingY: '15px@1080p', radius: '6px@1080p' },
+    subtitlePlate: { fill: 'barBackground', paddingX: '28px@1080p', paddingY: '8px@1080p', radius: '4px@1080p', minWidth: '150px@1080p' },
+    titleBlock: { width: '8px@1080p', gap: '20px@1080p', token: 'accent' }
   }),
   patches: {
     compact: makeCompactPatches({ title, subtitle }),

@@ -1,6 +1,6 @@
 import type { RenderJobSpec } from '@shared/types'
 import { motionAt } from './animation'
-import { sweepOf, visibleSpanX } from './layers'
+import { contentBoundsOf, sweepOf, visibleSpanX } from './layers'
 
 /**
  * 预览命中测试（「在预览区域点击字幕条即选中该片段」）。
@@ -36,9 +36,8 @@ export function hitTestClips(
     if (frame < clip.startFrame || frame >= clip.endFrame) continue
     const motion = motionAt(clip.animation, frame - clip.startFrame)
     if (!motion.visible) continue
-    const root = clip.boxes[0]
-    if (!root) continue
-    const sweep = sweepOf(motion, root)
+    // 擦除线与绘制同源：用实际内容包络（自适应宽条不能用 root）
+    const sweep = sweepOf(motion, contentBoundsOf(clip.boxes))
 
     for (let boxIndex = clip.boxes.length - 1; boxIndex >= 0; boxIndex -= 1) {
       const box = clip.boxes[boxIndex]

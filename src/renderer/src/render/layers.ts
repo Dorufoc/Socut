@@ -67,6 +67,27 @@ function roundedPath(
 }
 
 /**
+ * 实际可见内容的横向包络（排除纯布局容器）。
+ * 擦除线、命中测试都必须用它而不是 root 盒：条宽随文字自适应后，
+ * root 仍占满「画宽减边距」，用它会让窄条在入场早期就整条显露。
+ */
+export function contentBoundsOf(boxes: LayoutBox[]): { x: number; w: number } {
+  let left = Number.POSITIVE_INFINITY
+  let right = Number.NEGATIVE_INFINITY
+  for (const box of boxes) {
+    if (box.kind === 'row' || box.kind === 'col') continue
+    if (box.w <= 0 || box.h <= 0) continue
+    left = Math.min(left, box.x)
+    right = Math.max(right, box.x + box.w)
+  }
+  if (!Number.isFinite(left) || !Number.isFinite(right) || right <= left) {
+    const root = boxes[0]
+    return root ? { x: root.x, w: Math.max(1, root.w) } : { x: 0, w: 1 }
+  }
+  return { x: left, w: Math.max(1, right - left) }
+}
+
+/**
  * 条块 / 色块：几何尺寸不变，用同一条擦除线裁出（左→右）。
  * 渐变基于**完整**盒几何生成，所以擦除过程中颜色不会跟着被压缩。
  */
@@ -223,11 +244,18 @@ export function drawText(ctx: DrawContext, box: LayoutBox, sweep: WipeSweep, sta
     for (let ci = 0; ci < chars.length; ci++) {
       const charAlpha = stagger(charIndex, sweep)
       charIndex += 1
+      const charWidth = widths[ci] ?? 0
+      // 已经完整落在擦除窗口外的字符直接跳过（clip 也会裁掉，但跳过可减少无效落笔，
+      // 同时让「逐字渐显不得越线」的约束在录制指令层也能被验证）
+      if (cursor > win.left + win.width + 0.5 || cursor + charWidth < win.left - 0.5) {
+        cursor += charWidth
+        continue
+      }
       if (charAlpha > 0.002) {
         ctx.globalAlpha = clampAlpha(alpha * charAlpha)
         ctx.fillText(chars[ci] ?? '', Math.round(cursor), Math.round(baseline))
       }
-      cursor += widths[ci] ?? 0
+      cursor += charWidth
     }
   }
 

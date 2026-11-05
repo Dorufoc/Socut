@@ -149,6 +149,8 @@ async function main() {
     await step('应用内：逐帧动画评审表出图（M4-7）', node, [vite, 'dev'], {
       ...base, FOCUSNEWS_SMOKE: '0', FOCUSNEWS_REVIEW_SHEET: path.join(artifacts, 'review-sheet-1080p.png'), FOCUSNEWS_REVIEW_BACKDROP: path.join(artifacts, 'review-backdrop.png')
     }, 600_000)
+    // 视觉检查：8 预设 × 短/常规/长文案，出图 + 指标，失败时非 0 退出码
+    await step('应用内：字幕条视觉检查（8 预设 × 3 文案）', node, ['scripts/visual-check.mjs'], {}, 600_000)
   }
 
   const failed = results.filter((item) => !item.ok)

@@ -105,14 +105,14 @@ const SAMPLE_TEXTS: Record<PresetId, Record<Variant, SampleText>> = {
 
 /** 每套预设的结构签名（用于报告“8 套里到底有几种版式”）。 */
 const STRUCTURE: Record<PresetId, string> = {
-  policyAuthority: '单板+顶线+左条',
-  stackedNews: '单板+宽左块+顶条',
-  calmEditorial: '半透明轻底+细竖线',
-  financeData: '双栏同排（标题+读数）',
-  globalSimple: '浅色单板+顶线+左条',
-  localWarm: '圆角单板+顶线+左条',
-  breakingRed: '整高徽标块+红板',
-  personProfile: '窄名牌+底部细线'
+  policyAuthority: '藏青主条 + 金色副标题条',
+  stackedNews: '深蓝主条 + 浅蓝副标题条',
+  calmEditorial: '中性灰主条 + 深灰副标题条',
+  financeData: '深蓝主条 + 琥珀读数副标题条',
+  globalSimple: '浅色主条 + 红色副标题条',
+  localWarm: '砖红主条 + 深暖副标题条',
+  breakingRed: '红色主条 + 暗红副标题条 + 黄徽标',
+  personProfile: '深蓝姓名条 + 职务副标题条'
 }
 
 interface Bounds {
@@ -135,6 +135,11 @@ function union(boxes: LayoutBox[]): Bounds | null {
 interface CaseMetrics extends VisualSampleMetrics {
   barWidth: number
   barHeight: number
+  subBarWidth: number
+  subBarHeight: number
+  subBarX: number
+  subBarY: number
+  primaryBarY: number
   contentWidth: number
   contentRight: number
   bottomPx: number
@@ -143,15 +148,16 @@ interface CaseMetrics extends VisualSampleMetrics {
 
 function measureCase(boxes: LayoutBox[], width: number, height: number): CaseMetrics | null {
   const bar = boxes.find((box) => box.role === 'primaryBar')
+  const subBar = boxes.find((box) => box.role === 'secondaryBar')
   const title = boxes.find((box) => box.role === 'title' && box.text)
   const subtitle = boxes.find((box) => box.role === 'subtitle' && box.text)
-  if (!bar || !title?.text || !subtitle?.text) return null
+  if (!bar || !subBar || !title?.text || !subtitle?.text) return null
 
-  // 内容 = 标题 + 副标题 + 条内的装饰色块（徽标/左条也承担视觉重量，不能算空白）
+  // 主条内容 = 标题 + 条内装饰色块；副标题在上方独立矩形里，不能算进主条占比
   const inBarBlocks = boxes.filter(
     (box) => box.kind === 'block' && box.role === 'decoration' && box.y >= bar.y - 1 && box.y + box.h <= bar.y + bar.h + 1
   )
-  const content = union([title, subtitle, ...inBarBlocks])
+  const content = union([title, ...inBarBlocks])
   if (!content) return null
 
   const contentWidth = Math.max(0, content.right - bar.x)
@@ -160,7 +166,7 @@ function measureCase(boxes: LayoutBox[], width: number, height: number): CaseMet
   const lowest = drawn.reduce((max, box) => Math.max(max, box.y + box.h), 0)
 
   const barFill = bar.fill?.color ?? 'rgba(0,0,0,1)'
-  const subtitleBottom = Math.max(title.y + title.h, subtitle.y + subtitle.h)
+  const subFill = subBar.fill?.color ?? 'rgba(0,0,0,1)'
   const titleLines = Math.max(1, Math.round(title.h / title.text.lineHeightPx))
   return {
     textRatio: textWidthRatio(contentWidth, bar.w),
@@ -168,14 +174,19 @@ function measureCase(boxes: LayoutBox[], width: number, height: number): CaseMet
     barFontRatio: bar.h / (title.text.sizePx * titleLines),
     subFontRatio: subtitle.text.sizePx / title.text.sizePx,
     padTop: title.y - bar.y,
-    padBottom: bar.y + bar.h - subtitleBottom,
+    padBottom: bar.y + bar.h - (title.y + title.h),
     bottomRatio: (height - lowest) / height,
     leftRatio: bar.x / width,
     titleContrast: contrastRatio(title.text.color, barFill),
-    subtitleContrast: contrastRatio(subtitle.text.color, barFill),
+    subtitleContrast: contrastRatio(subtitle.text.color, subFill),
     titleLines,
     barWidth: Math.round(bar.w),
     barHeight: Math.round(bar.h),
+    subBarWidth: Math.round(subBar.w),
+    subBarHeight: Math.round(subBar.h),
+    subBarX: Math.round(subBar.x),
+    subBarY: Math.round(subBar.y),
+    primaryBarY: Math.round(bar.y),
     contentWidth: Math.round(contentWidth),
     contentRight: Math.round(contentRight),
     bottomPx: Math.round(height - lowest),
@@ -287,16 +298,36 @@ export async function runVisualCheck(input: VisualCheckInput): Promise<VisualChe
       const title = boxes.find((box) => box.role === 'title')
       const subtitle = boxes.find((box) => box.role === 'subtitle')
       const bar = boxes.find((box) => box.role === 'primaryBar')
+      const subBar = boxes.find((box) => box.role === 'secondaryBar')
 
-      if (bar && title && subtitle) {
-        const sideBySide = subtitle.x >= title.x + title.w + 1
-        if (!sideBySide && subtitle.y < title.y) failures.push(`${prefix}副标题跑到了主标题上方（阅读顺序倒置）`)
-        if (subtitle.x < bar.x - 1 || subtitle.x + subtitle.w > bar.x + bar.w + 1) {
-          failures.push(`${prefix}副标题溢出条块左右边界`)
+      if (bar && subBar) {
+        if (subBar.y + subBar.h > bar.y + 1) failures.push(`${prefix}副标题矩形不在主条上方`)
+        if (Math.abs(subBar.x - bar.x) > 1) {
+          failures.push(`${prefix}副标题矩形左侧未与主条对齐（Δ${Math.round(subBar.x - bar.x)}px）`)
         }
+        if (subBar.w > bar.w + 1) {
+          failures.push(`${prefix}副标题矩形比主条宽（${Math.round(subBar.w)} > ${Math.round(bar.w)}）`)
+        }
+        if (subBar.h >= bar.h) {
+          failures.push(`${prefix}副标题矩形不够小（高 ${Math.round(subBar.h)} ≥ 主条 ${Math.round(bar.h)}）`)
+        }
+        if (!subBar.fill) failures.push(`${prefix}副标题缺少纯色背景`)
+      } else {
+        failures.push(`${prefix}缺少副标题矩形`)
+      }
+
+      if (bar && title) {
         if (title.x < bar.x - 1 || title.x + title.w > bar.x + bar.w + 1) {
-          failures.push(`${prefix}标题溢出条块左右边界`)
+          failures.push(`${prefix}标题溢出主条左右边界`)
         }
+      }
+      if (subBar && subtitle) {
+        if (subtitle.x < subBar.x - 1 || subtitle.x + subtitle.w > subBar.x + subBar.w + 1) {
+          failures.push(`${prefix}副标题文字溢出其矩形`)
+        }
+      }
+      if (title && subtitle && Math.abs(subtitle.x - title.x) > 2) {
+        failures.push(`${prefix}副标题文字未与主标题共左线（Δ${Math.round(subtitle.x - title.x)}px）`)
       }
 
       // 渲染全帧（稳态帧：入场完成后再多两帧）
@@ -373,7 +404,7 @@ function composeSheet(
   ctx.fillStyle = '#9fb0c2'
   ctx.font = '400 18px "Noto Sans SC", system-ui, sans-serif'
   ctx.fillText(
-    `${frameWidth}×${frameHeight} @30fps · 背景左白/中灰/右黑用于检查边界 · 通过=文字占比/右侧空白/条高/内边距/安全区/对比度全部达标`,
+    `${frameWidth}×${frameHeight} @30fps · 副标题矩形在上、左缘与主条对齐 · 背景左白/中灰/右黑用于检查边界`,
     pad,
     pad + 60
   )
@@ -399,7 +430,7 @@ function composeSheet(
     ctx.font = '600 17px "Noto Sans SC", system-ui, sans-serif'
     const m = item.metrics
     const summary = m
-      ? `条 ${m.barWidth}×${m.barHeight} · 文字 ${(m.textRatio * 100).toFixed(0)}% · 底距 ${m.bottomPx}px · 对比 ${
+      ? `条 ${m.barWidth}×${m.barHeight} · 副 ${m.subBarWidth}×${m.subBarHeight} · 文字 ${(m.textRatio * 100).toFixed(0)}% · 底距 ${m.bottomPx}px · 对比 ${
           m.titleContrast === null ? '—' : m.titleContrast.toFixed(1)
         }`
       : '无度量'
