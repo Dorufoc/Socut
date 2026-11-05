@@ -36,6 +36,8 @@ export interface MediaClipCardProps {
   onTrim: (patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
   /** 点击预览条某处：seek 到该时间轴位置（吸附到帧边界后交给上层） */
   onSeek: (timelineSec: number) => void
+  /** 一次拖拽结束时回调（上层用它做「主轨对齐」重排；不传则什么都不做） */
+  onCommit?: () => void
 }
 
 type Edge = 'in' | 'out' | 'move'
@@ -57,7 +59,8 @@ export function MediaClipCard({
   onSelect,
   onMove,
   onTrim,
-  onSeek
+  onSeek,
+  onCommit
 }: MediaClipCardProps): ReactElement {
   const dragRef = useRef<DragState | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
@@ -143,6 +146,8 @@ export function MediaClipCard({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
+    // 拖拽收尾：先让上层把「主轨对齐」重排跑完，再判是否算一次点击
+    onCommit?.()
     // 只有「整段那一按」且几乎没位移，才当作点一格跳转；手柄区域走不到这里
     if (drag.edge !== 'move' || !isStripTap(event.clientX - drag.pointerX)) return
     const at = timeAt(event.clientX)

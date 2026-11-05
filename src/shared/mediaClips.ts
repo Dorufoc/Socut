@@ -130,3 +130,28 @@ export function mediaSpanFrames(tracks: MediaClip[], fps: Fps): { startFrame: nu
 export function frameToSec(frame: number, fps: Fps): number {
   return frameTimeSec(frame, fps)
 }
+
+/**
+ * 主轨对齐（snap-together）：按时间轴顺序从左到右**紧贴排列**，间隙恒为 0。
+ *
+ * - 顺序 = 当前的 timelineStartSec 升序（稳定排序，先后来的保持先后）；
+ * - 时长不变（按帧数转移，不会因秒的舍入漂移）；
+ * - 字幕轨不受影响——它本来就不在主轨上，允许留空。
+ */
+export function compactMediaClips(tracks: MediaClip[], fps: Fps): MediaClip[] {
+  let cursorFrame = 0
+  return sortMediaClips(tracks).map((clip) => {
+    const startFrame = timeToFrameFloor(clip.timelineStartSec, fps)
+    const endFrame = timeToFrameFloor(clip.timelineEndSec, fps)
+    const durationFrames = Math.max(1, endFrame - startFrame)
+    const start = frameToSec(cursorFrame, fps)
+    const end = frameToSec(cursorFrame + durationFrames, fps)
+    cursorFrame += durationFrames
+    return {
+      ...clip,
+      timelineStartSec: start,
+      timelineEndSec: end,
+      sourceOutSec: snapTimeToFrame(clip.sourceInSec + (end - start), fps)
+    }
+  })
+}

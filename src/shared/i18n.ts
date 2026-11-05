@@ -96,7 +96,14 @@ export const TEXT = {
     empty: '暂无片段',
     /** v4：字幕轨窄示意条的悬停读数（只给三个时间，不写操作说明） */
     stripHint: (start: string, end: string, current: string) =>
-      `入点 ${start} → 出点 ${end} · 当前 ${current}`
+      `入点 ${start} → 出点 ${end} · 当前 ${current}`,
+    /** v6.2：时间轴工具栏三个开关（说明只在 hover） */
+    snapTogether: '主轨对齐',
+    snapTogetherHint: '主轨片段从左到右紧贴，不留空隙',
+    magneticSnap: '自动吸附',
+    magneticSnapHint: '拖拽时自动贴到相邻片段的首尾',
+    hoverPreview: '预览轴',
+    hoverPreviewHint: '悬停时用黄线预览帧位置'
   },
 
   /** 左侧「字幕」Tab：按时间顺序列出全部标题 */
@@ -135,12 +142,14 @@ export const TEXT = {
     warmth: '冷暖',
     advanced: '高级',
     vibrance: '光感',
+    vibranceHint: '抬中调、护高光，脏色轻推；肤色不冲顶',
+    missingMedia: '素材已移出',
     curves: '曲线',
-    curveShadow: '阴影',
-    curveMid: '中间调',
-    curveHighlight: '高光',
+    curveMaster: '亮度',
+    resetCurve: '复位',
+    interact: '交互',
+    interactHint: '在预览里拖角缩放、拖画面平移、拖顶部圆点旋转',
     reset: '恢复默认',
-    resetCurves: '曲线复位',
     resetHint: '本条片段的画面参数全部回到默认值'
   },
 

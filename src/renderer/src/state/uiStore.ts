@@ -25,6 +25,10 @@ export interface DialogPrompt {
   resolve: (answer: DialogAnswer) => void
 }
 
+/** 时间轴工具栏的三个开关 */
+export type TimelineTool = 'snapTogether' | 'magneticSnap' | 'hoverPreview'
+export type TimelineTools = Record<TimelineTool, boolean>
+
 export interface UiState {
   playing: boolean
   /** 播放头（秒），仅供 UI 文本显示，节流更新 */
@@ -60,6 +64,12 @@ export interface UiState {
   setRefVideoMissing: (missing: boolean) => void
   setLeftTab: (tab: LeftTab) => void
   setSeekHandler: (handler: ((sec: number) => void) | null) => void
+  /** 预览里的画面交互层（拖拽缩放/平移/旋转）：关掉后字幕点选恢复原样 */
+  stageInteract: boolean
+  toggleStageInteract: () => void
+  /** 时间轴工具栏三个开关（不跨会话记忆，默认全关 = 与旧行为一致） */
+  timelineTools: TimelineTools
+  toggleTimelineTool: (tool: TimelineTool) => void
   pushPrompt: (prompt: DialogPrompt) => void
   shiftPrompt: () => void
   beginFontLoad: () => void
@@ -93,6 +103,12 @@ export const useUiStore = create<UiState>((set) => ({
   setRefVideoMissing: (missing) => set({ refVideoMissing: missing }),
   setLeftTab: (tab) => set({ leftTab: tab }),
   setSeekHandler: (handler) => set({ seekHandler: handler }),
+  // 默认开：选中媒体段就是来调画面的；万一挡住字幕点选，面板上一键关掉
+  stageInteract: true,
+  toggleStageInteract: () => set((state) => ({ stageInteract: !state.stageInteract })),
+  timelineTools: { snapTogether: false, magneticSnap: false, hoverPreview: false },
+  toggleTimelineTool: (tool) =>
+    set((state) => ({ timelineTools: { ...state.timelineTools, [tool]: !state.timelineTools[tool] } })),
   pushPrompt: (prompt) => set((state) => ({ dialogQueue: [...state.dialogQueue, prompt] })),
   shiftPrompt: () => set((state) => ({ dialogQueue: state.dialogQueue.slice(1) })),
   beginFontLoad: () => set((state) => ({ fontLoadingCount: state.fontLoadingCount + 1 })),

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
 import { fpsToString } from '@shared/constants'
-import { MEDIA_GRADE_FILTER_ID, curveTableValues, mediaVideoFilter, mediaVideoTransform, needsChannelTable } from '@shared/mediaClipVideo'
+import { MEDIA_GRADE_FILTER_ID, curveTableValues, defaultMediaVideo, mediaVideoFilter, mediaVideoTransform, needsChannelTable } from '@shared/mediaClipVideo'
 import { sourceTimeOf } from '@shared/mediaClips'
 import { computeWatermarkGeometry } from '@shared/ffmpegArgs'
 import type { RenderJobSpec } from '@shared/types'
@@ -10,6 +10,7 @@ import { containFrameRect, displayToNative, hitTestClips } from '../render/hitTe
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 import { FontLoadingOverlay } from '../dialog/FontLoadingOverlay'
+import { StageTransformOverlay } from './StageTransformOverlay'
 
 /**
  * 预览舞台（规格 §4.3）：
@@ -108,6 +109,19 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     const filter = mediaVideoFilter(videoEdit)
     return { ...(transform !== 'none' ? { transform } : {}), ...(filter !== 'none' ? { filter } : {}) }
   }, [videoEdit])
+
+  /**
+   * 画面交互层只在「选中媒体段 + 打开交互开关 + 该段正处在播放头下」时出现：
+   * 否则手柄会画在一个看不见的画面位置上，拖了也看不到效果。
+   */
+  const selectionKind = useProjectStore((state) => state.selectionKind)
+  const selectedMediaClipId = useProjectStore((state) => state.selectedMediaClipId)
+  const stageInteract = useUiStore((state) => state.stageInteract)
+  const activeMediaClip = mediaSource?.clip ?? null
+  const overlayClip =
+    stageInteract && selectionKind === 'media' && activeMediaClip && activeMediaClip.id === selectedMediaClipId
+      ? activeMediaClip
+      : null
 
   /**
    * 画面框：量的是**外层容器**而不是 Canvas 自己——尺寸变化时 Canvas 盒子会被我们写回，
@@ -278,6 +292,15 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
         {/* 水印合成层：与导出同一套几何换算，叠在字幕条之上（与滤镜链顺序一致） */}
         {watermarkStyle ? (
           <img className="stage__watermark" src={watermarkUrl ?? undefined} alt="" style={watermarkStyle} draggable={false} />
+        ) : null}
+
+        {/* 变换交互层：四角缩放 / 画面内平移 / 顶部旋转，与面板滑杆同源 */}
+        {overlayClip && frame ? (
+          <StageTransformOverlay
+            clip={overlayClip}
+            video={overlayClip.video ?? defaultMediaVideo()}
+            frame={{ width: frame.width, height: frame.height }}
+          />
         ) : null}
 
         <div className="stage__badges">

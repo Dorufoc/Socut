@@ -5,6 +5,7 @@ import { FPS_30 } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import { frameTimeSec } from '@shared/fps'
+import { secondsToTimecode } from '@shared/timecode'
 import type { MediaItem, Project, VideoMeta } from '@shared/types'
 import { Timeline } from './Timeline'
 import { useProjectStore } from '../state/projectStore'
@@ -42,6 +43,9 @@ beforeAll(() => {
     const left = this.classList.contains('clip-card') ? 400 : 0
     return { width, left, top: 0, height: 40, right: left + width, bottom: 40, x: left, y: 0, toJSON: () => ({}) } as DOMRect
   }
+  // jsdom 的 clientWidth 恒为 0：不给个值的话，effect 里那句
+  // `setWidthPx(Math.max(120, element.clientWidth))` 会盖掉 ResizeObserver 刚写入的真实宽度
+  Object.defineProperty(Element.prototype, 'clientWidth', { configurable: true, get: () => TRACK_WIDTH })
   class ResizeObserverStub {
     private readonly callback: ResizeObserverCallback
     constructor(callback: ResizeObserverCallback) {
@@ -65,6 +69,7 @@ afterEach(() => {
   act(() => {
     useProjectStore.setState({ project: createDefaultProject('空'), selectedClipId: null, fonts: [] })
     useUiStore.setState({ playing: false, displayTimeSec: 0, notice: null })
+    useUiStore.setState({ timelineTools: { snapTogether: false, magneticSnap: false, hoverPreview: false } })
   })
 })
 
@@ -292,5 +297,162 @@ describe('Timeline 字幕轨示意条', () => {
     seed()
     const root = renderTimeline(vi.fn())
     expect((root.querySelector('.clip-card__label') as HTMLElement).textContent).toBe(TEXT.captions.noTitle)
+  })
+})
+
+/**
+ * 时间轴工具栏（v6.2）：主轨对齐 / 自动吸附 / 预览轴。
+ *
+ * 轨道宽 1000px、总长 8s（见下方 seedTools），所以吸附窗口 = 10px = 0.08s，
+ * 拖拽位移可以直接换算成秒来断言。
+ */
+function meta(): VideoMeta {
+  return {
+    path: 'C:/media/a.mp4',
+    containerName: 'mp4',
+    width: 1920,
+    height: 1080,
+    sar: null,
+    displayRatio: 1920 / 1080,
+    rFrameRate: { num: 30, den: 1 },
+    avgFrameRate: { num: 30, den: 1 },
+    pixFmt: 'yuv420p',
+    colorPrimaries: null,
+    colorSpace: null,
+    colorTransfer: null,
+    colorRange: null,
+    videoCodec: 'h264',
+    audioCodec: 'aac',
+    audioChannels: 2,
+    durationSec: 30,
+    nbFrames: null,
+    bitRateKbps: null
+  }
+}
+
+/**
+ * 媒体轨：A [0,2] + B [5,7]（中间留 3s 空隙）；
+ * 另放一条 [0,30] 的字幕条把时间轴拉到 31s，这样拖拽不会撞到轨道末尾的夹取，
+ * 吸附窗口 = 10px = 0.31s，位移与秒的换算在测试里可以直接算。
+ */
+const DURATION_SEC = 31
+const timeAtPx = (px: number): number => (px / 1000) * DURATION_SEC
+
+function seedTools(): void {
+  const project = createDefaultProject('工具')
+  project.fps = FPS_30
+  const item: MediaItem = {
+    id: 'media-1',
+    path: 'C:/media/a.mp4',
+    name: 'a.mp4',
+    meta: meta(),
+    non169Ack: true,
+    hdrAck: true,
+    vfrPolicy: 'none',
+    compactMode: 'auto',
+    thumbnailUrl: '',
+    importedAt: '2026-01-01T00:00:00.000Z'
+  }
+  project.media = [item]
+  const subtitle = createClip({ startTime: 0, fps: FPS_30 })
+  subtitle.endTime = 30
+  project.clips = [subtitle]
+  project.mediaClips = [
+    { id: 'a', mediaId: item.id, timelineStartSec: 0, timelineEndSec: 2, sourceInSec: 0, sourceOutSec: 2 },
+    { id: 'b', mediaId: item.id, timelineStartSec: 5, timelineEndSec: 7, sourceInSec: 0, sourceOutSec: 2 }
+  ]
+  useProjectStore.setState({ project, selectedClipId: null, selectedMediaClipId: null, fonts: [] })
+}
+
+const toolButton = (root: HTMLElement, name: string): HTMLButtonElement =>
+  Array.from(root.querySelectorAll('.timeline__bar button')).find((button) => button.textContent === name) as HTMLButtonElement
+
+const mediaClip = (id: string) => useProjectStore.getState().project.mediaClips.find((clip) => clip.id === id)!
+
+describe('时间轴工具栏', () => {
+  it('三个开关默认关闭，点一下变选中态（aria-pressed 同步）', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+
+    for (const name of [TEXT.timeline.snapTogether, TEXT.timeline.magneticSnap, TEXT.timeline.hoverPreview]) {
+      expect(toolButton(root, name).getAttribute('aria-pressed')).toBe('false')
+    }
+
+    fireEvent.click(toolButton(root, TEXT.timeline.magneticSnap))
+    expect(toolButton(root, TEXT.timeline.magneticSnap).getAttribute('aria-pressed')).toBe('true')
+    expect(toolButton(root, TEXT.timeline.magneticSnap).className).toContain('btn--primary')
+    // 其余两个不受影响
+    expect(toolButton(root, TEXT.timeline.snapTogether).getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('主轨对齐打开：所有媒体段从左到右紧贴，间隙为 0；关掉后允许再拉开', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+    expect(mediaClip('b').timelineStartSec).toBe(5)
+
+    fireEvent.click(toolButton(root, TEXT.timeline.snapTogether))
+
+    expect(mediaClip('a').timelineStartSec).toBe(0)
+    expect(mediaClip('a').timelineEndSec).toBe(2)
+    expect(mediaClip('b').timelineStartSec).toBe(2)
+    expect(mediaClip('b').timelineEndSec).toBe(4)
+
+    // 关掉开关：不再重排，片段停在当前位置（行为回到「允许空隙」）
+    fireEvent.click(toolButton(root, TEXT.timeline.snapTogether))
+    expect(toolButton(root, TEXT.timeline.snapTogether).getAttribute('aria-pressed')).toBe('false')
+    expect(mediaClip('b').timelineStartSec).toBe(2)
+  })
+
+  it('自动吸附打开：拖到邻居边缘附近会被吸住，并画出目标边缘高亮线', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+    fireEvent.click(toolButton(root, TEXT.timeline.magneticSnap))
+
+    const card = root.querySelector('.media-clip-card') as HTMLElement
+    // 往右拖 90px → 起点≈2.8s、尾巴≈4.8s，离 B 的开头 5s 只差 0.2s（窗口 0.31s）
+    fireEvent.pointerDown(card, { pointerId: 1, clientX: 0 })
+    fireEvent.pointerMove(card, { pointerId: 1, clientX: 90 })
+
+    expect(mediaClip('a').timelineStartSec).toBe(3) // 吸附后尾巴恰好接上 B 的开头
+    expect(mediaClip('a').timelineEndSec).toBe(5)
+    expect(root.querySelector('.timeline__snap-line')).toBeTruthy()
+  })
+
+  it('自动吸附关闭：同样的拖动不吸附，也没有高亮线', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+    const target = root.querySelector('.media-clip-card') as HTMLElement
+
+    fireEvent.pointerDown(target, { pointerId: 2, clientX: 0 })
+    fireEvent.pointerMove(target, { pointerId: 2, clientX: 90 })
+
+    // 不吸附：停在帧吸附后的原位量（2.8s），不会跳到 3s
+    expect(mediaClip('a').timelineStartSec).not.toBe(3)
+    expect(mediaClip('a').timelineStartSec).toBeCloseTo(2.8, 3)
+    expect(root.querySelector('.timeline__snap-line')).toBeNull()
+  })
+
+  it('预览轴：开着时悬停出黄线并顶掉蓝色播放头，移出即消失', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+    const timelineEl = root.querySelector('.timeline') as HTMLElement
+
+    // 默认关闭：移动鼠标不产生预览轴
+    fireEvent.pointerMove(timelineEl, { pointerId: 3, pointerType: 'mouse', clientX: 500 })
+    expect(root.querySelector('.timeline__hover-line')).toBeNull()
+
+    fireEvent.click(toolButton(root, TEXT.timeline.hoverPreview))
+    fireEvent.pointerMove(timelineEl, { pointerId: 3, pointerType: 'mouse', clientX: 500 })
+
+    const line = root.querySelector('.timeline__hover-line') as HTMLElement
+    expect(line).toBeTruthy()
+    // 500px → 时间轴上对应的帧
+    expect(line.querySelector('.timeline__hover-tag')?.textContent).toBe(secondsToTimecode(timeAtPx(500), FPS_30))
+    // 蓝色播放头被暂时隐藏（用根节点上的状态类）
+    expect(timelineEl.className).toContain('timeline--hover-preview')
+
+    fireEvent.pointerLeave(timelineEl)
+    expect(root.querySelector('.timeline__hover-line')).toBeNull()
+    expect((root.querySelector('.timeline') as HTMLElement).className).not.toContain('timeline--hover-preview')
   })
 })

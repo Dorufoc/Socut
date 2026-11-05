@@ -145,10 +145,21 @@
 |---|---|---|
 | 选中媒体段 → 右栏切到视频编辑器；选中字幕条 → 保持原字幕检查器 | `projectStore.selectionKind`（`selectClip` 置 `subtitle`、`selectMediaClip` 置 `media`、删除最后一条媒体段时退回 `subtitle`），`ClipInspector` 只当分流，原字幕实现原封不动搬到 `SubtitleClipInspector` | `projectStore.test.ts`「媒体段画面编辑与检查器分流」5 例 + `MediaClipInspector.test.tsx` 前两例（三段分区、切回字幕检查器） |
 | 几何变换：缩放 / 水平位移 / 垂直位移 / 旋转 | `MediaClip.video`（v6，缩到片段级；默认 100% / 0 / 0°）→ `shared/mediaClipVideo.mediaVideoTransform` 输出**固定顺序**的 CSS transform（平移→旋转→缩放→镜像），预览里直接作用在 `<video>` 上 | `tests/mediaClipVideo.test.ts`（默认 none、组合顺序、单项输出、越界夹心）+ `MediaClipInspector.test.tsx`（滑杆写回、拉回 100% 即整键删除） |
+| 画面交互层：拖角缩放 / 拖画面平移（含辅助线）/ 拖旋转手柄 | 选中媒体段且该段在播放头下才挂出 `StageTransformOverlay`（`selectionKind==='media'` + `uiStore.stageInteract` + 段匹配），画面轮廓与手柄吃指针、其余穿透；几何计算全在 `shared/mediaClipVideo`（`mediaVideoCorners` / `scaleFromPointer` / `rotationFromPointers` / `snapOffset`），拖拽只写同一个 `updateMediaClipVideo`，所以面板数字实时跟着变；命中「居中 / 边对齐」时吸附并画虚线导引线，拖拽中出读数 HUD；面板上的「交互」开关是遮住字幕点选时的逃生口 | `StageTransformOverlay.test.tsx` 7 例（手柄几何、拖角翻倍→200%、平移 5%、居中吸附回到默认整键删除、旋转 90° 与 350°+90°→80°）+ `mediaClipVideo.test.ts` 几何 7 例 + `MediaClipInspector.test.tsx`（开关同步 uiStore） |
+| 色彩与光影：亮度/曝光/对比度/饱和度/冷暖/光感 + 四条自由曲线 | 亮度/对比度/饱和度/光感补偿 → CSS `brightness/contrast/saturate`；曝光与冷暖 → 按通道增益；曲线（亮度 + R/G/B，可自由打点）→ `curveTableValues` 把「亮度曲线 → 单通道曲线 → 光感提亮 → 通道增益」合成 `feComponentTransfer tableValues`，三者汇成一张 SVG 滤镜（`focusnews-media-grade`）挂在同一个 `<video>` 上 | `mediaClipVideo.test.ts`（曲线归一/插值/合成顺序、直线不挂 SVG、tableValues 长度与夹心）+ `MediaClipInspector.test.tsx`（点空白加点并拖到 0.5→0.8、四通道切换只写对应通道、复位回直线） |
+| 光感（Vibrance/光感）算法 | 放弃「当饱和度用」的旧口径，改为 `lightToneWeight` 中调加权（`4x(1-x)` × `(1-0.3x)`）+ 端点锁定：正值只抬中调、高光受保护，负值压中调；再叠一层很小的饱和补偿 `lightToneSaturate`（100 分只有 ×1.08，而饱和度滑杆是 ×2），对应 Premiere/剪映「通透不冲顶、肤色不炒熟」的手感 | `mediaClipVideo.test.ts`「光感（vibrance）」5 例：端点不动、中调幅度大于高光、负值压中调、补偿远小于饱和度滑杆、滤镜串里是 `saturate(1.040)` |
 | 画面翻转：水平 / 垂直镜像 | 两个独立开关（`flipH` / `flipV`），CSS `scaleX(-1)` / `scaleY(-1)` 接在缩放之后 | `mediaClipVideo.test.ts`（单项输出）+ `MediaClipInspector.test.tsx`（两开关互不影响、再点即关、aria-pressed） |
-| 色彩与光影：亮度/曝光/对比度/饱和度/冷暖/光感 + RGB 三通道曲线 | 亮度/对比度/饱和度/光感 → CSS `brightness/contrast/saturate`；曝光与冷暖 → 按通道增益；曲线（每通道三点位：阴影/中间调/高光）→ `curveTableValues` 生成 `feComponentTransfer tableValues`，三者合成一张 SVG 滤镜（`focusnews-media-grade`）挂在同一个 `<video>` 上 | `mediaClipVideo.test.ts`（filter 组合、直线不挂 SVG、采样与 tableValues 长度/夹心）+ `MediaClipInspector.test.tsx`（六个滑杆独立写回、曲线只动当前通道） |
-| 一键恢复默认 | 顶部「恢复默认」走 `resetMediaClipVideo`（整键 `video` 删除）；曲线块另给「曲线复位」（只清三通道） | `projectStore.test.ts`（重置只清当前段）+ `MediaClipInspector.test.tsx`（无编辑时禁用、有编辑时一键清空） |
+| 一键恢复默认 | 顶部「恢复默认」走 `resetMediaClipVideo`（整键 `video` 删除）；曲线块另给「复位」（只清当前通道） | `projectStore.test.ts`（重置只清当前段）+ `MediaClipInspector.test.tsx`（无编辑时禁用、有编辑时一键清空） |
 | MXF 导入与解码 | `IMPORTABLE_VIDEO_EXTENSIONS` 加入 `mxf`（导入对话框用它）；预览协议 `mediaRange` 认 `video/mxf`（不再 octet-stream）；探测/导出走 FFmpeg 原生 mxf 解封装 | `tests/mxfSupport.test.ts` 3 例；真机实证：`ffmpeg -f mxf` 生成的 mpeg2video 1280x720/25fps 夹具被 ffprobe 正确读出（codec/尺寸/帧率/时长全对）。**预览限制**：Chromium 无 MXF 解封装器，`<video>` 会 onError → 预览区显示「不可预览」并保留字幕叠加，需代理转码才能看到 MXF 画面 |
+
+## 时间轴工具栏（v6.2）的机器化验收
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 主轨对齐（snap-together） | `uiStore.timelineTools.snapTogether`；打开即调 `projectStore.compactTimeline()` → `shared/mediaClips.compactMediaClips`：按 `timelineStartSec` 升序、按**帧数**平移，间隙恒为 0 且时长与源出点保持恒等式；只动媒体轨，字幕轨允许留空；拖拽抬手（`MediaClipCard.onCommit`）在开关开着时重新摆紧；关闭后不回滚 | `tests/timelineSnap.test.ts`「主轨对齐」4 例（紧贴/单条归零/幂等/空轨）+ `Timeline.test.tsx`「主轨对齐打开…间隙为 0」 |
+| 自动吸附（magnetic snap） | `uiStore.timelineTools.magneticSnap`；`shared/timelineSnap`：像素窗口 `TIMELINE_SNAP_PX=10` 按「轨道宽/总时长」折成秒，候选边缘 = 两轨所有片段首尾 + 0 点（**排除被拖的那条**）；整段平移时首尾各试一次取位移小的，拖入/出点只吸被拖的那条边；命中时 `Timeline` 在两轨各画一条强调蓝高亮线 | `timelineSnap.test.ts` 9 例（窗口换算/候选收集/单边/整段/夹取）+ `Timeline.test.tsx`「自动吸附打开…被吸住并高亮」「关闭…不吸附」 |
+| 预览轴（hover preview） | `uiStore.timelineTools.hoverPreview`；鼠标在时间轴上移动时按媒体轨矩形把 x 折成帧（`snapTimeToFrame`），两轨各画一条黄色竖线 + 当前帧码胶囊；根节点加 `timeline--hover-preview` 把蓝色播放头 `visibility: hidden`（“暂时替换”）；移出面板或关掉开关立即收起 | `Timeline.test.tsx`「预览轴：开着时悬停出黄线并顶掉蓝色播放头，移出即消失」 |
+| 工具栏三个开关的选中态 | 复用 `btn--sm` + `btn--primary`（选中态背景变强调色）+ `aria-pressed`，说明只在 `title`；与既有「新建/删除/拆分」按钮同一条工具栏，中间用分隔线隔开 | `Timeline.test.tsx`「三个开关默认关闭，点一下变选中态」 |
 
 ## 重跑取证的最短路径
 

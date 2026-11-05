@@ -1920,6 +1920,49 @@ input[type='color']:disabled {
   background: #9ecbff;
 }
 
+/* 自动吸附：被贴住的目标边缘（两轨都画，保证拖哪条都看得到） */
+.timeline__snap-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(76, 194, 255, 0.7);
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* 预览轴：悬停时的黄色帧位指示（同时顶掉蓝色播放头） */
+.timeline__hover-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  margin-left: -0.5px;
+  background: #ffd24a;
+  box-shadow: 0 0 6px rgba(255, 210, 74, 0.55);
+  pointer-events: none;
+  z-index: 6;
+}
+
+.timeline__hover-tag {
+  position: absolute;
+  top: 0;
+  left: 3px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #ffd24a;
+  color: #1b1b1b;
+  font-size: 9.5px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.timeline--hover-preview .timeline__playhead {
+  visibility: hidden;
+}
+
 /*
  * 字幕轨的示意条（v4）：上下很窄的一条，摆位 = 当前画面的入点→出点区间。
  * 垂直居中靠 top:50% + translateY，车道多高都不会错位；标签单行省略。
@@ -2095,23 +2138,109 @@ input[type='color']:disabled {
   color: var(--accent);
 }
 
-/* 曲线预览（视频片段编辑器）：三条通道叠画，当前通道加粗 */
-.curve-preview {
+/* 自由曲线编辑器：空白处点一下加点、拖点改形、双击删点 */
+.curve-editor {
   width: 100%;
-  height: 72px;
+  height: 128px;
+  display: block;
   border: 1px solid var(--stroke-card);
   border-radius: var(--radius-control);
   background: var(--bg-input);
+  touch-action: none;
+  cursor: crosshair;
 }
 
-.curve-preview__bg {
-  fill: transparent;
+.curve-editor__grid line {
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 0.6;
 }
 
-.curve-preview__base {
-  stroke: rgba(255, 255, 255, 0.12);
-  stroke-width: 1;
+.curve-editor__base {
+  stroke: rgba(255, 255, 255, 0.18);
+  stroke-width: 0.6;
   stroke-dasharray: 3 3;
+}
+
+.curve-editor__line {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.curve-editor__point {
+  cursor: grab;
+  stroke: rgba(0, 0, 0, 0.55);
+  stroke-width: 0.8;
+}
+
+.curve-editor__point--active {
+  cursor: grabbing;
+  stroke: #fff;
+}
+
+.curve-editor__readout {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  word-break: break-all;
+}
+
+/* 预览里的变换交互层：只有画面轮廓与手柄吃指针，其余穿透给字幕条 */
+.stage-interact {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 3;
+  touch-action: none;
+}
+
+.stage-interact__surface {
+  fill: rgba(76, 194, 255, 0.001);
+  cursor: grab;
+}
+
+.stage-interact--dragging .stage-interact__surface {
+  cursor: grabbing;
+}
+
+.stage-interact__guide {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+  opacity: 0.9;
+}
+
+.stage-interact__tether {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  opacity: 0.6;
+}
+
+.stage-interact__handle,
+.stage-interact__rotate {
+  fill: rgba(20, 20, 20, 0.85);
+  stroke: var(--accent);
+  stroke-width: 2;
+  cursor: nwse-resize;
+}
+
+.stage-interact__rotate {
+  cursor: crosshair;
+}
+
+.stage-interact__anchor line {
+  stroke: rgba(255, 255, 255, 0.65);
+  stroke-width: 1;
+}
+
+.stage-interact__hud {
+  fill: #fff;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.75);
+  stroke-width: 3;
 }
 
 /* ------------------------------------------------------------------ 模态与遮罩 */

@@ -341,6 +341,8 @@ export interface MediaItem {
   path: string
   /** 原始导入路径（VFR 转 CFR 时保留） */
   sourcePath?: string
+  /** v7：素材类型（缺省 = 'video'） */
+  kind?: MediaKind
   /** 展示名（默认取 basename，可重命名） */
   name: string
   meta: VideoMeta
@@ -353,9 +355,12 @@ export interface MediaItem {
   importedAt: string
 }
 
+/** v7：素材类型（缺省 = 视频，旧工程与旧测试无需补字段） */
+export type MediaKind = 'video' | 'audio' | 'image'
+
 /**
- * 时间轴上行：一枚媒体片段。时间轴坐标与源坐标分别以 `timeline*Sec` 与 `source*Sec` 命名，
- * 遵循旧约定写入前已 `snapTimeToFrame`，时长以秒为准。
+ * 时间轴媒体轨：一枚媒体片段（视频/图像）。时间轴坐标与源坐标分别以 `timeline*Sec`
+ * 与 `source*Sec` 命名，写入前已 `snapTimeToFrame`，时长以秒为准。
  */
 export interface MediaClip {
   id: string
@@ -368,10 +373,38 @@ export interface MediaClip {
   sourceOutSec: number
   /** v6：画面变换与调色（缺省 = 全部默认值） */
   video?: MediaClipVideo
+  /** v7：叠放层号（0 = 最底层）；同轨同层互斥，层高由轨道按最大层数均分 */
+  layer?: number
 }
 
-/** 曲线三个控制点的 y 值：阴影 / 中间调 / 高光（0..1，默认 0 / 0.5 / 1） */
-export type CurveStops = [number, number, number]
+/**
+ * v7：音频轨片段。与媒体段同构（同一条时间轴刻度、同样的拖拽/剪辑手感），
+ * 区别只在于它只贡献声音，不参与画面合成。
+ */
+export interface AudioClip {
+  id: string
+  mediaId: string
+  timelineStartSec: number
+  timelineEndSec: number
+  sourceInSec: number
+  sourceOutSec: number
+  /** 叠放层号（0 = 最底层） */
+  layer?: number
+}
+
+/** 曲线上的一个控制点（x = 输入亮度，y = 输出亮度，均为 0..1） */
+export interface CurvePoint {
+  x: number
+  y: number
+}
+
+/** 四条自由曲线：亮度（RGB 合成映射，先应用）+ R/G/B 单通道（后应用） */
+export interface MediaClipCurves {
+  master: CurvePoint[]
+  r: CurvePoint[]
+  g: CurvePoint[]
+  b: CurvePoint[]
+}
 
 /**
  * 媒体片段的画面变换与调色（v6）。
@@ -395,18 +428,18 @@ export interface MediaClipVideo {
   flipV: boolean
   /** 亮度 -100..100 */
   brightness: number
-  /** 曝光 -100..100（与亮度的区别：曝光按倍增，亮度按偏移） */
+  /** 曝光 -100..100（按倍增，与亮度的偏移区分） */
   exposure: number
   /** 对比度 -100..100 */
   contrast: number
   /** 饱和度 -100..100 */
   saturation: number
-  /** 冷暖色调 -100..100（负值偏冷蓝，正值偏暖黄） */
+  /** 冷暖 -100..100（负值偏冷蓝，正值偏暖黄） */
   warmth: number
-  /** 光感 -100..100（低饱和区域的饱和度提升） */
+  /** 光感 -100..100（中调加权提亮 + 高光保护，见 shared/mediaClipVideo） */
   vibrance: number
-  /** RGB 三通道曲线控制点 */
-  curves: { r: CurveStops; g: CurveStops; b: CurveStops }
+  /** 四条自由曲线（默认直线 = 恒等映射） */
+  curves: MediaClipCurves
 }
 
 /**
@@ -469,6 +502,8 @@ export interface Project {
   media: MediaItem[]
   /** v2：时间轴上行（媒体轨）；与 `clips` 下行共享尺规/播放头 */
   mediaClips: MediaClip[]
+  /** v7：音频轨（缺省 = 空轨；与媒体轨/Caption 轨并列） */
+  audioClips?: AudioClip[]
   /** 水印设置；缺省 = 未导入水印（合成链与旧工程逐字节一致） */
   watermark?: WatermarkSettings
   /** UI 状态（不参与渲染）；leftTab 记住上次离开左侧栏的位置，随工程走 */

@@ -98,7 +98,7 @@ afterEach(() => {
       selectionKind: 'subtitle',
       fonts: []
     })
-    useUiStore.setState({ uiMode: 'basic', notice: null, seekHandler: null })
+    useUiStore.setState({ uiMode: 'basic', notice: null, seekHandler: null, stageInteract: true })
   })
 })
 
@@ -202,23 +202,74 @@ describe('色彩与光影', () => {
     expect(video.vibrance).toBe(25)
   })
 
-  it('曲线：默认三通道直线，改阴影只动当前通道（R）', () => {
+  it('曲线：默认四条直线；空白处点一下加点、拖动改形、复位回直线', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    const { container } = render(<ClipInspector />)
+
+    const svg = container.querySelector('.curve-editor') as SVGSVGElement
+    expect(svg).toBeTruthy()
+    // jsdom 没有布局：把尺寸伪造成 200×200，也就能把 client 坐标当数据坐标用
+    svg.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 200, height: 200, right: 200, bottom: 200, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
+
+    // 默认直线：还没有 video 键
+    expect(useProjectStore.getState().project.mediaClips[0]!.video).toBeUndefined()
+
+    // 在正中间按下 = 新增控制点并直接进入拖拽
+    fireEvent.pointerDown(svg, { pointerId: 1, clientX: 100, clientY: 100 })
+    fireEvent.pointerMove(svg, { pointerId: 1, clientX: 100, clientY: 40 })
+    fireEvent.pointerUp(svg, { pointerId: 1, clientX: 100, clientY: 40 })
+
+    const master = videoOf(mediaClipId).curves.master
+    expect(master).toHaveLength(3)
+    expect(master[1]!.x).toBeCloseTo(0.5, 2)
+    expect(master[1]!.y).toBeCloseTo(0.8, 2)
+    // 另外三条通道不受影响
+    expect(videoOf(mediaClipId).curves.r).toEqual(defaultMediaVideo().curves.r)
+
+    // 当前曲线读数写在面板上
+    expect(container.textContent).toContain('0.50,0.80')
+
+    // 复位 → 回到直线，其余参数也是默认 → 整键消失
+    fireEvent.click(screen.getByRole('button', { name: TEXT.videoEditor.resetCurve }))
+    expect(useProjectStore.getState().project.mediaClips[0]!.video).toBeUndefined()
+  })
+
+  it('曲线：四条曲线可切换（亮度 / R / G / B）', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    const { container } = render(<ClipInspector />)
+
+    const svg = container.querySelector('.curve-editor') as SVGSVGElement
+    svg.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 200, height: 200, right: 200, bottom: 200, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
+
+    const group = screen.getByRole('group', { name: TEXT.videoEditor.curves })
+    const buttons = Array.from(group.querySelectorAll('button')).map((item) => item.textContent)
+    expect(buttons).toEqual([TEXT.videoEditor.curveMaster, 'R', 'G', 'B'])
+
+    // 切到 B 通道再打点，只写 blue
+    fireEvent.click(screen.getByRole('button', { name: 'B' }))
+    fireEvent.pointerDown(svg, { pointerId: 2, clientX: 100, clientY: 100 })
+    fireEvent.pointerMove(svg, { pointerId: 2, clientX: 100, clientY: 150 })
+    fireEvent.pointerUp(svg, { pointerId: 2, clientX: 100, clientY: 150 })
+
+    expect(videoOf(mediaClipId).curves.b[1]!.y).toBeCloseTo(0.25, 2)
+    expect(videoOf(mediaClipId).curves.master).toEqual(defaultMediaVideo().curves.master)
+  })
+
+  it('「交互」开关默认开，点一下关掉并同步到 uiStore（遮住字幕点选时的逃生口）', () => {
     const { mediaClipId } = seed()
     act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
     render(<ClipInspector />)
 
-    expect(defaultMediaVideo().curves.r).toEqual([0, 0.5, 1])
-    fireEvent.change(screen.getByLabelText(TEXT.videoEditor.curveShadow), { target: { value: '0.25' } })
+    const toggle = screen.getByRole('button', { name: TEXT.videoEditor.interact })
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
 
-    const curves = videoOf(mediaClipId).curves
-    expect(curves.r[0]).toBe(0.25)
-    expect(curves.g).toEqual([0, 0.5, 1])
-
-    // 切到 G 通道再改高光：R 的阴影保持不动
-    fireEvent.click(screen.getByRole('button', { name: 'G' }))
-    fireEvent.change(screen.getByLabelText(TEXT.videoEditor.curveHighlight), { target: { value: '0.8' } })
-    expect(videoOf(mediaClipId).curves.g[2]).toBe(0.8)
-    expect(videoOf(mediaClipId).curves.r[0]).toBe(0.25)
+    fireEvent.click(toggle)
+    expect(useUiStore.getState().stageInteract).toBe(false)
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
   })
 })
 

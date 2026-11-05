@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { DEFAULT_FPS, DEFAULT_RESOLUTION, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
 import { applyClipStyleToAll, createClip, createId, duplicateClip, normalizeProject } from '@shared/projectSchema'
 import { snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
-import { alignAfterOverlap, findActiveMediaClip, splitMediaClipAt } from '@shared/mediaClips'
+import { alignAfterOverlap, compactMediaClips, findActiveMediaClip, splitMediaClipAt } from '@shared/mediaClips'
 import type {
   FontRecord,
   Fps,
@@ -116,6 +116,13 @@ export interface ProjectState {
   updateMediaClipVideo: (id: string, patch: Partial<MediaClipVideo>) => void
   /** 一条片段的所有画面编辑回到默认（缩放 100% / 无翻转 / 参数归零 / 曲线直线） */
   resetMediaClipVideo: (id: string) => void
+
+  // ---------------------------------------------------------------- 时间轴工具
+  /**
+   * 主轨对齐：把所有媒体段按时间顺序从左到右紧贴排列（间隙 0，时长不变）。
+   * 开关本身是 UI 态（uiStore），这个动作只负责把工程摆正；重复调用是幂等的。
+   */
+  compactTimeline: () => void
 }
 
 export function createInitialProject(): Project {
@@ -606,6 +613,22 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return next
     })
     set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
+
+  compactTimeline: () => {
+    const state = get()
+    const compacted = compactMediaClips(state.project.mediaClips, state.project.fps)
+    // 已经紧贴时不动工程，避免无意义地推高 revision（会触发自动保存）
+    const changed = compacted.some((clip) => {
+      const before = state.project.mediaClips.find((item) => item.id === clip.id)
+      return (
+        !before ||
+        Math.abs(before.timelineStartSec - clip.timelineStartSec) > 1e-6 ||
+        Math.abs(before.timelineEndSec - clip.timelineEndSec) > 1e-6
+      )
+    })
+    if (!changed) return
+    set({ project: withMediaClips(state.project, compacted), revision: state.revision + 1 })
   }
 }))
 

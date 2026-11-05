@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type Poi
 import { MAX_TIMELINE_SEC } from '@shared/constants'
 import { snapTimeToFrame } from '@shared/fps'
 import { canSplitMediaClipAt } from '@shared/mediaClips'
+import { collectSnapEdges, snapEdge, snapMove, snapWindowSec } from '@shared/timelineSnap'
 import { secondsToTimecode } from '@shared/timecode'
 import { TEXT } from '@shared/i18n'
 import { timelineDurationSec, useProjectStore } from '../state/projectStore'
@@ -40,18 +41,28 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const removeMediaClip = useProjectStore((state) => state.removeMediaClip)
   const splitAtFrame = useProjectStore((state) => state.splitAtFrame)
   const insertMediaClip = useProjectStore((state) => state.insertMediaClip)
+  const compactTimeline = useProjectStore((state) => state.compactTimeline)
   const displayTime = useUiStore((state) => state.displayTimeSec)
   const playing = useUiStore((state) => state.playing)
   const setPlaying = useUiStore((state) => state.setPlaying)
   const setNotice = useUiStore((state) => state.setNotice)
+  const tools = useUiStore((state) => state.timelineTools)
+  const toggleTimelineTool = useUiStore((state) => state.toggleTimelineTool)
 
   const trackRef = useRef<HTMLDivElement | null>(null)
+  // 媒体轨：预览轴的坐标基准（与卡片、播放头同一原点）
+  const mediaTrackRef = useRef<HTMLDivElement | null>(null)
   const [widthPx, setWidthPx] = useState(800)
   // 刮擦中的尺规/轨道元素与几何：capture 后 pointermove 始终以该矩形换算位置
   const scrubRef = useRef<{ element: ScrubElement; left: number; width: number } | null>(null)
   const [scrubbing, setScrubbing] = useState(false)
   // 素材拖入：拖拽悬停的吸附落点（秒），null 表示当前不在媒体轨上拖拽
   const [dropSec, setDropSec] = useState<number | null>(null)
+  // 自动吸附命中的目标边缘（秒），画高亮竖线用；null = 当前没有吸附反馈
+  const [snapGuideSec, setSnapGuideSec] = useState<number | null>(null)
+  // 预览轴：鼠标所在的帧时间（秒），null = 鼠标不在时间轴内
+  const [hoverSec, setHoverSec] = useState<number | null>(null)
+  const hoverRef = useRef<number | null>(null)
 
   useEffect(() => {
     const element = trackRef.current
@@ -141,8 +152,131 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   // 纯谓词算按钮态：不在渲染期调 store 动作（splitAtFrame 有 set 副作用）
   const canSplit = canSplitMediaClipAt(project.mediaClips, displayTime, project.fps)
 
+  // ---------------------------------------------------------------- 时间轴工具
+
+  /** 像素阈值换算成秒（随轨道宽度与总时长变化，手感一致） */
+  const snapWindow = snapWindowSec(widthPx, durationSec)
+
+  /** 候选边缘：两轨所有片段的首/尾 + 0 点；被拖的那条自己不能当候选 */
+  const snapEdges = (excludeId: string): number[] =>
+    collectSnapEdges(
+      [
+        ...project.mediaClips.map((clip) => ({ id: clip.id, start: clip.timelineStartSec, end: clip.timelineEndSec })),
+        ...project.clips.map((clip) => ({ id: clip.id, start: clip.startTime, end: clip.endTime }))
+      ],
+      excludeId
+    )
+
+  /** 媒体段整段拖拽：开着吸附时首尾都试一次，命中就画导引线 */
+  const handleMediaMove = (id: string, start: number): void => {
+    const clip = project.mediaClips.find((item) => item.id === id)
+    if (!clip || !tools.magneticSnap) {
+      setSnapGuideSec(null)
+      moveMediaClip(id, start)
+      return
+    }
+    const length = clip.timelineEndSec - clip.timelineStartSec
+    const snapped = snapMove(start, length, snapEdges(id), snapWindow, durationSec)
+    setSnapGuideSec(snapped.guideSec)
+    moveMediaClip(id, snapped.value)
+  }
+
+  /** 媒体段拖入/出点：只有被拖的那条边参与吸附 */
+  const handleMediaTrim = (id: string, patch: { timelineStartSec?: number; timelineEndSec?: number }): void => {
+    if (!tools.magneticSnap) {
+      setSnapGuideSec(null)
+      trimMediaClip(id, patch)
+      return
+    }
+    const edges = snapEdges(id)
+    const next = { ...patch }
+    let guide: number | null = null
+    if (patch.timelineStartSec !== undefined) {
+      const snapped = snapEdge(patch.timelineStartSec, edges, snapWindow)
+      next.timelineStartSec = snapped.value
+      guide = snapped.guideSec
+    } else if (patch.timelineEndSec !== undefined) {
+      const snapped = snapEdge(patch.timelineEndSec, edges, snapWindow)
+      next.timelineEndSec = snapped.value
+      guide = snapped.guideSec
+    }
+    setSnapGuideSec(guide)
+    trimMediaClip(id, next)
+  }
+
+  /** 字幕条拖拽：首尾各自吸附（一般只会动到其中一条边） */
+  const handleClipTimes = (id: string, start: number, end: number): void => {
+    if (!tools.magneticSnap) {
+      setSnapGuideSec(null)
+      setClipTimes(id, start, end)
+      return
+    }
+    const edges = snapEdges(id)
+    const snappedStart = snapEdge(start, edges, snapWindow)
+    const snappedEnd = snapEdge(end, edges, snapWindow)
+    setSnapGuideSec(snappedStart.guideSec ?? snappedEnd.guideSec)
+    setClipTimes(id, snappedStart.value, snappedEnd.value)
+  }
+
+  /** 拖拽收尾：清掉吸附线；主轨对齐开着时把主轨重新摆紧 */
+  const commitMediaDrag = (): void => {
+    setSnapGuideSec(null)
+    if (tools.snapTogether) compactTimeline()
+  }
+
+  /** 预览轴：鼠标所在的帧（吸附到帧边界），同一帧不重复写 state。
+   *  坐标用媒体轨的矩形（与卡片/播放头同一原点），所以黄线一定落在帧对应的格子上。 */
+  const onHoverMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (!tools.hoverPreview || event.pointerType !== 'mouse') return
+    const track = mediaTrackRef.current
+    if (!track) return
+    const rect = track.getBoundingClientRect()
+    if (rect.width <= 0) return
+    const sec = snapTimeToFrame(Math.min(durationSec, Math.max(0, pxToSec(event.clientX - rect.left, durationSec, rect.width))), project.fps)
+    if (hoverRef.current === sec) return
+    hoverRef.current = sec
+    setHoverSec(sec)
+  }
+
+  const endHover = (): void => {
+    if (hoverRef.current === null) return
+    hoverRef.current = null
+    setHoverSec(null)
+  }
+
+  useEffect(() => {
+    // 关掉预览轴时立刻把黄线收起来，不用等鼠标移出
+    if (tools.hoverPreview) return
+    hoverRef.current = null
+    setHoverSec(null)
+  }, [tools.hoverPreview])
+
+  const hoverActive = tools.hoverPreview && hoverSec !== null
+
+  /** 两轨都要画的导引线：吸附目标边缘（强调蓝）+ 预览轴（黄）。复用同一个元素实例。 */
+  const guides = (
+    <>
+      {snapGuideSec !== null ? (
+        <div className="timeline__snap-line" style={{ left: secToPx(snapGuideSec, durationSec, widthPx) }} />
+      ) : null}
+      {hoverActive ? (
+        <div
+          className="timeline__hover-line"
+          style={{ left: secToPx(Math.min(hoverSec ?? 0, durationSec), durationSec, widthPx) }}
+        >
+          <span className="timeline__hover-tag mono">{secondsToTimecode(hoverSec ?? 0, project.fps)}</span>
+        </div>
+      ) : null}
+    </>
+  )
+
   return (
-    <div className="timeline">
+    <div
+      className={`timeline${hoverActive ? ' timeline--hover-preview' : ''}`}
+      onPointerMove={onHoverMove}
+      onPointerLeave={endHover}
+      onPointerUp={() => setSnapGuideSec(null)}
+    >
       <div className="timeline__bar">
         <div className="row" style={{ gap: 6 }}>
           <button type="button" className="btn btn--sm btn--primary" onClick={() => addClip()}>
@@ -181,6 +315,39 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
           >
             {TEXT.timeline.removeMediaClip}
           </button>
+          <span className="timeline__divider" aria-hidden="true" />
+          <button
+            type="button"
+            className={`btn btn--sm${tools.snapTogether ? ' btn--primary' : ''}`}
+            aria-pressed={tools.snapTogether}
+            title={TEXT.timeline.snapTogetherHint}
+            onClick={() => {
+              const next = !tools.snapTogether
+              toggleTimelineTool('snapTogether')
+              // 打开就立即把主轨摆紧；关闭不做任何回滚（片段就停在当前位置）
+              if (next) compactTimeline()
+            }}
+          >
+            {TEXT.timeline.snapTogether}
+          </button>
+          <button
+            type="button"
+            className={`btn btn--sm${tools.magneticSnap ? ' btn--primary' : ''}`}
+            aria-pressed={tools.magneticSnap}
+            title={TEXT.timeline.magneticSnapHint}
+            onClick={() => toggleTimelineTool('magneticSnap')}
+          >
+            {TEXT.timeline.magneticSnap}
+          </button>
+          <button
+            type="button"
+            className={`btn btn--sm${tools.hoverPreview ? ' btn--primary' : ''}`}
+            aria-pressed={tools.hoverPreview}
+            title={TEXT.timeline.hoverPreviewHint}
+            onClick={() => toggleTimelineTool('hoverPreview')}
+          >
+            {TEXT.timeline.hoverPreview}
+          </button>
         </div>
         <div className="timeline__meta mono">
           <span className="timeline__timecode">{secondsToTimecode(displayTime, project.fps)}</span>
@@ -209,6 +376,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
       {/* 上行：媒体轨（素材库卡片拖入落点 + 拖拽排布） */}
       <div
         className={`timeline__track timeline__track--media${scrubbing ? ' timeline__track--scrubbing' : ''}${dropSec !== null ? ' timeline__track--dropping' : ''}`}
+        ref={mediaTrackRef}
         onDragOver={onMediaDragOver}
         onDragLeave={() => setDropSec(null)}
         onDrop={onMediaDrop}
@@ -234,9 +402,18 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             widthPx={widthPx}
             fps={project.fps}
             selected={clip.id === selectedMediaClipId}
-            onSelect={selectMediaClip}
-            onMove={(start) => moveMediaClip(clip.id, start)}
-            onTrim={(patch) => trimMediaClip(clip.id, patch)}
+            onSelect={(id) => {
+              selectMediaClip(id)
+              // 选中后把播放头带进这一段：否则预览里根本没有这条画面，
+              // 右侧视频编辑器与画面交互层的手柄都无处可挂。
+              const target = project.mediaClips.find((item) => item.id === id)
+              if (target && (displayTime < target.timelineStartSec || displayTime >= target.timelineEndSec)) {
+                seekTo(target.timelineStartSec)
+              }
+            }}
+            onMove={(start) => handleMediaMove(clip.id, start)}
+            onTrim={(patch) => handleMediaTrim(clip.id, patch)}
+            onCommit={commitMediaDrag}
             onSeek={seekTo}
           />
         ))}
@@ -247,6 +424,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             title={dropSec.toFixed(3) + 's'}
           />
         ) : null}
+        {guides}
       </div>
 
       {/* 下行：字幕条轨 */}
@@ -276,13 +454,14 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             selected={clip.id === selectedClipId}
             playheadSec={displayTime}
             onSelect={selectClip}
-            onChangeTimes={(start, end) => setClipTimes(clip.id, start, end)}
+            onChangeTimes={(start, end) => handleClipTimes(clip.id, start, end)}
           />
         ))}
         <div
           className={`timeline__playhead${scrubbing ? ' timeline__playhead--scrubbing' : ''}`}
           style={{ left: secToPx(Math.min(displayTime, durationSec), durationSec, widthPx) }}
         />
+        {guides}
       </div>
     </div>
   )
