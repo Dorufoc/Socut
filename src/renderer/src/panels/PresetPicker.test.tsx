@@ -68,7 +68,7 @@ describe('PresetPicker（8 套预设）', () => {
     for (const card of screen.getAllByRole('button')) {
       expect((card as HTMLButtonElement).disabled).toBe(true)
     }
-    expect(screen.getByText('请先在时间轴选择一个片段。')).toBeTruthy()
+    expect(screen.getByText(TEXT.inspector.noneSelected)).toBeTruthy()
     // 禁用状态下即使触发 click 也不应改写任何片段
     const before = JSON.stringify(useProjectStore.getState().project)
     fireEvent.click(screen.getAllByRole('button')[1]!)
@@ -155,12 +155,15 @@ describe('PresetPicker：切预设即时应用并还原默认', () => {
     expect(screen.queryByText(/已自定义/)).toBeNull()
   })
 
-  it('带自定义时面板明说「已自定义 N 项」与切预设会还原默认', () => {
+  it('带自定义时只留一个「已自定义 N 项」角标（不再堆说明句）', () => {
     const clipId = seedClip(PRESETS[0]!.id)
     customize(clipId)
-    render(<PresetPicker />)
+    const { container } = render(<PresetPicker />)
 
     expect(screen.getByText(/已自定义 2 项/)).toBeTruthy()
-    expect(screen.getByText(TEXT.inspector.presetSwitchHint)).toBeTruthy()
+    // 面板正文不再有任何解释性段落：只剩分组标题 + 卡片 + 一个角标
+    expect(container.querySelectorAll('p.hint')).toHaveLength(0)
+    // 预设说明仍可通过 hover 读到
+    expect(screen.getByText(PRESETS[0]!.name).closest('button')?.getAttribute('title')).toBe(PRESETS[0]!.description)
   })
 })

@@ -137,7 +137,7 @@ describe('换算读数', () => {
     const { container } = render(<WatermarkPanel />)
     await flush()
     expect(container.querySelector('img')).toBeNull()
-    expect(container.textContent).toContain('图片当前不可读')
+    expect(container.textContent).toContain('图片不可读')
   })
 
   it('已导入时缩略图使用预览地址', async () => {

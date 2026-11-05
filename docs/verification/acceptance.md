@@ -139,6 +139,17 @@
 | 失败占位 | `url=null`（源不在 / FFmpeg 缺失 / 抽帧报错 / 区间越界）时卡片显示斜纹底 + 图标 + 「无法预览」；素材已移出则单独文案且不发请求；失败结果也进缓存，不会重轰炸主进程 | `MediaClipCard.test.tsx` 两组用例；门禁实测：`spikes/tmp-integration/gate-userdata/strips/` 生成 3 张长图（命名 `<mediaId>-<16位令牌>.jpg`） |
 | 缓存与性能 | 三层：会话内存缓存（key 含**实际文件路径**，换源不换轨必频失效）→ 主进程同 token 并发合并 → 磁盘缓存 `userData/strips`（命中不起子进程，超 240 个按 mtime 淘汰）；渲染侧并发闸门 `STRIP_MAX_CONCURRENT=2` | `tests/mediaStrip.test.ts`（键含 path、令牌稳定且只含十六进制、前缀安全化）+ `MediaClipCard.test.tsx`（同 key 不重请、改入出点重请、逐像素拖宽不跨档不重请）；`verify:all` 20/20 且应用内冒烟真实跑过这条链路 |
 
+## 视频片段编辑器与 MXF 支持面（v6）的机器化验收
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 选中媒体段 → 右栏切到视频编辑器；选中字幕条 → 保持原字幕检查器 | `projectStore.selectionKind`（`selectClip` 置 `subtitle`、`selectMediaClip` 置 `media`、删除最后一条媒体段时退回 `subtitle`），`ClipInspector` 只当分流，原字幕实现原封不动搬到 `SubtitleClipInspector` | `projectStore.test.ts`「媒体段画面编辑与检查器分流」5 例 + `MediaClipInspector.test.tsx` 前两例（三段分区、切回字幕检查器） |
+| 几何变换：缩放 / 水平位移 / 垂直位移 / 旋转 | `MediaClip.video`（v6，缩到片段级；默认 100% / 0 / 0°）→ `shared/mediaClipVideo.mediaVideoTransform` 输出**固定顺序**的 CSS transform（平移→旋转→缩放→镜像），预览里直接作用在 `<video>` 上 | `tests/mediaClipVideo.test.ts`（默认 none、组合顺序、单项输出、越界夹心）+ `MediaClipInspector.test.tsx`（滑杆写回、拉回 100% 即整键删除） |
+| 画面翻转：水平 / 垂直镜像 | 两个独立开关（`flipH` / `flipV`），CSS `scaleX(-1)` / `scaleY(-1)` 接在缩放之后 | `mediaClipVideo.test.ts`（单项输出）+ `MediaClipInspector.test.tsx`（两开关互不影响、再点即关、aria-pressed） |
+| 色彩与光影：亮度/曝光/对比度/饱和度/冷暖/光感 + RGB 三通道曲线 | 亮度/对比度/饱和度/光感 → CSS `brightness/contrast/saturate`；曝光与冷暖 → 按通道增益；曲线（每通道三点位：阴影/中间调/高光）→ `curveTableValues` 生成 `feComponentTransfer tableValues`，三者合成一张 SVG 滤镜（`focusnews-media-grade`）挂在同一个 `<video>` 上 | `mediaClipVideo.test.ts`（filter 组合、直线不挂 SVG、采样与 tableValues 长度/夹心）+ `MediaClipInspector.test.tsx`（六个滑杆独立写回、曲线只动当前通道） |
+| 一键恢复默认 | 顶部「恢复默认」走 `resetMediaClipVideo`（整键 `video` 删除）；曲线块另给「曲线复位」（只清三通道） | `projectStore.test.ts`（重置只清当前段）+ `MediaClipInspector.test.tsx`（无编辑时禁用、有编辑时一键清空） |
+| MXF 导入与解码 | `IMPORTABLE_VIDEO_EXTENSIONS` 加入 `mxf`（导入对话框用它）；预览协议 `mediaRange` 认 `video/mxf`（不再 octet-stream）；探测/导出走 FFmpeg 原生 mxf 解封装 | `tests/mxfSupport.test.ts` 3 例；真机实证：`ffmpeg -f mxf` 生成的 mpeg2video 1280x720/25fps 夹具被 ffprobe 正确读出（codec/尺寸/帧率/时长全对）。**预览限制**：Chromium 无 MXF 解封装器，`<video>` 会 onError → 预览区显示「不可预览」并保留字幕叠加，需代理转码才能看到 MXF 画面 |
+
 ## 重跑取证的最短路径
 
 **一条命令跑完全部可自动化验证**（计划 M4-6「断言脚本化」）：

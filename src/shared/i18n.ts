@@ -112,6 +112,38 @@ export const TEXT = {
     noSubtitle: '未填写'
   },
 
+  /** 右侧「视频片段」编辑器（选中媒体段时替换字幕检查器） */
+  videoEditor: {
+    title: '视频片段',
+    edited: '已编辑',
+    noneSelected: '未选择视频片段',
+    geometry: '几何变换',
+    scale: '缩放',
+    offsetX: '水平位置',
+    offsetY: '垂直位置',
+    rotation: '旋转',
+    flip: '画面翻转',
+    flipH: '水平镜像',
+    flipV: '垂直镜像',
+    grade: '色彩与光影',
+    basics: '基础',
+    brightness: '亮度',
+    exposure: '曝光',
+    colorGroup: '色彩',
+    contrast: '对比度',
+    saturation: '饱和度',
+    warmth: '冷暖',
+    advanced: '高级',
+    vibrance: '光感',
+    curves: '曲线',
+    curveShadow: '阴影',
+    curveMid: '中间调',
+    curveHighlight: '高光',
+    reset: '恢复默认',
+    resetCurves: '曲线复位',
+    resetHint: '本条片段的画面参数全部回到默认值'
+  },
+
   // 检查器
   inspector: {
     preset: '预设样式',

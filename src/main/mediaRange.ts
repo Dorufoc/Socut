@@ -11,7 +11,10 @@ const VIDEO_MIME_BY_EXTENSION: Record<string, string> = {
   '.mov': 'video/quicktime',
   '.webm': 'video/webm',
   '.mkv': 'video/x-matroska',
-  '.avi': 'video/x-msvideo'
+  '.avi': 'video/x-msvideo',
+  // MXF（XDCAM / AVC-Intra / DNxHD）：ffprobe / ffmpeg 原生可读，导入与导出都可用；
+  // Chromium 没有 MXF 解封装器，<video> 会走 onError → 预览显示「不可预览」而不是白屏。
+  '.mxf': 'video/mxf'
 }
 
 /**

@@ -353,3 +353,79 @@ describe('切预设与清除自定义（预览必须回到该预设默认形态�
     expect(after.styleOverrides.tokens?.primary).toBe('#101010')
   })
 })
+
+/**
+ * v6：媒体段的画面编辑与检查器分流。
+ * 检查器靠「最后点选的是哪类」分流，而不是靠哪个 id 非空——否则选完媒体段再点字幕条会卡住。
+ */
+describe('媒体段画面编辑与检查器分流', () => {
+  function seedMediaClip(): string {
+    freshProject()
+    const store = useProjectStore.getState()
+    const mediaId = store.addMedia(seedItem())
+    return store.insertMediaClip({ mediaId, timelineStartSec: 0 })!.id
+  }
+  const mediaClipOf = (id: string) => useProjectStore.getState().project.mediaClips.find((clip) => clip.id === id)!
+
+  it('选中媒体段把检查器切到 media，再点字幕条切回 subtitle', () => {
+    const mediaClipId = seedMediaClip()
+    const subtitleId = useProjectStore.getState().addClip(0)!
+    expect(useProjectStore.getState().selectionKind).toBe('subtitle')
+
+    useProjectStore.getState().selectMediaClip(mediaClipId)
+    expect(useProjectStore.getState().selectionKind).toBe('media')
+
+    useProjectStore.getState().selectClip(subtitleId)
+    expect(useProjectStore.getState().selectionKind).toBe('subtitle')
+    // 两个选中态各自保留，不互相清空
+    expect(useProjectStore.getState().selectedMediaClipId).toBe(mediaClipId)
+  })
+
+  it('updateMediaClipVideo 是增量合并；回到默认值就整键删除', () => {
+    const id = seedMediaClip()
+    useProjectStore.getState().updateMediaClipVideo(id, { scalePercent: 150 })
+    expect(mediaClipOf(id).video?.scalePercent).toBe(150)
+    expect(mediaClipOf(id).video?.flipH).toBe(false)
+
+    useProjectStore.getState().updateMediaClipVideo(id, { flipH: true })
+    expect(mediaClipOf(id).video?.scalePercent).toBe(150)
+    expect(mediaClipOf(id).video?.flipH).toBe(true)
+
+    // 逐项拉回默认 + 关掉镜像 → 整键消失（不留一堆零值）
+    useProjectStore.getState().updateMediaClipVideo(id, { scalePercent: 100, flipH: false })
+    expect(mediaClipOf(id).video).toBeUndefined()
+  })
+
+  it('越界值在写入时就夹好，脏值不会落到工程里', () => {
+    const id = seedMediaClip()
+    useProjectStore.getState().updateMediaClipVideo(id, { scalePercent: 9999, rotationDeg: -90, brightness: 500 })
+    const video = mediaClipOf(id).video!
+    expect(video.scalePercent).toBe(400)
+    expect(video.rotationDeg).toBe(0)
+    expect(video.brightness).toBe(100)
+  })
+
+  it('resetMediaClipVideo 只清当前段，其他段不受牵连', () => {
+    const first = seedMediaClip()
+    const store = useProjectStore.getState()
+    const second = store.insertMediaClip({ mediaId: store.project.media[0]!.id, timelineStartSec: 20 })!.id
+    useProjectStore.getState().updateMediaClipVideo(first, { scalePercent: 130 })
+    useProjectStore.getState().updateMediaClipVideo(second, { contrast: 40 })
+
+    useProjectStore.getState().resetMediaClipVideo(first)
+
+    expect(mediaClipOf(first).video).toBeUndefined()
+    expect(mediaClipOf(second).video?.contrast).toBe(40)
+  })
+
+  it('删掉正在编辑的最后一条媒体段 → 检查器退回字幕编辑器', () => {
+    const id = seedMediaClip()
+    useProjectStore.getState().selectMediaClip(id)
+    expect(useProjectStore.getState().selectionKind).toBe('media')
+
+    useProjectStore.getState().removeMediaClip(id)
+
+    expect(useProjectStore.getState().selectedMediaClipId).toBeNull()
+    expect(useProjectStore.getState().selectionKind).toBe('subtitle')
+  })
+})

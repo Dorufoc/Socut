@@ -7,6 +7,7 @@ import type {
   FontRecord,
   Fps,
   MediaClip,
+  MediaClipVideo,
   MediaItem,
   PresetId,
   Project,
@@ -17,14 +18,20 @@ import type {
 } from '@shared/types'
 import { getPreset } from '@shared/presets'
 import { clipWithPresetDefaults, hasKeys } from '@shared/clipStyle'
+import { defaultMediaVideo, normalizeMediaVideo } from '@shared/mediaClipVideo'
 
 /** 工程状态（规格 §4.6）。所有时间值在写入时已吸附到帧边界，存储仍为秒。 */
+
+/** 右侧检查器当前跟谁：刚点中的是字幕条还是媒体段（两者可同时处于选中态）。 */
+export type SelectionKind = 'subtitle' | 'media'
 
 export interface ProjectState {
   project: Project
   selectedClipId: string | null
   /** v2：媒体轨上选中的片段（拆分/删除/拖拽的目标） */
   selectedMediaClipId: string | null
+  /** v6：最后一次点选的类型——决定右侧检查器渲染字幕编辑器还是视频编辑器 */
+  selectionKind: SelectionKind
   /** 字体库（内置 + 用户导入） */
   fonts: FontRecord[]
   /** 每次变更递增，驱动自动保存与预览重建 */
@@ -103,6 +110,12 @@ export interface ProjectState {
    * 返回拆分出的右段 id；不可拆分返回 null。
    */
   splitAtFrame: (atSec: number) => string | null
+
+  // ---------------------------------------------------------------- v6 画面编辑
+  /** 写回媒体段的画面变换/调色（patch 为增量；全部默认时整键删除） */
+  updateMediaClipVideo: (id: string, patch: Partial<MediaClipVideo>) => void
+  /** 一条片段的所有画面编辑回到默认（缩放 100% / 无翻转 / 参数归零 / 曲线直线） */
+  resetMediaClipVideo: (id: string) => void
 }
 
 export function createInitialProject(): Project {
@@ -162,6 +175,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   project: createInitialProject(),
   selectedClipId: null,
   selectedMediaClipId: null,
+  selectionKind: 'subtitle',
   fonts: [],
   revision: 0,
   currentPath: null,
@@ -172,6 +186,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       currentPath: path ?? null,
       selectedClipId: project.clips[0]?.id ?? null,
       selectedMediaClipId: project.mediaClips[0]?.id ?? null,
+      // 打开工程默认先看字幕（这是主任务）；没有字幕条时才落到视频编辑器
+      selectionKind: project.clips.length > 0 ? 'subtitle' : 'media',
       revision: state.revision + 1
     })),
 
@@ -270,7 +286,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ project: withClips(state.project, clips), selectedClipId, revision: state.revision + 1 })
   },
 
-  selectClip: (id) => set({ selectedClipId: id }),
+  selectClip: (id) => set({ selectedClipId: id, ...(id ? { selectionKind: 'subtitle' as const } : {}) }),
 
   applyStyleToAll: (sourceId) => {
     const state = get()
@@ -429,7 +445,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   // ---------------------------------------------------------------- v2 媒体轨
 
-  selectMediaClip: (id) => set({ selectedMediaClipId: id }),
+  selectMediaClip: (id) => set({ selectedMediaClipId: id, ...(id ? { selectionKind: 'media' as const } : {}) }),
 
   insertMediaClip: (input) => {
     const state = get()
@@ -528,8 +544,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   removeMediaClip: (id) => {
     const state = get()
     const mediaClips = state.project.mediaClips.filter((c) => c.id !== id)
-    const selectedMediaClipId = state.selectedMediaClipId === id ? (mediaClips[0]?.id ?? null) : state.selectedMediaClipId
-    set({ project: withMediaClips(state.project, mediaClips), selectedMediaClipId, revision: state.revision + 1 })
+    const removedSelected = state.selectedMediaClipId === id
+    const selectedMediaClipId = removedSelected ? (mediaClips[0]?.id ?? null) : state.selectedMediaClipId
+    set({
+      project: withMediaClips(state.project, mediaClips),
+      selectedMediaClipId,
+      // 删掉了正在编辑的那条且再无媒体段：检查器退回字幕编辑器，不留一个空视频面板
+      ...(removedSelected && selectedMediaClipId === null ? { selectionKind: 'subtitle' as const } : {}),
+      revision: state.revision + 1
+    })
   },
 
   splitAtFrame: (atSec) => {
@@ -545,9 +568,44 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({
       project: withMediaClips(state.project, mediaClips),
       selectedMediaClipId: result.right.id,
+      // 拆完直接编辑右半段，检查器跟着切到视频视图
+      selectionKind: 'media',
       revision: state.revision + 1
     })
     return result.right.id
+  },
+
+  // ---------------------------------------------------------------- v6 画面编辑
+
+  updateMediaClipVideo: (id, patch) => {
+    const state = get()
+    const mediaClips = state.project.mediaClips.map((clip) => {
+      if (clip.id !== id) return clip
+      // 增量合并到「当前值（缺省 = 默认值）」上，再交给纯函数夹心/剔除默认值
+      const current = clip.video ?? defaultMediaVideo()
+      const merged: MediaClipVideo = {
+        ...current,
+        ...patch,
+        curves: patch.curves ?? { ...current.curves }
+      }
+      const normalized = normalizeMediaVideo(merged)
+      const next: MediaClip = { ...clip }
+      if (normalized) next.video = normalized
+      else delete next.video
+      return next
+    })
+    set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
+
+  resetMediaClipVideo: (id) => {
+    const state = get()
+    const mediaClips = state.project.mediaClips.map((clip) => {
+      if (clip.id !== id) return clip
+      const next: MediaClip = { ...clip }
+      delete next.video
+      return next
+    })
+    set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
   }
 }))
 

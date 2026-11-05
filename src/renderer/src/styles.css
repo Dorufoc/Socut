@@ -379,6 +379,15 @@ textarea {
   overflow: hidden;
 }
 
+/* 曲线 / 曝光 / 冷暖的按通道查找表：只做定义，不占位 */
+.stage__filters {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 .stage__canvas {
   /* 盒子 == 画面矩形：blitTo 的等比装入退化为精确填满，点选映射不再有黑边误差 */
   position: absolute;
@@ -2084,6 +2093,25 @@ input[type='color']:disabled {
 
 .caption-item__onair-tag {
   color: var(--accent);
+}
+
+/* 曲线预览（视频片段编辑器）：三条通道叠画，当前通道加粗 */
+.curve-preview {
+  width: 100%;
+  height: 72px;
+  border: 1px solid var(--stroke-card);
+  border-radius: var(--radius-control);
+  background: var(--bg-input);
+}
+
+.curve-preview__bg {
+  fill: transparent;
+}
+
+.curve-preview__base {
+  stroke: rgba(255, 255, 255, 0.12);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
 }
 
 /* ------------------------------------------------------------------ 模态与遮罩 */

@@ -22,6 +22,13 @@ export const AUTOSAVE_FILE = 'autosave.focusnews.json'
 export const AUTOSAVE_BACKUP_FILE = 'autosave.focusnews.bak.json'
 
 /**
+ * 可导入的视频容器扩展名（不带点）。
+ * `mxf` 是广播交付的主容器（XDCAM / AVC-Intra / DNxHD）：ffprobe/ffmpeg 原生可读，
+ * 导入、探测、导出全链路都可用；但 Chromium 没有 MXF 解封装器，需要代理转码才能进 <video> 预览。
+ */
+export const IMPORTABLE_VIDEO_EXTENSIONS = ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'wmv', 'mts', 'm2ts', 'mxf'] as const
+
+/**
  * 字幕条**布局边距** = 安全区内缩 × 该系数。
  * 安全区（SMPTE/EBU）仍然用于辅助线与硬约束，但条块实际摆放按产品要求贴得更近：
  * 0.5 → 1080p 下标题档左右各 96px（而非 192px）、底部 54px（而非 108px）。

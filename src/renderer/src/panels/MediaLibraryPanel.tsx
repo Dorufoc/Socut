@@ -1,7 +1,6 @@
 import { useEffect, useState, type DragEvent as ReactDragEvent, type ReactElement } from 'react'
 import { detectCompat } from '@shared/probe'
 import { formatDuration } from '@shared/timecode'
-import { TEXT } from '@shared/i18n'
 import type { MediaItem } from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
 import { mediaGateState, useUiStore } from '../state/uiStore'

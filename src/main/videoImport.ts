@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { BrowserWindow, dialog } from 'electron'
-import { COPYABLE_AUDIO_CODECS, VFR_SAMPLE_PACKETS } from '../shared/constants'
+import { COPYABLE_AUDIO_CODECS, IMPORTABLE_VIDEO_EXTENSIONS, VFR_SAMPLE_PACKETS } from '../shared/constants'
 import { buildProbeArgs, buildVfrSampleArgs } from '../shared/ffmpegArgs'
 import { buildProbeResult, parseProbeJson } from '../shared/probe'
 import type { Fps, VideoMeta, VideoProbeResult } from '../shared/types'
@@ -75,7 +75,12 @@ export function dropProbeCache(target?: string): void {
   else cache.clear()
 }
 
-const VIDEO_EXTENSIONS = ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'wmv', 'mts', 'm2ts']
+/**
+ * 可导入的容器扩展名（白名单在 shared/constants，与单测同一来源）。
+ * `mxf` 是广播交付的主容器（XDCAM / AVC-Intra / DNxHD），ffprobe/ffmpeg 原生可读，
+ * 导入、探测、导出全链路都能走；但 Chromium 没有 MXF 解封装器，预览需要代理转码。
+ */
+const VIDEO_EXTENSIONS: string[] = [...IMPORTABLE_VIDEO_EXTENSIONS]
 
 /** 选择参考视频文件并探测（门禁确认在渲染进程完成，规格 §6）。 */
 export async function pickAndProbeVideo(

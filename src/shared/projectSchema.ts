@@ -20,6 +20,7 @@ import {
   framesToDurationSec,
   snapTimeToFrame
 } from './fps'
+import { normalizeMediaVideo } from './mediaClipVideo'
 import type {
   AnimationSpec,
   ColorTokens,
@@ -294,13 +295,16 @@ function normalizeMediaClip(value: unknown, fps: Fps, mediaIds: Set<string>): Me
   // 时长强制对齐：任何一份手工改写的 JSON 也要保证 `sourceOutSec - sourceInSec === timelineEndSec - timelineStartSec`
   let sOut = snapTimeToFrame(sIn + duration, fps)
   if (sOut <= sIn) sOut = snapTimeToFrame(sIn + duration, fps)
+  const video = normalizeMediaVideo(value['video'])
   return {
     id,
     mediaId: value['mediaId'],
     timelineStartSec: tStart,
     timelineEndSec: tEnd,
     sourceInSec: sIn,
-    sourceOutSec: sOut
+    sourceOutSec: sOut,
+    // v6：画面变换与调色；全部默认时 normalizeMediaVideo 返回 undefined，整键不落盘
+    ...(video ? { video } : {})
   }
 }
 

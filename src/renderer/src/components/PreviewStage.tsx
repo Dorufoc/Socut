@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
 import { fpsToString } from '@shared/constants'
+import { MEDIA_GRADE_FILTER_ID, curveTableValues, mediaVideoFilter, mediaVideoTransform, needsChannelTable } from '@shared/mediaClipVideo'
 import { sourceTimeOf } from '@shared/mediaClips'
 import { computeWatermarkGeometry } from '@shared/ffmpegArgs'
 import type { RenderJobSpec } from '@shared/types'
@@ -62,10 +63,10 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
       if (!at) return null
       const item = mediaPool.find((m) => m.id === at.clip.mediaId)
       if (!item) return null
-      return { mediaId: item.id, path: item.path, sourceSec: at.sourceSec }
+      return { mediaId: item.id, path: item.path, sourceSec: at.sourceSec, clip: at.clip }
     }
     if (legacyRefPath) {
-      return { mediaId: 'legacy-ref', path: legacyRefPath, sourceSec: Math.max(0, displayTime) }
+      return { mediaId: 'legacy-ref', path: legacyRefPath, sourceSec: Math.max(0, displayTime), clip: null }
     }
     return null
   }, [mediaClips, mediaPool, legacyRefPath, displayTime])
@@ -96,6 +97,17 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   }, [sourcePath])
 
   const videoReady = videoState === 'ready'
+
+  /**
+   * 当前播放头所在媒体段的画面编辑（v6）：几何变换走 CSS transform、调色走 CSS filter，
+   * 曲线/曝光/冷暖走 SVG 曲线表。语义全部来自 shared/mediaClipVideo，导出层将来接同一条口径。
+   */
+  const videoEdit = mediaSource?.clip?.video
+  const videoStyle = useMemo((): CSSProperties => {
+    const transform = mediaVideoTransform(videoEdit)
+    const filter = mediaVideoFilter(videoEdit)
+    return { ...(transform !== 'none' ? { transform } : {}), ...(filter !== 'none' ? { filter } : {}) }
+  }, [videoEdit])
 
   /**
    * 画面框：量的是**外层容器**而不是 Canvas 自己——尺寸变化时 Canvas 盒子会被我们写回，
@@ -216,11 +228,26 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     <div className="stage__canvas-wrap" ref={wrapRef}>
       {/* 画面框：唯一与目标分辨率同比例的矩形，里面所有层共用同一原点与缩放比 */}
       <div className="stage__frame" style={frameStyle}>
+        {/* 曲线 / 曝光 / 冷暖的按通道查找表（与 CSS filter 的 url(#id) 同源） */}
+        {videoEdit && needsChannelTable(videoEdit) ? (
+          <svg className="stage__filters" aria-hidden="true" focusable="false">
+            <defs>
+              <filter id={MEDIA_GRADE_FILTER_ID} colorInterpolationFilters="sRGB">
+                <feComponentTransfer>
+                  <feFuncR type="table" tableValues={curveTableValues(videoEdit, 'r')} />
+                  <feFuncG type="table" tableValues={curveTableValues(videoEdit, 'g')} />
+                  <feFuncB type="table" tableValues={curveTableValues(videoEdit, 'b')} />
+                </feComponentTransfer>
+              </filter>
+            </defs>
+          </svg>
+        ) : null}
         {videoUrl ? (
           <video
             ref={videoRef}
             className={`stage__ref-video${videoReady ? ' stage__ref-video--ready' : ''}`}
             src={videoUrl}
+            style={videoStyle}
             muted
             playsInline
             preload="auto"

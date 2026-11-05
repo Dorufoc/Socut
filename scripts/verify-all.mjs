@@ -139,7 +139,7 @@ async function main() {
   for (const project of ['node', 'web', 'tests']) {
     await step(`typecheck:${project}`, node, [tsc, '--noEmit', '-p', `tsconfig.${project}.json`])
   }
-  await step('vitest（384 用例，node + dom 两套）', node, [vitest, 'run'])
+  await step('vitest（412 用例，node + dom 两套）', node, [vitest, 'run'])
 
   // --- CLI 集成冒烟（不依赖 Electron）---
   await step('CLI 冒烟：1080p30/10s 透明 MOV', node, ['scripts/smoke-export.mjs', '--width', '1920', '--height', '1080', '--fps', '30/1', '--seconds', '10'])
@@ -186,7 +186,8 @@ async function main() {
       ...base, FOCUSNEWS_SMOKE: '0', FOCUSNEWS_REVIEW_SHEET: path.join(artifacts, 'review-sheet-1080p.png'), FOCUSNEWS_REVIEW_BACKDROP: path.join(artifacts, 'review-backdrop.png')
     }, 600_000, undefined, ['spikes/artifacts/review-sheet-1080p.png'])
     // 视觉检查：8 预设 × 短/常规/长文案，出图 + 指标，失败时非 0 退出码
-    await step('应用内：字幕条视觉检查（8 预设 × 3 文案）', node, ['scripts/visual-check.mjs'], {}, 600_000, {
+    // 注意要显式传隔离 profile：它自己会清掉所有 FOCUSNEWS_*，不传就会撞上用户正在开的实例（单实例锁 → 秒退）
+    await step('应用内：字幕条视觉检查（8 预设 × 3 文案）', node, ['scripts/visual-check.mjs'], { FOCUSNEWS_USER_DATA: gateUserData }, 600_000, {
       file: 'spikes/artifacts/visual-check/report.json',
       select: (json) => ({ passed: json.passed, cases: json.cases?.length, failures: json.failures })
     }, ['spikes/artifacts/visual-check/sheet.png'])

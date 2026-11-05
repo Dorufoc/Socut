@@ -366,6 +366,47 @@ export interface MediaClip {
   /** 对应源视频的入出点秒（与时长一致：timelineEndSec - timelineStartSec === sourceOutSec - sourceInSec） */
   sourceInSec: number
   sourceOutSec: number
+  /** v6：画面变换与调色（缺省 = 全部默认值） */
+  video?: MediaClipVideo
+}
+
+/** 曲线三个控制点的 y 值：阴影 / 中间调 / 高光（0..1，默认 0 / 0.5 / 1） */
+export type CurveStops = [number, number, number]
+
+/**
+ * 媒体片段的画面变换与调色（v6）。
+ *
+ * 设计口径：**默认值 = 不生效**（100% / 0 / false / 0 / 曲线为直线），
+ * 全部默认时 `MediaClip.video` 整键不存在——工程 JSON 里不留“看起来像自定义”的零值。
+ * 参数属于**时间轴片段**（同素材可多段各自不同），不写进素材池。
+ */
+export interface MediaClipVideo {
+  /** 缩放百分比，100 = 原始大小 */
+  scalePercent: number
+  /** 水平平移（画面宽的百分比，正值向右） */
+  offsetXPercent: number
+  /** 垂直平移（画面高的百分比，正值向下） */
+  offsetYPercent: number
+  /** 旋转角度（0..360，顺时针） */
+  rotationDeg: number
+  /** 水平镜像（左右翻转） */
+  flipH: boolean
+  /** 垂直镜像（上下翻转） */
+  flipV: boolean
+  /** 亮度 -100..100 */
+  brightness: number
+  /** 曝光 -100..100（与亮度的区别：曝光按倍增，亮度按偏移） */
+  exposure: number
+  /** 对比度 -100..100 */
+  contrast: number
+  /** 饱和度 -100..100 */
+  saturation: number
+  /** 冷暖色调 -100..100（负值偏冷蓝，正值偏暖黄） */
+  warmth: number
+  /** 光感 -100..100（低饱和区域的饱和度提升） */
+  vibrance: number
+  /** RGB 三通道曲线控制点 */
+  curves: { r: CurveStops; g: CurveStops; b: CurveStops }
 }
 
 /**
