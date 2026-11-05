@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { BrowserWindow, dialog } from 'electron'
-import { AUTOSAVE_BACKUP_FILE, AUTOSAVE_FILE } from '../shared/constants'
+import { AUTOSAVE_BACKUP_FILE, AUTOSAVE_FILE, AUTOSAVE_FLUSH_TIMEOUT_MS } from '../shared/constants'
 import { PROJECT_FILE_EXTENSION, normalizeProject } from '../shared/projectSchema'
 import type { Project } from '../shared/types'
 import { projectsDir } from './paths'
@@ -29,7 +29,26 @@ async function atomicWrite(file: string, content: string): Promise<void> {
   await fs.rename(tmp, file)
 }
 
-export async function autosaveWrite(project: Project): Promise<void> {
+/**
+ * 写入队列：同路径的 rename/copy 并发交叠在 Windows 上会撞 sharing violation，
+ * 且退出前的 flush 需要能等到「最后一笔真正落盘」。
+ * 因此所有自动存档写入串行排队；flushPendingAutosave 由主进程退出清理调用，
+ * 保证 debounce 未及触发或 IPC 在途的进度不因关窗/崩溃而丢。
+ */
+let writeQueue: Promise<void> = Promise.resolve()
+
+export function autosaveWrite(project: Project): Promise<void> {
+  const task = writeQueue.catch(() => undefined).then(() => autosaveWriteNow(project))
+  writeQueue = task.catch(() => undefined)
+  return task
+}
+
+/** 等待在途写入全部落盘（封顶 AUTOSAVE_FLUSH_TIMEOUT_MS，超时放行不卡死退出） */
+export async function flushPendingAutosave(): Promise<void> {
+  await Promise.race([writeQueue, new Promise<void>((resolve) => setTimeout(resolve, AUTOSAVE_FLUSH_TIMEOUT_MS).unref?.())])
+}
+
+async function autosaveWriteNow(project: Project): Promise<void> {
   const dir = await ensureDir()
   const file = path.join(dir, AUTOSAVE_FILE)
   const backup = path.join(dir, AUTOSAVE_BACKUP_FILE)

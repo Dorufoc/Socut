@@ -21,8 +21,12 @@ import {
   snapTimeToFrame
 } from './fps'
 import { normalizeMediaVideo } from './mediaClipVideo'
+import { normalizeMediaStab } from './mediaStab'
+import { normalizeClipAudio, normalizeClipSpeed, speedValueOf } from './mediaClipAudio'
+import { MIN_AUDIO_CLIP_SEC, normalizeLayer } from './audioClips'
 import type {
   AnimationSpec,
+  AudioClip,
   ColorTokens,
   EasingKey,
   FontRecord,
@@ -204,7 +208,10 @@ function normalizeMeta(value: unknown): VideoMeta | null {
   if (!isRecord(value)) return null
   const width = Math.round(numberOr(value['width'], 0))
   const height = Math.round(numberOr(value['height'], 0))
-  if (width <= 0 || height <= 0) return null
+  // v7：音频素材没有画面（width/height = 0），不能当「坏视频」丢掉；
+  // 只拒绝负数/非有限值，0 的形态由 kind 区分。
+  if (!(width >= 0) || !(height >= 0)) return null
+  const fallbackRatio = width > 0 && height > 0 ? width / height : 16 / 9
   const str = (key: string): string | null => (typeof value[key] === 'string' ? (value[key] as string) : null)
   return {
     path: str('path') ?? '',
@@ -212,7 +219,7 @@ function normalizeMeta(value: unknown): VideoMeta | null {
     width,
     height,
     sar: isRecord(value['sar']) ? normalizeRational(value['sar'], { num: 1, den: 1 }) : null,
-    displayRatio: numberOr(value['displayRatio'], width / height),
+    displayRatio: numberOr(value['displayRatio'], fallbackRatio),
     rFrameRate: normalizeRational(value['rFrameRate'], { num: 25, den: 1 }),
     avgFrameRate: normalizeRational(value['avgFrameRate'], { num: 25, den: 1 }),
     pixFmt: str('pixFmt') ?? 'unknown',
@@ -263,10 +270,20 @@ function normalizeMediaItem(value: unknown): MediaItem | null {
     : (value['path'] as string).split(/[\\/]/).pop() ?? (value['path'] as string)
   const policy = value['vfrPolicy']
   const compactMode = value['compactMode']
+  // v7：素材类型。旧工程无此字段：有画面就是视频，没画面（width=0）就是音频
+  const kindRaw = value['kind']
+  const kind =
+    kindRaw === 'audio' || kindRaw === 'image' || kindRaw === 'video'
+      ? kindRaw
+      : meta.width > 0
+        ? 'video'
+        : 'audio'
   return {
     id,
     path: value['path'],
     ...(typeof value['sourcePath'] === 'string' ? { sourcePath: value['sourcePath'] } : {}),
+    // 视频是缺省类型，不落盘（旧工程 JSON 保持逐字节不变）
+    ...(kind !== 'video' ? { kind } : {}),
     name,
     meta,
     non169Ack: value['non169Ack'] === true,
@@ -292,10 +309,15 @@ function normalizeMediaClip(value: unknown, fps: Fps, mediaIds: Set<string>): Me
   if (tEnd - tStart < MIN_CLIP_DURATION_SEC) tEnd = snapTimeToFrame(tStart + MIN_CLIP_DURATION_SEC, fps)
   const duration = tEnd - tStart
   const sIn = snapTimeToFrame(Math.max(0, numberOr(value['sourceInSec'], 0)), fps)
-  // 时长强制对齐：任何一份手工改写的 JSON 也要保证 `sourceOutSec - sourceInSec === timelineEndSec - timelineStartSec`
-  let sOut = snapTimeToFrame(sIn + duration, fps)
-  if (sOut <= sIn) sOut = snapTimeToFrame(sIn + duration, fps)
   const video = normalizeMediaVideo(value['video'])
+  const stab = normalizeMediaStab(value['stab'])
+  const layer = normalizeLayer(value['layer'])
+  // v9：音频与变速（全默认 → undefined → 整键不落盘）
+  const audio = normalizeClipAudio(value['audio'])
+  const speed = normalizeClipSpeed(value['speed'])
+  // 时长强制对齐：任何一份手工改写的 JSON 也要保证
+  // `sourceOutSec - sourceInSec === (timelineEndSec - timelineStartSec) × 倍速`（1x 时即旧恒等式）
+  const sOut = snapTimeToFrame(sIn + duration * speedValueOf(speed), fps)
   return {
     id,
     mediaId: value['mediaId'],
@@ -304,7 +326,40 @@ function normalizeMediaClip(value: unknown, fps: Fps, mediaIds: Set<string>): Me
     sourceInSec: sIn,
     sourceOutSec: sOut,
     // v6：画面变换与调色；全部默认时 normalizeMediaVideo 返回 undefined，整键不落盘
-    ...(video ? { video } : {})
+    ...(video ? { video } : {}),
+    // v7：叠放层号，0 层不落盘
+    ...(layer > 0 ? { layer } : {}),
+    // v8：防抖；关闭且无自定义选择时 normalizeMediaStab 返回 undefined，整键不落盘
+    ...(stab ? { stab } : {}),
+    // v9：音频参数 / 变速；同上，全默认时整键不存在
+    ...(audio ? { audio } : {}),
+    ...(speed ? { speed } : {})
+  }
+}
+
+/** v7：音频段。与媒体段同一套时间轴口径，但只贡献声音、不参与画面合成。 */
+function normalizeAudioClip(value: unknown, fps: Fps, mediaIds: Set<string>): AudioClip | null {
+  if (!isRecord(value)) return null
+  if (typeof value['mediaId'] !== 'string' || !mediaIds.has(value['mediaId'])) return null
+  const id = typeof value['id'] === 'string' && value['id'].length > 0 ? value['id'] : createId('aclip')
+  const tStart = snapTimeToFrame(Math.max(0, numberOr(value['timelineStartSec'], 0)), fps)
+  let tEnd = snapTimeToFrame(Math.max(tStart, numberOr(value['timelineEndSec'], tStart)), fps)
+  if (tEnd - tStart < MIN_AUDIO_CLIP_SEC) tEnd = snapTimeToFrame(tStart + MIN_AUDIO_CLIP_SEC, fps)
+  const sIn = snapTimeToFrame(Math.max(0, numberOr(value['sourceInSec'], 0)), fps)
+  const layer = normalizeLayer(value['layer'])
+  const audio = normalizeClipAudio(value['audio'])
+  const speed = normalizeClipSpeed(value['speed'])
+  return {
+    id,
+    mediaId: value['mediaId'],
+    timelineStartSec: tStart,
+    timelineEndSec: tEnd,
+    sourceInSec: sIn,
+    sourceOutSec: snapTimeToFrame(sIn + (tEnd - tStart) * speedValueOf(speed), fps),
+    ...(layer > 0 ? { layer } : {}),
+    // v9：与媒体段同一套音频/变速口径
+    ...(audio ? { audio } : {}),
+    ...(speed ? { speed } : {})
   }
 }
 
@@ -377,6 +432,11 @@ export function normalizeProject(raw: unknown): Project | null {
     .map((item) => normalizeMediaClip(item, fps, mediaIds))
     .filter((item): item is MediaClip => item !== null)
     .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
+  const audioClipsRaw = Array.isArray(migrated['audioClips']) ? migrated['audioClips'] : []
+  const audioClips = audioClipsRaw
+    .map((item) => normalizeAudioClip(item, fps, mediaIds))
+    .filter((item): item is AudioClip => item !== null)
+    .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
   const ui = isRecord(migrated['ui']) ? (migrated['ui'] as Project['ui']) : undefined
   const watermark = normalizeWatermark(migrated['watermark'])
   return {
@@ -388,6 +448,8 @@ export function normalizeProject(raw: unknown): Project | null {
     fonts,
     media,
     mediaClips,
+    // v7：没有音频段的工程不写这个键（旧工程 JSON 不变）
+    ...(audioClips.length > 0 ? { audioClips } : {}),
     ...(watermark ? { watermark } : {}),
     ...(ui ? { ui } : {})
   }

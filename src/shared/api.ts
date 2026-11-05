@@ -1,4 +1,6 @@
 import type {
+  AudioPeaksRequest,
+  AudioPeaksResult,
   CompatFlags,
   ExportRequest,
   Fps,
@@ -12,6 +14,8 @@ import type {
   MediaStripResult,
   Project,
   SizeEstimate,
+  StabPreviewRequest,
+  StabPreviewResult,
   VideoMeta,
   VideoProbeResult
 } from './types'
@@ -225,6 +229,13 @@ export interface FocusNewsApi {
     previewUrl(path: string): Promise<string | null>
     /** VFR → CFR，返回 jobId，进度经由 onProgress 上报 */
     cfrConvert(path: string, fps: Fps, meta: VideoMeta): Promise<{ jobId: string; outputPath: string }>
+    /**
+     * v8.1：防抖预览代理：受理后后台两段式作业（进度/结果经 job 事件流，jobId 前缀 stab-，
+     * 完成后 outputs[0] = 代理 mp4）；命中磁盘缓存时 status='cached' 直接给路径、不起子进程。
+     */
+    stabPreview(request: StabPreviewRequest): Promise<StabPreviewResult>
+    /** v8.1：片段删除/关闭防抖时回收它的代理与运动数据 */
+    stabPreviewRemove(clipId: string): Promise<void>
   }
   watermark: {
     /** 选一张本机图片作水印并探测原图尺寸；用户取消 null，尺寸不可读时报错 */
@@ -242,6 +253,11 @@ export interface FocusNewsApi {
      * 命中磁盘缓存不起子进程；不可用时 url=null（渲染层显示「无法预览」占位）。
      */
     strip(request: MediaStripRequest): Promise<MediaStripResult>
+    /**
+     * v9：频谱条幅度取样。主进程把 `[sourceInSec, sourceOutSec]` 解成单声道 PCM
+     * 并折成等分桶峰值（0..1）；无音轨 / 不可用时 `peaks` 为空数组，卡片不画频谱条。
+     */
+    peaks(request: AudioPeaksRequest): Promise<AudioPeaksResult>
   }
   export: {
     estimate(input: EstimateInput): Promise<SizeEstimate>

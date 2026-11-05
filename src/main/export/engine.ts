@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { BrowserWindow } from 'electron'
 import { buildSizeEstimate, diskPrecheck } from '../../shared/sizeEstimate'
-import { frameIntervalSec } from '../../shared/fps'
+import { frameIntervalSec, frameTimeSec } from '../../shared/fps'
 import { TEXT } from '../../shared/i18n'
 import type {
   ExportRequest,
@@ -217,6 +217,20 @@ export class ExportEngine {
         onTick: emit
       }
 
+      /**
+       * v7：透明出口的音频。
+       * 只给 `transparentMov`：叠加导出的阶段一是**无声中间件**，
+       * 在这里带音轨会与阶段二的混音叠成双份（而且会提前出声）。
+       */
+      const transparentAudio =
+        request.target.kind === 'transparentMov' && (request.audioClips?.length ?? 0) > 0
+          ? {
+              clips: request.audioClips ?? [],
+              spanStartSec: frameTimeSec(spec.startFrame, spec.fps),
+              spanEndSec: frameTimeSec(spec.startFrame + framesTotal, spec.fps)
+            }
+          : undefined
+
       state.phase = 'rendering'
       emit()
 
@@ -273,11 +287,12 @@ export class ExportEngine {
             fps: spec.fps,
             framesTotal,
             codec,
+            audio: transparentAudio,
             isCancelled: () => state.cancelRequested,
             onTick: emit
           })
         } else {
-          const done = await runTransparentMov(transparentCtx, channel)
+          const done = await runTransparentMov({ ...transparentCtx, audio: transparentAudio }, channel)
           if (done === 'cancelled') {
             this.finalizeCancelled(request, state)
             return
@@ -320,6 +335,10 @@ export class ExportEngine {
         directPipe: overlay.directPipe,
         // 水印：尺寸不可用/路径缺失时归一为 undefined，合成链退回无水印的旧参数
         watermark: watermarkInputOf(overlay.watermark),
+        // v7：音频轨；有它就与参考视频原声 amix（渲染侧已按 span 裁剪）
+        audioClips: request.audioClips,
+        // v8：防抖 .trf 落盘与 detect/合成 ffmpeg 的 cwd
+        workspaceDir: workspace.dir,
         isCancelled: () => state.cancelRequested,
         onTick: emit
       })

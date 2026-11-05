@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { CHANNELS } from '../shared/ipcChannels'
 import type {
+  AudioPeaksRequest,
+  AudioPeaksResult,
   ExportRequest,
   FontRecord,
   FrameEnd,
@@ -12,6 +14,8 @@ import type {
   MediaStripRequest,
   MediaStripResult,
   Project,
+  StabPreviewRequest,
+  StabPreviewResult,
   VideoMeta
 } from '../shared/types'
 import type { EstimateInput, SmokeReport, WatermarkPickResult } from '../shared/api'
@@ -61,7 +65,16 @@ const api = {
     exists: (path: string) => ipcRenderer.invoke(CHANNELS.videoExists, path) as Promise<boolean>,
     previewUrl: (path: string) => ipcRenderer.invoke(CHANNELS.videoPreviewUrl, path) as Promise<string | null>,
     cfrConvert: (path: string, fps: Fps, meta: VideoMeta) =>
-      ipcRenderer.invoke(CHANNELS.videoCfrConvert, path, fps, meta)
+      ipcRenderer.invoke(CHANNELS.videoCfrConvert, path, fps, meta),
+    /**
+     * v8.1：防抖预览代理：后台两段式作业（进度经 job.onProgress/onResult，jobId 前缀 stab-），
+     * 命中磁盘缓存不起子进程。
+     */
+    stabPreview: (request: StabPreviewRequest) =>
+      ipcRenderer.invoke(CHANNELS.videoStabPreview, request) as Promise<StabPreviewResult>,
+    /** v8.1：片段删除/关闭防抖时回收它的代理文件 */
+    stabPreviewRemove: (clipId: string) =>
+      ipcRenderer.invoke(CHANNELS.videoStabPreviewRemove, clipId) as Promise<void>
   },
   watermark: {
     /** 选一张本机图片作水印，主进程探测原图尺寸（用户取消 null） */
@@ -81,7 +94,13 @@ const api = {
      * 命中磁盘缓存不起子进程；失败时 url=null，卡片显示占位符。
      */
     strip: (request: MediaStripRequest) =>
-      ipcRenderer.invoke(CHANNELS.mediaGenerateStrip, request) as Promise<MediaStripResult>
+      ipcRenderer.invoke(CHANNELS.mediaGenerateStrip, request) as Promise<MediaStripResult>,
+    /**
+     * v9：频谱条取样（主进程折好的等分桶峰值）。
+     * 不可用时 peaks=[]，卡片不画频谱条而不是抛错。
+     */
+    peaks: (request: AudioPeaksRequest) =>
+      ipcRenderer.invoke(CHANNELS.mediaAudioPeaks, request) as Promise<AudioPeaksResult>
   },
   export: {
     estimate: (input: EstimateInput) => ipcRenderer.invoke(CHANNELS.exportEstimate, input),

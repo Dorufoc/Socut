@@ -6,6 +6,7 @@ import {
   frameTimeSec,
   parseFps,
   snapTimeToFrame,
+  stepLocalFrame,
   timeToFrameAtOrAfter,
   timeToFrameFloor,
   timeToFrameNearest
@@ -73,6 +74,31 @@ describe('分数帧率换算', () => {
     expect(parseFps('0/0')).toBeNull()
     expect(parseFps('')).toBeNull()
     expect(fpsToString(FPS_59_94)).toBe('60000/1001')
+  })
+})
+
+describe('逐帧跳转的落点（键盘 ← / →）', () => {
+  it('单步前进/后退落在相邻帧', () => {
+    expect(stepLocalFrame(10, 1, 300)).toBe(11)
+    expect(stepLocalFrame(10, -1, 300)).toBe(9)
+  })
+
+  it('两端夹住且不回绕：到第 0 帧和第 totalFrames-1 帧停住', () => {
+    expect(stepLocalFrame(0, -1, 300)).toBe(0)
+    expect(stepLocalFrame(299, 1, 300)).toBe(299)
+    expect(stepLocalFrame(5, -50, 300)).toBe(0)
+    expect(stepLocalFrame(290, 50, 300)).toBe(299)
+  })
+
+  it('长按连跳累加等价于连续单步', () => {
+    let frame = 0
+    for (let i = 0; i < 12; i += 1) frame = stepLocalFrame(frame, 1, 300)
+    expect(frame).toBe(12)
+  })
+
+  it('总帧数缺失（空工程）按 1 帧算，仍落在第 0 帧', () => {
+    expect(stepLocalFrame(0, 1, 0)).toBe(0)
+    expect(stepLocalFrame(0, -1, 0)).toBe(0)
   })
 })
 

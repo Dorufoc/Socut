@@ -18,6 +18,37 @@ import type { Project, SubtitleClip } from '@shared/types'
 
 const FPS = { num: 30, den: 1 }
 
+/** v8：带一枚素材 + 一段媒体段的最小工程；stabJson 原样写进片段的 stab 键。 */
+function projectWithMediaClip(stabJson?: unknown): Record<string, unknown> {
+  return {
+    version: PROJECT_VERSION,
+    name: '防抖工程',
+    resolution: { width: 1920, height: 1080 },
+    fps: FPS,
+    clips: [],
+    fonts: [],
+    media: [
+      {
+        id: 'm1',
+        path: 'C:/media/a.mp4',
+        name: 'a.mp4',
+        meta: { width: 1920, height: 1080, durationSec: 30, rFrameRate: { num: 30, den: 1 }, avgFrameRate: { num: 30, den: 1 } }
+      }
+    ],
+    mediaClips: [
+      {
+        id: 'c1',
+        mediaId: 'm1',
+        timelineStartSec: 0,
+        timelineEndSec: 4,
+        sourceInSec: 0,
+        sourceOutSec: 4,
+        ...(stabJson === undefined ? {} : { stab: stabJson })
+      }
+    ]
+  }
+}
+
 describe('normalizeProject', () => {
   it('往返保真：序列化后再解析结果一致', () => {
     const project = createDefaultProject('往返')
@@ -237,5 +268,116 @@ describe('时间轴合法性', () => {
   it('自动存档文件名常量稳定（工程与备份成对）', () => {
     expect(AUTOSAVE_FILE).toBe('autosave.focusnews.json')
     expect(PRESETS.length).toBe(8)
+  })
+})
+
+describe('v8 防抖参数归一', () => {
+  it('round-trip：开启的防抖参数序列化后再解析不丢', () => {
+    const parsed = normalizeProject(projectWithMediaClip({ enabled: true, level: 'high', tripod: true }))!
+    expect(parsed.mediaClips[0]!.stab).toEqual({ enabled: true, level: 'high', tripod: true })
+    // JSON 往返保真
+    const again = normalizeProject(JSON.parse(JSON.stringify(parsed)))!
+    expect(again.mediaClips[0]!.stab).toEqual({ enabled: true, level: 'high', tripod: true })
+  })
+
+  it('全默认整键不落盘：关闭且无自定义选择时 stab 消失', () => {
+    const parsed = normalizeProject(projectWithMediaClip({ enabled: false, level: 'standard', tripod: false }))!
+    expect(parsed.mediaClips[0]!.stab).toBeUndefined()
+    expect('stab' in (parsed.mediaClips[0] as unknown as Record<string, unknown>)).toBe(false)
+  })
+
+  it('脏值归一：非法档位回 standard、非 true 布尔视为 false，但 enabled 有效时仍落盘', () => {
+    const parsed = normalizeProject(projectWithMediaClip({ enabled: true, level: 'ultra', tripod: 'yes' }))!
+    expect(parsed.mediaClips[0]!.stab).toEqual({ enabled: true, level: 'standard', tripod: false })
+  })
+
+  it('旧工程无 stab 键：原样加载，不凭空多出字段（可选键免迁移）', () => {
+    const parsed = normalizeProject(projectWithMediaClip())!
+    expect(parsed.mediaClips[0]!.stab).toBeUndefined()
+    expect(JSON.stringify(parsed.mediaClips[0])).not.toContain('stab')
+  })
+
+  it('新增可选键不 bump PROJECT_VERSION：与 v6 video / v7 audioClips 同一先例', () => {
+    expect(PROJECT_VERSION).toBe(2)
+  })
+})
+
+/**
+ * v9：片段音频与变速的工程 JSON 口径。
+ *
+ * 除了 round-trip，最关键的是**变速后的时长恒等式**：
+ * `sourceOutSec - sourceInSec === (timelineEndSec - timelineStartSec) × 倍速`
+ * （1x 时就是旧恒等式，所以旧工程一个字节都不会变）。
+ */
+describe('v9 音频与变速参数归一', () => {
+  const mediaDoc = (extra: Record<string, unknown>): Record<string, unknown> => {
+    const doc = projectWithMediaClip()
+    const clips = doc['mediaClips'] as Record<string, unknown>[]
+    clips[0] = { ...clips[0], ...extra }
+    return doc
+  }
+  const audioDoc = (extra: Record<string, unknown>): Record<string, unknown> => {
+    const doc = mediaDoc({})
+    doc['audioClips'] = [
+      { id: 'a1', mediaId: 'm1', timelineStartSec: 1, timelineEndSec: 3, sourceInSec: 0.5, ...extra }
+    ]
+    return doc
+  }
+
+  it('round-trip：音量/渐变/倍速/音高开关序列化后再解析不丢', () => {
+    const parsed = normalizeProject(
+      mediaDoc({
+        audio: { volumePercent: 150, fadeInSec: 1, fadeOutSec: 0.5 },
+        speed: { speed: 2, maintainPitch: false }
+      })
+    )!
+    expect(parsed.mediaClips[0]!.audio).toEqual({ volumePercent: 150, fadeInSec: 1, fadeOutSec: 0.5 })
+    expect(parsed.mediaClips[0]!.speed).toEqual({ speed: 2, maintainPitch: false })
+    const again = normalizeProject(JSON.parse(JSON.stringify(parsed)))!
+    expect(again.mediaClips[0]!.audio).toEqual(parsed.mediaClips[0]!.audio)
+    expect(again.mediaClips[0]!.speed).toEqual(parsed.mediaClips[0]!.speed)
+  })
+
+  it('变速的时长恒等式：时间轴 4s @ 2x → 源窗口 8s（1x 时回到旧口径）', () => {
+    const fast = normalizeProject(mediaDoc({ speed: { speed: 2, maintainPitch: true } }))!
+    // 夹具的时间轴段是 0→4、源入点 0
+    expect(fast.mediaClips[0]!.sourceOutSec).toBeCloseTo(8, 6)
+    const normal = normalizeProject(mediaDoc({}))!
+    expect(normal.mediaClips[0]!.sourceOutSec).toBeCloseTo(4, 6)
+    // 慢放也一样：0.5x 时时间轴 4s 只吃 2s 源
+    const slow = normalizeProject(mediaDoc({ speed: { speed: 0.5, maintainPitch: true } }))!
+    expect(slow.mediaClips[0]!.sourceOutSec).toBeCloseTo(2, 6)
+  })
+
+  it('音频轨同一套口径：倍速 2x 时源出点跟着伸长', () => {
+    const parsed = normalizeProject(audioDoc({ speed: { speed: 2, maintainPitch: true } }))!
+    expect(parsed.audioClips![0]!.sourceOutSec).toBeCloseTo(0.5 + 2 * 2, 6)
+    expect(parsed.audioClips![0]!.speed).toEqual({ speed: 2, maintainPitch: true })
+  })
+
+  it('全默认整键不落盘：旧工程 JSON 不凭空多出 audio/speed', () => {
+    const parsed = normalizeProject(
+      mediaDoc({ audio: { volumePercent: 100, fadeInSec: 0, fadeOutSec: 0 }, speed: { speed: 1, maintainPitch: true } })
+    )!
+    const clip = parsed.mediaClips[0] as unknown as Record<string, unknown>
+    expect('audio' in clip).toBe(false)
+    expect('speed' in clip).toBe(false)
+    expect(JSON.stringify(parsed.mediaClips)).not.toContain('volumePercent')
+  })
+
+  it('脏值夹心：非数字回默认、越界夹到区间边界', () => {
+    const parsed = normalizeProject(
+      mediaDoc({ audio: { volumePercent: 900, fadeInSec: 'x', fadeOutSec: 99 }, speed: { speed: -3 } })
+    )!
+    expect(parsed.mediaClips[0]!.audio).toEqual({ volumePercent: 200, fadeInSec: 0, fadeOutSec: 5 })
+    expect(parsed.mediaClips[0]!.speed).toEqual({ speed: 0.25, maintainPitch: true })
+    // 源窗口按夹心后的倍速算，不会算出负数
+    expect(parsed.mediaClips[0]!.sourceOutSec).toBeCloseTo(1, 6)
+  })
+
+  it('音频轨的默认值也不落盘', () => {
+    const clip = normalizeProject(audioDoc({ audio: { volumePercent: 100, fadeInSec: 0, fadeOutSec: 0 } }))!
+      .audioClips![0] as unknown as Record<string, unknown>
+    expect('audio' in clip).toBe(false)
   })
 })

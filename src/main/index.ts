@@ -4,6 +4,7 @@ import { APP_NAME, WINDOW_TITLE } from '../shared/constants'
 import { ExportEngine } from './export/engine'
 import { registerIpc } from './ipc'
 import { createMainWindow } from './windows'
+import { flushPendingAutosave } from './projectStore'
 import { terminateAll } from './procRegistry'
 import { sweepStaleWorkspaces } from './tempWorkspace'
 import { resolveFfmpegBinaries, tempRoot } from './paths'
@@ -156,6 +157,9 @@ async function cleanup(reason: string): Promise<void> {
   if (cleaning) return
   cleaning = true
   try {
+    // 先等自动存档落盘：渲染侧 beforeunload 补发的最后一笔可能还在 IPC/写入队列里，
+    // 直接 app.exit 会把它打断（规格 §4.6：关闭程序不丢编辑进度）
+    await flushPendingAutosave()
     await engine.shutdown()
     const killed = await terminateAll()
     await fs.rm(tempRoot(), { recursive: true, force: true }).catch(() => undefined)

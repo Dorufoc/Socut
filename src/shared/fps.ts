@@ -105,6 +105,18 @@ export function clipFrameCount(startSec: number, endSec: number, fps: Fps): numb
   return Math.max(0, clipEndFrame(endSec, fps) - clipStartFrame(startSec, fps))
 }
 
+/**
+ * 逐帧跳转（键盘 ← / →）的落点：相对帧夹在 `[0, totalFrames)`。
+ *
+ * 越界停在端点而不回绕：预览循环到头会自动归零，回绕等于让用户按着方向键时
+ * 播放头随机跑；总帧数缺失（空工程）按 1 帧算，至少要能落在第 0 帧。
+ */
+export function stepLocalFrame(currentLocalFrame: number, deltaFrames: number, totalFrames: number): number {
+  const total = Math.max(1, Math.floor(totalFrames))
+  const target = Math.floor(currentLocalFrame) + Math.round(deltaFrames)
+  return Math.min(total - 1, Math.max(0, target))
+}
+
 /** 时间轴总帧数（覆盖 [0, durationSec)）。 */
 export function timelineFrameCount(durationSec: number, fps: Fps): number {
   return Math.max(0, timeToFrameAtOrAfter(durationSec, fps))

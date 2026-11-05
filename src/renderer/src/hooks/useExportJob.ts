@@ -1,5 +1,8 @@
 import { useCallback } from 'react'
 import { detectCompat } from '@shared/probe'
+import { resolveVisibleMediaClips } from '@shared/mediaClips'
+import { mediaKindOf } from '@shared/audioClips'
+import { speedValueOf } from '@shared/mediaClipAudio'
 import { createId } from '@shared/projectSchema'
 import { frameTimeSec, rationalToNumber } from '@shared/fps'
 import { nearestFps } from '@shared/constants'
@@ -85,7 +88,8 @@ export interface OverlayBase {
 
 function buildOverlayBase(project: Project): OverlayBase | null {
   const pool = new Map<string, MediaItem>(project.media.map((item) => [item.id, item]))
-  let clips = project.mediaClips.map((clip) => {
+  // v7 多层：先按层号把重叠段解开（上层盖下层），再交给“不重叠 + concat”的基座链
+  let clips = resolveVisibleMediaClips(project.mediaClips).map((clip) => {
     const item = pool.get(clip.mediaId)
     return {
       refVideoPath: item?.path ?? '',
@@ -93,6 +97,12 @@ function buildOverlayBase(project: Project): OverlayBase | null {
       timelineEndSec: clip.timelineEndSec,
       sourceInSec: clip.sourceInSec,
       sourceOutSec: clip.sourceOutSec,
+      // v8：只把「开着防抖」的段带进导出请求；缺键 = 主进程行为与现状逐字节一致
+      ...(clip.stab?.enabled === true ? { stab: clip.stab } : {}),
+      // v9：音量/渐变/变速同样只在「动过」时带键（全默认时 argv 与旧版逐字节一致）
+      ...(clip.audio ? { audio: clip.audio } : {}),
+      ...(clip.speed ? { speed: clip.speed } : {}),
+      isImage: item ? mediaKindOf(item) === 'image' : false,
       meta: item?.meta ?? null,
       vfrRaw: item?.vfrPolicy === 'raw'
     }
@@ -107,6 +117,7 @@ function buildOverlayBase(project: Project): OverlayBase | null {
         timelineEndSec: item.meta.durationSec,
         sourceInSec: 0,
         sourceOutSec: item.meta.durationSec,
+        isImage: mediaKindOf(item) === 'image',
         meta: item.meta,
         vfrRaw: item.vfrPolicy === 'raw'
       }
@@ -121,6 +132,7 @@ function buildOverlayBase(project: Project): OverlayBase | null {
         timelineEndSec: ref.meta.durationSec,
         sourceInSec: 0,
         sourceOutSec: ref.meta.durationSec,
+        isImage: false,
         meta: ref.meta,
         vfrRaw: ref.vfrPolicy === 'raw'
       }
@@ -137,7 +149,13 @@ function buildOverlayBase(project: Project): OverlayBase | null {
     if (clip.timelineStartSec > cursor + 1e-6) hasGap = true
     cursor = Math.max(cursor, clip.timelineEndSec)
   }
-  const multi = clips.length > 1 || hasGap || (first?.sourceInSec ?? 0) > 1e-6 || (first?.timelineStartSec ?? 0) > 1e-6
+  const multi =
+    clips.length > 1 ||
+    hasGap ||
+    (first?.sourceInSec ?? 0) > 1e-6 ||
+    (first?.timelineStartSec ?? 0) > 1e-6 ||
+    // 图像段要求多输入路径（单输入 builder 不支持 `-loop 1`）
+    clips.some((clip) => clip.isImage)
   return {
     segments: clips.map(({ meta, vfrRaw, ...seg }) => {
       void meta
@@ -276,12 +294,50 @@ export function useExportJob() {
     const audioMode: 'copy' | 'aac' =
       !base || base.multi || base.anyNoAudio || base.audioTranscodeNeeded ? 'aac' : 'copy'
 
+    /**
+     * v7：音频轨 → 导出输入。
+     *
+     * 四点口径：
+     * 1. 只保留与本次 span 有重叠的段；
+     * 2. 被 span 切开的段要把 sourceInSec 同步平移（否则会从头开始放，与预览对不上），
+     *    平移量乘上倍速（v9：时间轴 1s 吃掉 speed 秒源）；
+     * 3. 带 sourceOutSec / audio / speed（只在动过时）；
+     * 4. PNG 序列出口不写音频（帧序列没有容器可承载），其余两种出口都带。
+     */
+    const spanStart = frameTimeSec(spec.startFrame, fps)
+    const spanEnd = frameTimeSec(spec.endFrame, fps)
+    const audioMix =
+      kind === 'pngSequence'
+        ? []
+        : (project.audioClips ?? [])
+            .map((clip) => {
+              const item = project.media.find((m) => m.id === clip.mediaId)
+              if (!item) return null
+              const start = Math.max(clip.timelineStartSec, spanStart)
+              const end = Math.min(clip.timelineEndSec, spanEnd)
+              if (end - start <= 1e-3) return null
+              const speed = speedValueOf(clip.speed)
+              const sourceIn = clip.sourceInSec + (start - clip.timelineStartSec) * speed
+              return {
+                path: item.path,
+                timelineStartSec: start,
+                timelineEndSec: end,
+                sourceInSec: sourceIn,
+                sourceOutSec: sourceIn + (end - start) * speed,
+                ...(clip.audio ? { audio: clip.audio } : {}),
+                ...(clip.speed ? { speed: clip.speed } : {})
+              }
+            })
+            .filter((clip): clip is NonNullable<typeof clip> => clip !== null)
+
+
     const request: ExportRequest = {
       jobId,
       target: { kind, outputDir: input.outputDir, fileName: input.fileName },
       frameSpec,
       frameDelivery,
       codec: input.codec ?? 'prores4444',
+      ...(audioMix.length > 0 ? { audioClips: audioMix } : {}),
       ...(isOverlay && base && primaryMeta
         ? {
             overlay: {
@@ -335,3 +391,4 @@ export function useExportJob() {
 
   return { start: startWith, retryLast, cancel }
 }
+

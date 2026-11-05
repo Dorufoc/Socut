@@ -3,10 +3,14 @@ import {
   buildOverlayMp4,
   buildOverlayMp4DirectPipe,
   buildOverlayMp4MultiInput,
-  buildOverlayMp4MultiInputDirectPipe
+  buildOverlayMp4MultiInputDirectPipe,
+  buildStabDetectArgs,
+  segmentsNeedMultiInput,
+  stabSegmentKey
 } from '../../shared/ffmpegArgs'
-import type { ConcatSegment, WatermarkInput } from '../../shared/ffmpegArgs'
-import type { OverlaySegment, TransparentCodec, VideoMeta } from '../../shared/types'
+import type { ConcatSegment, AudioMixClip, WatermarkInput } from '../../shared/ffmpegArgs'
+import { TEXT } from '../../shared/i18n'
+import type { MediaClipStab, OverlaySegment, TransparentCodec, VideoMeta } from '../../shared/types'
 import { spawnJob, terminateJob } from '../procRegistry'
 import type { FfmpegBinaries } from '../paths'
 import { ProgressParser } from '../progressParser'
@@ -46,6 +50,10 @@ export interface OverlayRunCtx {
   directPipe: boolean
   /** 水印（可选）：同一张图作为最后一层 overlay，四条合成路径共用 */
   watermark?: WatermarkInput
+  /** v7：音频轨；非空时即使单段也走多输入路径（单输入 builder 没有混音入口） */
+  audioClips?: AudioMixClip[]
+  /** v8：任务临时目录；防抖段的 .trf 落在这里，detect 与合成 ffmpeg 进程以它为 cwd */
+  workspaceDir: string
   isCancelled: () => boolean
   onTick: () => void
 }
@@ -56,34 +64,100 @@ interface CompositeRun {
   argv: string[]
 }
 
-/**
- * v2：是否走多输入 trim+concat 基座（阶段 7）。
- * 单段且时间轴/源都从头覆盖时回退旧单输入（argv 快照与旧行为零差异）；
- * 否则逐段 trim 后 concat，段间空隙由滤镜链补黑+静音。
- */
-function needsMultiInput(segments: OverlaySegment[] | undefined): boolean {
-  if (!segments || segments.length === 0) return false
-  if (segments.length > 1) return true
-  const only = segments[0]
-  if (!only) return false
-  // 单段但被剪裁/不在 0 起点：时长恒等式下 timelineEndSec - timelineStartSec === sourceOutSec - sourceInSec，
-  // 任何一个坐标偏离「整段从头覆盖」都必须走 trim 路径
-  return (
-    only.sourceInSec > 1e-6 ||
-    only.timelineStartSec > 1e-6 ||
-    only.timelineEndSec - only.timelineStartSec !== only.sourceOutSec - only.sourceInSec ||
-    only.timelineEndSec < only.sourceOutSec - 1e-6
-  )
-}
-
 /** 拼接路径的音频一律重编码（concat 后不能 -c:a copy）；只有旧单输入保持 copy 语义。 */
 function effectiveAudioMode(requested: 'copy' | 'aac', multi: boolean): 'copy' | 'aac' {
   return multi ? 'aac' : requested
 }
 
+/** v8：去重后的一道防抖分析工作项（同源 + 同帧序列 + 同档位只跑一次 pass 1）。 */
+interface StabWorkItem {
+  key: string
+  /** 相对任务工作目录的 .trf 文件名 */
+  file: string
+  inputPath: string
+  sourceInSec: number
+  sourceOutSec: number
+  stab: MediaClipStab
+}
+
+/** v8：从本次导出的段列表里收集需分析的防抖工作项（无防抖段返回空数组，不改变任何行为）。 */
+function planStabWork(ctx: OverlayRunCtx): StabWorkItem[] {
+  const items: StabWorkItem[] = []
+  const seen = new Set<string>()
+  for (const seg of ctx.segments ?? []) {
+    if (seg.stab?.enabled !== true) continue
+    const key = stabSegmentKey(seg, ctx.transparentCtx.fps)
+    if (seen.has(key)) continue
+    seen.add(key)
+    items.push({
+      key,
+      file: `stab_${items.length}.trf`,
+      inputPath: seg.refVideoPath,
+      sourceInSec: seg.sourceInSec,
+      sourceOutSec: seg.sourceOutSec,
+      stab: seg.stab
+    })
+  }
+  return items
+}
+
+/**
+ * v8：防抖 pass 1（运动检测）：逐工作项顺序起 ffmpeg（只解码不编码，`-f null`）。
+ * 子进程用 `${jobId}-stabN` 子 id 注册：engine.cancel 只杀主 id，
+ * 这里必须靠 cancel-watch 兑住子进程，防止取消后检测进程泄漏。
+ */
+async function runStabDetects(ctx: OverlayRunCtx, items: StabWorkItem[]): Promise<'done' | 'cancelled'> {
+  for (const [index, item] of items.entries()) {
+    if (ctx.isCancelled()) return 'cancelled'
+    const jobId = `${ctx.state.id}-stab${index}`
+    const parser = new ProgressParser()
+    const job = spawnJob({
+      jobId,
+      label: `防抖预分析 ${index + 1}/${items.length}`,
+      binary: ctx.binaries.ffmpeg,
+      args: buildStabDetectArgs({
+        inputPath: item.inputPath,
+        sourceInSec: item.sourceInSec,
+        sourceOutSec: item.sourceOutSec,
+        fps: ctx.transparentCtx.fps,
+        stab: item.stab,
+        resultFile: item.file
+      }),
+      // .trf 用相对文件名：避开滤镜串里盘符冒号的转义陷阱
+      cwd: ctx.workspaceDir,
+      onStdoutChunk: (chunk) => {
+        const snapshot = parser.feed(chunk)
+        if (snapshot) {
+          ctx.state.outTimeUs = snapshot.outTimeUs
+          ctx.onTick()
+        }
+      }
+    })
+    const watch = setInterval(() => {
+      if (ctx.isCancelled()) void terminateJob(jobId)
+    }, 200)
+    try {
+      const code = await waitForClose(job)
+      if (ctx.isCancelled()) {
+        await terminateJob(jobId)
+        return 'cancelled'
+      }
+      if (code !== 0) {
+        throw new FFmpegExitError(code, job.stderr.tail(4096), job.argv)
+      }
+    } finally {
+      clearInterval(watch)
+    }
+    ctx.state.notices.push(TEXT.stab.analyzeNotice(index + 1, items.length))
+    ctx.onTick()
+  }
+  return 'done'
+}
+
 /** 本次 composite 用的参数组（单/多输入 × 两阶段/直管道 共 4 条路径）。 */
-function buildCompositeArgs(ctx: OverlayRunCtx, audioMode: 'copy' | 'aac'): string[] {
-  const multi = needsMultiInput(ctx.segments)
+function buildCompositeArgs(ctx: OverlayRunCtx, audioMode: 'copy' | 'aac', stabFiles: Map<string, string>): string[] {
+  // 有音频段就必须走多输入（单输入 builder 不带混音链），基线段仍按同一套 trim+concat
+  const multi = segmentsNeedMultiInput(ctx.segments) || ((ctx.audioClips?.length ?? 0) > 0 && (ctx.segments?.length ?? 0) > 0)
   if (!multi) {
     return ctx.directPipe
       ? buildOverlayMp4DirectPipe({
@@ -112,12 +186,19 @@ function buildCompositeArgs(ctx: OverlayRunCtx, audioMode: 'copy' | 'aac'): stri
           watermark: ctx.watermark
         })
   }
-  const segments: ConcatSegment[] = (ctx.segments ?? []).map((seg) => ({
-    ...seg,
-    // 拼接路径里逐段音频是否存在的判定在渲染侧已完成（无音轨段不能进 copy）；
-    // 这里按元数据保守假设全部有音轨：trim 后重编码，无音轨的素材由渲染侧避开 copy 分支。
-    hasAudio: true
-  }))
+  const segments: ConcatSegment[] = (ctx.segments ?? []).map((seg) => {
+    const base = {
+      ...seg,
+      // 拼接路径里逐段音频是否存在的判定在渲染侧已完成（无音轨段不能进 copy）；
+      // 这里按元数据保守假设全部有音轨：trim 后重编码，无音轨的素材由渲染侧避开 copy 分支。
+      // v7：图像段必然没有音轨，必须补静音（否则 `[i:a]` 不存在会直接报错）。
+      hasAudio: !seg.isImage
+    }
+    // v8：启用的段按去重键拿到已分析的 .trf（同一键共享同一份）；未分配则不写 stabFile，段链退回不防抖
+    if (seg.stab?.enabled !== true) return base
+    const stabFile = stabFiles.get(stabSegmentKey(seg, ctx.transparentCtx.fps))
+    return stabFile ? { ...base, stabFile } : base
+  })
   const basis = {
     segments,
     spanStartSec: ctx.spanStartSec,
@@ -128,7 +209,8 @@ function buildCompositeArgs(ctx: OverlayRunCtx, audioMode: 'copy' | 'aac'): stri
     frameSize: ctx.frameSize,
     audioMode,
     fpsMode: ctx.fpsMode,
-    watermark: ctx.watermark
+    watermark: ctx.watermark,
+    audioClips: ctx.audioClips
   }
   return ctx.directPipe
     ? buildOverlayMp4MultiInputDirectPipe({ ...basis, frameFormat: ctx.frameFormat })
@@ -138,10 +220,11 @@ function buildCompositeArgs(ctx: OverlayRunCtx, audioMode: 'copy' | 'aac'): stri
 /** 阶段二：合成。返回退出码与 stderr 尾部，由上层决定音频回退重试。 */
 async function composite(
   ctx: OverlayRunCtx,
-  audioMode: 'copy' | 'aac'
+  audioMode: 'copy' | 'aac',
+  stabFiles: Map<string, string>
 ): Promise<CompositeRun> {
   const parser = new ProgressParser()
-  const args = buildCompositeArgs(ctx, audioMode)
+  const args = buildCompositeArgs(ctx, audioMode, stabFiles)
 
   const job = spawnJob({
     jobId: ctx.state.id,
@@ -149,6 +232,9 @@ async function composite(
     binary: ctx.binaries.ffmpeg,
     args,
     stdin: ctx.directPipe,
+    // v8：有防抖段时以任务工作目录为 cwd，滤镜里的相对 .trf 才能被解析；
+    // 无防抖任务不传 cwd，命令行为与现状逐字节一致
+    cwd: stabFiles.size > 0 ? ctx.workspaceDir : undefined,
     onStdoutChunk: (chunk) => {
       const snapshot = parser.feed(chunk)
       if (snapshot) {
@@ -212,6 +298,18 @@ async function composite(
 }
 
 export async function runOverlayMp4(ctx: OverlayRunCtx): Promise<'done' | 'cancelled'> {
+  /**
+   * v8：防抖 pass 1 先于一切渲染：无防抖段时 plan 为空，不启动任何额外进程、
+   * 不改变后续任何 argv（零差异纪律）。失败直接抛出，由 engine 统一归因与清理。
+   */
+  const stabItems = planStabWork(ctx)
+  const stabFiles = new Map(stabItems.map((item) => [item.key, item.file]))
+  if (stabItems.length > 0) {
+    ctx.state.notices.push(TEXT.stab.exportNote)
+    ctx.onTick()
+    if ((await runStabDetects(ctx, stabItems)) === 'cancelled') return 'cancelled'
+  }
+
   if (!ctx.directPipe) {
     // 阶段一：按参考视频参数重新渲染透明 MOV（规格 §11 纪律 2）
     const transparent = await runTransparentMov(ctx.transparentCtx, ctx.channel)
@@ -226,7 +324,7 @@ export async function runOverlayMp4(ctx: OverlayRunCtx): Promise<'done' | 'cance
    * 没有这条提示，用户只会发现导出音频码率变了，却不知道是自己那条音轨不被容器接受。
    * 无音轨（audioCodec === null）不算转码，不提示；v2 拼接路径重编码同理。
    */
-  const multi = needsMultiInput(ctx.segments)
+  const multi = segmentsNeedMultiInput(ctx.segments)
   const audio = effectiveAudioMode(ctx.audioMode, multi)
   if (audio !== ctx.audioMode) {
     ctx.state.notices.push('媒体轨含多段/剪裁：音频随基座一并重编码为 AAC 192k。')
@@ -241,13 +339,13 @@ export async function runOverlayMp4(ctx: OverlayRunCtx): Promise<'done' | 'cance
   ctx.state.timeTotalSec = Math.max(0, ctx.spanEndSec - ctx.spanStartSec)
   ctx.onTick()
 
-  let run = await composite(ctx, audio)
+  let run = await composite(ctx, audio, stabFiles)
 
   // 计划 C4：copy 运行期失败（无音轨 / 不兼容编码）→ 单次 AAC 重试
   if (audio === 'copy' && run.code !== null && run.code !== 0) {
     ctx.state.notices.push('音频直接复制失败，已改用 AAC 192k 重新合成。')
     await fs.rm(ctx.outputPath, { force: true }).catch(() => undefined)
-    run = await composite(ctx, 'aac')
+    run = await composite(ctx, 'aac', stabFiles)
   }
 
   if (ctx.isCancelled()) {

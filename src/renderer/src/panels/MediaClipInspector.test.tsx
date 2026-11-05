@@ -1,14 +1,16 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { FPS_30 } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import { defaultMediaVideo } from '@shared/mediaClipVideo'
-import type { MediaClip, MediaClipVideo, MediaItem, Project, VideoMeta } from '@shared/types'
+import type { JobResult, MediaClip, MediaClipVideo, MediaItem, Project, StabPreviewRequest, StabPreviewResult, VideoMeta } from '@shared/types'
 import { ClipInspector } from './ClipInspector'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
+import { useExportStore } from '../state/exportStore'
+import { useStabPreviewStore } from '../state/stabPreviewStore'
 
 /**
  * 视频片段编辑器（v6）：右栏按「最后点中的是哪类」分流。
@@ -99,6 +101,9 @@ afterEach(() => {
       fonts: []
     })
     useUiStore.setState({ uiMode: 'basic', notice: null, seekHandler: null, stageInteract: true })
+    // v8.1：代理账本与任务队列不留到下一个用例
+    useStabPreviewStore.setState({ applied: {}, errors: {} })
+    useExportStore.setState({ jobs: {}, order: [], busy: false, lastResult: null, lastInput: null })
   })
 })
 
@@ -290,5 +295,312 @@ describe('一键恢复默认', () => {
     fireEvent.click(reset)
     expect(videoOf(mediaClipId)).toBeUndefined()
     expect((reset as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+describe('防抖稳定（v8）', () => {
+  /** 取当前防抖参数；关闭后应为 undefined（整键删除） */
+  const stabOf = (id: string) => useProjectStore.getState().project.mediaClips.find((clip) => clip.id === id)!.stab
+
+  it('开关写回 stab；再点一下回到全默认 → 整键消失', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    const toggle = screen.getByRole('button', { name: TEXT.stab.off })
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(toggle)
+    expect(stabOf(mediaClipId)).toEqual({ enabled: true, level: 'standard', tripod: false })
+
+    // 开启后按钮文案切到「防抖」；再点关闭，全默认整键删除
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.on }))
+    expect(stabOf(mediaClipId)).toBeUndefined()
+  })
+
+  it('档位按钮只写 level；默认高亮标准档', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    // 关闭时不渲染档位区
+    expect(screen.queryByText(TEXT.stab.levelLabel)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.off }))
+    const low = screen.getByRole('button', { name: TEXT.stab.levelLow })
+    const standard = screen.getByRole('button', { name: TEXT.stab.levelStandard })
+    expect(standard.getAttribute('aria-pressed')).toBe('true')
+    expect(low.getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(low)
+    expect(stabOf(mediaClipId)).toEqual({ enabled: true, level: 'low', tripod: false })
+  })
+
+  it('虚拟三脚架开关独立写 tripod', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.off }))
+    const tripod = screen.getByRole('button', { name: TEXT.stab.tripod })
+    fireEvent.click(tripod)
+    expect(stabOf(mediaClipId)).toEqual({ enabled: true, level: 'standard', tripod: true })
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.tripod }))
+    expect(stabOf(mediaClipId)).toEqual({ enabled: true, level: 'standard', tripod: false })
+  })
+
+  it('防抖开启也算「已编辑」：徽章出现且恢复默认连 stab 一起清', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    const reset = screen.getByRole('button', { name: TEXT.videoEditor.reset })
+    expect((reset as HTMLButtonElement).disabled).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.off }))
+    expect(screen.getByText(TEXT.videoEditor.edited)).toBeTruthy()
+    expect((reset as HTMLButtonElement).disabled).toBe(false)
+
+    fireEvent.click(reset)
+    expect(stabOf(mediaClipId)).toBeUndefined()
+  })
+})
+
+/**
+ * v9：视频片段编辑器里的「音频」与「变速」两个分区。
+ *
+ * 锁四件事：滑杆确实写回本段、数值以标签形式直接可读、回到默认值整键不落盘、
+ * 以及**变速会同时伸缩时间轴出点**（面板不能只改参数不改长度）。
+ */
+describe('音频与变速分区（v9）', () => {
+  const clipOf = (id: string) => useProjectStore.getState().project.mediaClips.find((c) => c.id === id)!
+
+  it('两个分区都在，默认值读作 100% / 0s / 0s / 1x', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    expect(screen.getByText(TEXT.clipAudio.title)).toBeTruthy()
+    expect(screen.getByText(TEXT.clipSpeed.title)).toBeTruthy()
+    // 数值就写在控件右边的标签里，不靠 tooltip（需求里的「音量: 120%」同一口径）
+    const readout = (label: string) => screen.getByLabelText(label).nextElementSibling?.textContent
+    expect(readout(TEXT.clipAudio.volume)).toBe('100%')
+    expect(readout(TEXT.clipAudio.fadeIn)).toBe('0s')
+    expect(readout(TEXT.clipAudio.fadeOut)).toBe('0s')
+    expect(readout(TEXT.clipSpeed.rate)).toBe('1x')
+  })
+
+  it('音量滑杆写回百分比，读数即时跟随，回到 100% 整键删除', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    fireEvent.change(screen.getByLabelText(TEXT.clipAudio.volume), { target: { value: '120' } })
+    expect(clipOf(mediaClipId).audio).toEqual({ volumePercent: 120, fadeInSec: 0, fadeOutSec: 0 })
+    expect(screen.getByLabelText(TEXT.clipAudio.volume).nextElementSibling?.textContent).toBe('120%')
+
+    fireEvent.change(screen.getByLabelText(TEXT.clipAudio.volume), { target: { value: '100' } })
+    expect('audio' in clipOf(mediaClipId)).toBe(false)
+  })
+
+  it('渐变滑杆的上限按本段长度收（8s 段最多 4s，导出侧也夹到半段）', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    expect(screen.getByLabelText(TEXT.clipAudio.fadeIn).getAttribute('max')).toBe('4')
+    expect(screen.getByLabelText(TEXT.clipAudio.fadeOut).getAttribute('max')).toBe('4')
+
+    fireEvent.change(screen.getByLabelText(TEXT.clipAudio.fadeIn), { target: { value: '1.5' } })
+    expect(clipOf(mediaClipId).audio).toEqual({ volumePercent: 100, fadeInSec: 1.5, fadeOutSec: 0 })
+  })
+
+  it('倍速滑杆：写回 speed 同时伸缩时间轴出点（源窗口不变）', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    fireEvent.change(screen.getByLabelText(TEXT.clipSpeed.rate), { target: { value: '2' } })
+    const clip = clipOf(mediaClipId)
+    expect(clip.speed).toEqual({ speed: 2, maintainPitch: true })
+    expect(clip.sourceOutSec).toBe(8)
+    expect(clip.timelineEndSec).toBeCloseTo(4, 6)
+
+    // 回到 1x：长度还原，整键消失
+    fireEvent.change(screen.getByLabelText(TEXT.clipSpeed.rate), { target: { value: '1' } })
+    expect('speed' in clipOf(mediaClipId)).toBe(false)
+    expect(clipOf(mediaClipId).timelineEndSec).toBeCloseTo(8, 6)
+  })
+
+  it('保持音高开关：只改音高开关不会改时长', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    const toggle = screen.getByRole('button', { name: TEXT.clipSpeed.on })
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+
+    fireEvent.click(toggle)
+    expect(clipOf(mediaClipId).speed).toEqual({ speed: 1, maintainPitch: false })
+    expect(clipOf(mediaClipId).timelineEndSec).toBeCloseTo(8, 6)
+    expect(screen.getByRole('button', { name: TEXT.clipSpeed.off }).getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('音频参数也算「已编辑」，恢复默认连 audio 与 speed 一起清', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    const reset = screen.getByRole('button', { name: TEXT.videoEditor.reset })
+    fireEvent.change(screen.getByLabelText(TEXT.clipAudio.volume), { target: { value: '60' } })
+    expect(screen.getByText(TEXT.videoEditor.edited)).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText(TEXT.clipSpeed.rate), { target: { value: '2' } })
+    fireEvent.click(reset)
+
+    const cleared = clipOf(mediaClipId)
+    expect('audio' in cleared).toBe(false)
+    expect('speed' in cleared).toBe(false)
+    expect(cleared.timelineEndSec).toBeCloseTo(8, 6)
+  })
+
+  it('开着主轨对齐时改倍速会重新摆紧时间轴（不会留新间隙）', () => {
+    const { mediaClipId } = seed()
+    act(() => useUiStore.setState({ timelineTools: { ...useUiStore.getState().timelineTools, snapTogether: true } }))
+    const second = useProjectStore.getState().insertMediaClip({
+      mediaId: 'media-1',
+      timelineStartSec: 8
+    })!
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    fireEvent.change(screen.getByLabelText(TEXT.clipSpeed.rate), { target: { value: '2' } })
+    const moved = useProjectStore.getState().project.mediaClips.find((c) => c.id === second.id)!
+    expect(moved.timelineStartSec).toBeCloseTo(4, 6)
+
+    act(() => useUiStore.setState({ timelineTools: { ...useUiStore.getState().timelineTools, snapTogether: false } }))
+  })
+})
+
+/**
+ * v8.1：防抖预览代理按钮的状态机。
+ * 锁四件事：未开启不渲染；queued 期间按钮禁用 + 可取消；
+ * 记账后切「已就绪」、改档变「重新应用」；关防抖连磁盘缓存一起回收。
+ */
+describe('防抖预览代理按钮（v8.1）', () => {
+  function stubPreviewApi(result: StabPreviewResult) {
+    const impl = async (_request: StabPreviewRequest): Promise<StabPreviewResult> => result
+    const stabPreview = vi.fn(impl)
+    const removeImpl = async (_clipId: string): Promise<void> => undefined
+    const stabPreviewRemove = vi.fn(removeImpl)
+    const cancel = vi.fn(async () => undefined)
+    ;(window as unknown as { focusnews: unknown }).focusnews = {
+      video: { stabPreview, stabPreviewRemove },
+      export: { cancel }
+    }
+    return { stabPreview, stabPreviewRemove, cancel }
+  }
+
+  const doneResult = (): JobResult => ({
+    jobId: 'stab-mclip-1',
+    ok: true,
+    outputs: ['C:/userData/stab-preview/stab-mclip-1-abcd.mp4'],
+    progress: {
+      jobId: 'stab-mclip-1',
+      phase: 'done',
+      framesDone: 2,
+      framesTotal: 2,
+      outTimeUs: 8e6,
+      percent: 1,
+      bytesWritten: 0,
+      elapsedMs: 10,
+      notices: []
+    }
+  })
+
+  it('未开启防抖时不渲染应用按钮', () => {
+    stubPreviewApi({ status: 'queued', jobId: 'stab-mclip-1', path: null, signature: 'sig' })
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+    expect(screen.queryByText(TEXT.stab.previewApply)).toBeNull()
+  })
+
+  it('点应用→queued 不记账；jobResult 成功后按钮变「已就绪」', async () => {
+    const api = stubPreviewApi({ status: 'queued', jobId: 'stab-mclip-1', path: null, signature: 'sig' })
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.off }))
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.previewApply }))
+    await waitFor(() => expect(api.stabPreview).toHaveBeenCalledTimes(1))
+    expect(api.stabPreview.mock.calls[0]![0]).toMatchObject({ clipId: mediaClipId, sourceInSec: 0, sourceOutSec: 8 })
+    expect(useStabPreviewStore.getState().applied[mediaClipId]).toBeUndefined()
+
+    act(() => useStabPreviewStore.getState().handleJobResult(doneResult()))
+    expect(screen.getByText(TEXT.stab.previewApplied)).toBeTruthy()
+  })
+
+  it('作业进行中：按钮禁用且有取消入口（走 export.cancel 同一 jobId）', async () => {
+    const api = stubPreviewApi({ status: 'queued', jobId: 'stab-mclip-1', path: null, signature: 'sig' })
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.off }))
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.previewApply }))
+    await waitFor(() => expect(api.stabPreview).toHaveBeenCalled())
+    act(() =>
+      useExportStore.getState().upsertProgress({
+        jobId: 'stab-mclip-1',
+        phase: 'rendering',
+        framesDone: 1.5,
+        framesTotal: 2,
+        outTimeUs: 6e6,
+        percent: 0.75,
+        bytesWritten: 0,
+        elapsedMs: 100,
+        notices: []
+      })
+    )
+    expect((screen.getByRole('button', { name: TEXT.stab.previewApply }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '✕' }))
+    expect(api.cancel).toHaveBeenCalledWith('stab-mclip-1')
+  })
+
+  it('就绪后改档位 → 「重新应用防抖预览」（签名失配自动回落原片）', async () => {
+    stubPreviewApi({ status: 'queued', jobId: 'stab-mclip-1', path: null, signature: 'sig' })
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.off }))
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.previewApply }))
+    await waitFor(() => expect(useStabPreviewStore.getState().applied[mediaClipId]).toBeUndefined())
+    act(() => useStabPreviewStore.getState().handleJobResult(doneResult()))
+    expect(screen.getByText(TEXT.stab.previewApplied)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.levelHigh }))
+    expect(screen.getByRole('button', { name: TEXT.stab.previewReapply })).toBeTruthy()
+    expect(screen.getByText(TEXT.stab.previewStale)).toBeTruthy()
+    expect(useStabPreviewStore.getState().applied[mediaClipId]).toBeDefined()
+  })
+
+  it('关闭防抖：账本清空且回收磁盘缓存（stabPreviewRemove）', async () => {
+    const api = stubPreviewApi({ status: 'queued', jobId: 'stab-mclip-1', path: null, signature: 'sig' })
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.off }))
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.previewApply }))
+    await waitFor(() => expect(api.stabPreview).toHaveBeenCalled())
+    act(() => useStabPreviewStore.getState().handleJobResult(doneResult()))
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.stab.on }))
+    expect(useStabPreviewStore.getState().applied[mediaClipId]).toBeUndefined()
+    await waitFor(() => expect(api.stabPreviewRemove).toHaveBeenCalledWith(mediaClipId))
   })
 })

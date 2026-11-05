@@ -9,6 +9,8 @@ import { timelineDurationSec, useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 import { ClipCard } from './ClipCard'
 import { MediaClipCard } from './MediaClipCard'
+import { AudioClipCard } from './AudioClipCard'
+import { mediaKindOf, normalizeLayer } from '@shared/audioClips'
 import { MEDIA_DRAG_MIME } from '../panels/MediaLibraryPanel'
 import { buildTicks, pickStep, pxToSec, secToPx } from './ruler'
 
@@ -22,6 +24,9 @@ import { buildTicks, pickStep, pxToSec, secToPx } from './ruler'
  */
 
 type ScrubElement = HTMLDivElement
+
+/** 稳定的空音频轨引用（避免每次选择器返回新数组） */
+const EMPTY_AUDIO_CLIPS: never[] = []
 
 export interface TimelineProps {
   seekTo: (sec: number) => void
@@ -41,6 +46,15 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const removeMediaClip = useProjectStore((state) => state.removeMediaClip)
   const splitAtFrame = useProjectStore((state) => state.splitAtFrame)
   const insertMediaClip = useProjectStore((state) => state.insertMediaClip)
+  const audioClips = useProjectStore((state) => state.project.audioClips) ?? EMPTY_AUDIO_CLIPS
+  const selectedAudioClipId = useProjectStore((state) => state.selectedAudioClipId)
+  const selectAudioClip = useProjectStore((state) => state.selectAudioClip)
+  const setMediaClipLayer = useProjectStore((state) => state.setMediaClipLayer)
+  const setAudioClipLayer = useProjectStore((state) => state.setAudioClipLayer)
+  const insertAudioClip = useProjectStore((state) => state.insertAudioClip)
+  const moveAudioClip = useProjectStore((state) => state.moveAudioClip)
+  const trimAudioClip = useProjectStore((state) => state.trimAudioClip)
+  const removeAudioClip = useProjectStore((state) => state.removeAudioClip)
   const compactTimeline = useProjectStore((state) => state.compactTimeline)
   const displayTime = useUiStore((state) => state.displayTimeSec)
   const playing = useUiStore((state) => state.playing)
@@ -119,8 +133,10 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
 
   /** 媒体轨拖放落点：与刮擦同一套矩形换算，落点吸附到帧边界后高亮显示。 */
   const dropSecFrom = (clientX: number, rect: DOMRect): number => {
-    const sec = pxToSec(clientX - rect.left, durationSec, rect.width)
-    return snapTimeToFrame(Math.min(durationSec, Math.max(0, sec)), project.fps)
+    const raw = pxToSec(clientX - rect.left, durationSec, rect.width)
+    // 指针坐标缺失/非法时落回 0：不能让 NaN 流进 snapTimeToFrame（那里会抛 RangeError）
+    const safe = Number.isFinite(raw) ? raw : 0
+    return snapTimeToFrame(Math.min(durationSec, Math.max(0, safe)), project.fps)
   }
 
   const onMediaDragOver = (event: ReactDragEvent<HTMLDivElement>): void => {
@@ -141,6 +157,10 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
       setNotice('素材已移出池，无法放入')
       return
     }
+    if (mediaKindOf(item) === 'audio') {
+      setNotice('音频素材请拖到音频轨')
+      return
+    }
     const rect = event.currentTarget.getBoundingClientRect()
     const atSec = dropSecFrom(event.clientX, rect)
     // 整段放入：从源 0s 起覆盖全长；超出轨道末端的部分由 MAX_TIMELINE_SEC 与落点规则自然截断
@@ -148,8 +168,52 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     if (!clip) setNotice(`落点剩余空间不足最短时长（${item.name}）`)
   }
 
+  const onAudioDragOver = (event: ReactDragEvent<HTMLDivElement>): void => {
+    if (!event.dataTransfer.types.includes(MEDIA_DRAG_MIME)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+    const rect = event.currentTarget.getBoundingClientRect()
+    setDropSec(dropSecFrom(event.clientX, rect))
+  }
+
+  const onAudioDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    setDropSec(null)
+    const mediaId = event.dataTransfer.getData(MEDIA_DRAG_MIME) || event.dataTransfer.getData('text/plain')
+    if (!mediaId) return
+    const item = project.media.find((m) => m.id === mediaId)
+    if (!item) {
+      setNotice('素材已移出池，无法放入')
+      return
+    }
+    if (mediaKindOf(item) !== 'audio') {
+      setNotice('视频素材请拖到媒体轨')
+      return
+    }
+    const rect = event.currentTarget.getBoundingClientRect()
+    const atSec = dropSecFrom(event.clientX, rect)
+    const clip = insertAudioClip({ mediaId, timelineStartSec: atSec, durationSec: item.meta.durationSec })
+    if (!clip) setNotice('该音频段太短，无法放入')
+  }
+
   const activeMediaTarget = project.mediaClips.find((c) => c.id === selectedMediaClipId) ?? null
-  // 纯谓词算按钮态：不在渲染期调 store 动作（splitAtFrame 有 set 副作用）
+  /** v7：媒体轨的叠放层数（按现有最大层号取，单层时不切分高度） */
+  const mediaLayers = Math.max(1, ...project.mediaClips.map((clip) => (clip.layer ?? 0) + 1))
+  const activeAudioTarget = audioClips.find((c) => c.id === selectedAudioClipId) ?? null
+  /** 音频轨的叠放层数：按现有最大层号取，空轨就是 1 层 */
+  const audioLayers = Math.max(1, ...audioClips.map((clip) => normalizeLayer(clip.layer) + 1))
+  /** v7 叠层：被选中的片段（媒体优先，否则音频）与它的当前层号 */
+  const layerTarget = activeMediaTarget ?? activeAudioTarget
+  const layerNow = layerTarget ? (layerTarget.layer ?? 0) : 0
+  const MAX_LAYER_UI = 4
+  /** 上/下移一层：只改层号，时间不变；0 层不落盘 */
+  const shiftLayer = (delta: number): void => {
+    if (!layerTarget) return
+    const next = layerNow + delta
+    if (activeMediaTarget) setMediaClipLayer(activeMediaTarget.id, next)
+    else if (activeAudioTarget) setAudioClipLayer(activeAudioTarget.id, next)
+  }
+  
   const canSplit = canSplitMediaClipAt(project.mediaClips, displayTime, project.fps)
 
   // ---------------------------------------------------------------- 时间轴工具
@@ -315,6 +379,34 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
           >
             {TEXT.timeline.removeMediaClip}
           </button>
+          <button
+            type="button"
+            className="btn btn--sm btn--danger"
+            disabled={!activeAudioTarget}
+            onClick={() => {
+              if (activeAudioTarget) removeAudioClip(activeAudioTarget.id)
+            }}
+          >
+            {TEXT.timeline.removeAudioClip}
+          </button>
+          <button
+            type="button"
+            className="btn btn--sm"
+            disabled={!layerTarget || layerNow >= MAX_LAYER_UI}
+            title={TEXT.timeline.layerUpHint}
+            onClick={() => shiftLayer(1)}
+          >
+            {TEXT.timeline.layerUp}
+          </button>
+          <button
+            type="button"
+            className="btn btn--sm"
+            disabled={!layerTarget || layerNow <= 0}
+            title={TEXT.timeline.layerDownHint}
+            onClick={() => shiftLayer(-1)}
+          >
+            {TEXT.timeline.layerDown}
+          </button>
           <span className="timeline__divider" aria-hidden="true" />
           <button
             type="button"
@@ -415,6 +507,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             onTrim={(patch) => handleMediaTrim(clip.id, patch)}
             onCommit={commitMediaDrag}
             onSeek={seekTo}
+            layers={mediaLayers}
           />
         ))}
         {dropSec !== null ? (
@@ -425,6 +518,52 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
           />
         ) : null}
         {guides}
+      </div>
+
+      {/* 中行：音频轨（v7.1）—— 只贡献声音，不参与画面合成 */}
+      <div
+        className={`timeline__track timeline__track--audio${dropSec !== null ? ' timeline__track--dropping' : ''}`}
+        onDragOver={onAudioDragOver}
+        onDragLeave={() => setDropSec(null)}
+        onDrop={onAudioDrop}
+        onPointerDown={beginScrub}
+        onPointerMove={moveScrub}
+        onPointerUp={endScrub}
+        onPointerCancel={endScrub}
+      >
+        <span className="timeline__lane-label" aria-hidden="true">
+          {TEXT.timeline.audioLane}
+        </span>
+        {audioClips.length === 0 ? <span className="timeline__empty">{TEXT.timeline.emptyAudio}</span> : null}
+        {audioClips.map((clip) => (
+          <AudioClipCard
+            key={clip.id}
+            clip={clip}
+            item={project.media.find((m) => m.id === clip.mediaId) ?? null}
+            durationSec={durationSec}
+            widthPx={widthPx}
+            fps={project.fps}
+            selected={clip.id === selectedAudioClipId}
+            layers={audioLayers}
+            onSelect={(id) => {
+              selectAudioClip(id)
+              const target = audioClips.find((item) => item.id === id)
+              if (target && (displayTime < target.timelineStartSec || displayTime >= target.timelineEndSec)) {
+                seekTo(target.timelineStartSec)
+              }
+            }}
+            onMove={(start) => moveAudioClip(clip.id, start)}
+            onTrim={(patch) => trimAudioClip(clip.id, patch)}
+            onSeek={seekTo}
+          />
+        ))}
+        {dropSec !== null ? (
+          <div
+            className="timeline__drop-indicator"
+            style={{ left: secToPx(dropSec, durationSec, widthPx) }}
+            title={dropSec.toFixed(3) + 's'}
+          />
+        ) : null}
       </div>
 
       {/* 下行：字幕条轨 */}

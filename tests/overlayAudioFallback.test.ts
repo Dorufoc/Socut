@@ -15,6 +15,8 @@ import type { SpawnedJob } from '../src/main/procRegistry'
 interface SpawnCall {
   args: string[]
   label: string
+  jobId: string
+  cwd?: string
 }
 
 const spawnCalls: SpawnCall[] = []
@@ -31,8 +33,8 @@ class FakeExitError extends Error {
 }
 
 vi.mock('../src/main/procRegistry', () => ({
-  spawnJob: (request: { jobId: string; label: string; binary: string; args: string[] }): SpawnedJob => {
-    spawnCalls.push({ args: request.args, label: request.label })
+  spawnJob: (request: { jobId: string; label: string; binary: string; args: string[]; cwd?: string }): SpawnedJob => {
+    spawnCalls.push({ args: request.args, label: request.label, jobId: request.jobId, cwd: request.cwd })
     const code = queue.length > 0 ? queue.shift() : 0
     const child = new EventEmitter() as EventEmitter & { kill: (signal: string) => boolean }
     child.kill = () => true
@@ -143,6 +145,8 @@ function makeCtx(state: JobState) {
     outputPath: 'D:/out.mp4',
     overlayPath: 'D:/tmp/overlay.mov',
     codec: 'prores4444' as const,
+    // v8：防抖段以工作目录为 cwd；本例不启用防抖，但仍然要满足类型形状
+    workspaceDir: 'D:/tmp/job',
     frameFormat: 'raw' as const,
     frameSize: { width: 1920, height: 1080 },
     directPipe: false,
@@ -222,5 +226,104 @@ describe('叠加导出的音频回退（计划 C4 / 验收第 7 条）', () => {
     })
     expect(result).toBe('done')
     expect(state.notices).toHaveLength(0)
+  })
+})
+
+/**
+ * v8 防抖编排在真实 spawn 入口上的锁定（注入退出码，同一套 mock）：
+ * 锁四件事：单段整段覆盖 + 防抖也要走多输入 trim 链；detect 先用独立子 id 跑 pass 1；
+ * 两个进程都以任务工作目录为 cwd（.trf 相对名依赖它）；不防抖时一个额外进程都不起。
+ */
+describe('v8 防抖：detect 编排与多输入强制', () => {
+  const stabSeg = () => ({
+    refVideoPath: 'D:/ref.mov',
+    timelineStartSec: 0,
+    timelineEndSec: 2,
+    sourceInSec: 0,
+    sourceOutSec: 2,
+    stab: { enabled: true, level: 'standard' as const, tripod: false }
+  })
+
+  it('单段整段覆盖 + 防抖：先 detect（子 id + cwd），再合成时注入 transform 并强制 trim+concat', async () => {
+    queue.push(0, 0)
+    const state = makeState()
+    const ctx = makeCtx(state)
+    const result = await runOverlayMp4({ ...ctx, segments: [stabSeg()] })
+
+    expect(result).toBe('done')
+    expect(spawnCalls).toHaveLength(2)
+    const [detect, comp] = spawnCalls
+
+    // pass 1：独立子 id（engine.cancel 只杀主 id，子进程靠 cancel-watch）+ vidstabdetect + cwd
+    expect(detect!.jobId).toBe(`${state.id}-stab0`)
+    expect(detect!.args.join(' ')).toContain('vidstabdetect=')
+    expect(detect!.args.join(' ')).toContain('result=stab_0.trf')
+    expect(detect!.cwd).toBe(ctx.workspaceDir)
+
+    // pass 2：防抖段被强制挤进多输入 trim 链（旧单输入链没有插入点），transform 引用同一相对名
+    const graph = comp!.args[comp!.args.indexOf('-filter_complex') + 1] ?? ''
+    expect(graph).toContain('trim=start=0.000000:end=2.000000')
+    expect(graph).toContain('vidstabtransform=input=stab_0.trf')
+    expect(comp!.cwd).toBe(ctx.workspaceDir)
+
+    // 两道用户可见提示：重编码说明 + 预分析读数；音频被强制为 AAC
+    expect(state.notices).toContain('含防抖片段：基座逐段重编码，音频转为 AAC 192k。')
+    expect(state.notices.some((notice) => notice.includes('防抖预分析：第 1/1 段'))).toBe(true)
+    expect(hasSequence(comp!.args, ['-c:a', 'aac'])).toBe(true)
+  })
+
+  it('同源两段同区间同档位：detect 只跑一次，两段共享同一份 .trf', async () => {
+    queue.push(0, 0)
+    const state = makeState()
+    const ctx = makeCtx(state)
+    const second = { ...stabSeg(), timelineStartSec: 2, timelineEndSec: 4 }
+    const result = await runOverlayMp4({ ...ctx, segments: [stabSeg(), second] })
+
+    expect(result).toBe('done')
+    expect(spawnCalls).toHaveLength(2)
+    const graph = spawnCalls[1]!.args[spawnCalls[1]!.args.indexOf('-filter_complex') + 1] ?? ''
+    // 两次注入同一文件，但没有第二次 detect（spawnCalls 总共只有 detect×1 + composite×1）
+    expect(graph.split('vidstabtransform=input=stab_0.trf')).toHaveLength(3)
+  })
+
+  it('不防抖的单段整段覆盖：不起额外进程、不传 cwd，仍走旧单输入链（零差异）', async () => {
+    queue.push(0)
+    const state = makeState()
+    const ctx = makeCtx(state)
+    const result = await runOverlayMp4({
+      ...ctx,
+      segments: [{ refVideoPath: 'D:/ref.mov', timelineStartSec: 0, timelineEndSec: 2, sourceInSec: 0, sourceOutSec: 2 }]
+    })
+
+    expect(result).toBe('done')
+    expect(spawnCalls).toHaveLength(1)
+    expect(spawnCalls[0]!.cwd).toBeUndefined()
+    const joined = spawnCalls[0]!.args.join(' ')
+    expect(joined).not.toContain('vidstab')
+    expect(joined).not.toContain('trim=start=')
+  })
+
+  it('stab 开关关闭：不进 plan，没有 detect 进程也不注入 transform', async () => {
+    queue.push(0)
+    const state = makeState()
+    const ctx = makeCtx(state)
+    const result = await runOverlayMp4({
+      ...ctx,
+      segments: [{ ...stabSeg(), stab: { enabled: false, level: 'high', tripod: true } }]
+    })
+
+    expect(result).toBe('done')
+    expect(spawnCalls).toHaveLength(1)
+    expect(spawnCalls[0]!.args.join(' ')).not.toContain('vidstab')
+  })
+
+  it('预分析阶段已请求取消：不起任何进程直接按 cancelled 收尾', async () => {
+    const state = makeState()
+    const ctx = makeCtx(state)
+    // 取消发生在 detect 循环的入口检查：此时主进程尚未启动，engine.cancel 只置标记
+    const result = await runOverlayMp4({ ...ctx, segments: [stabSeg()], isCancelled: () => true })
+
+    expect(result).toBe('cancelled')
+    expect(spawnCalls).toHaveLength(0)
   })
 })

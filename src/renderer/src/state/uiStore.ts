@@ -70,6 +70,13 @@ export interface UiState {
   /** 时间轴工具栏三个开关（不跨会话记忆，默认全关 = 与旧行为一致） */
   timelineTools: TimelineTools
   toggleTimelineTool: (tool: TimelineTool) => void
+  /**
+   * v9：正在发声的片段 id（媒体段或音频段），只有它会拿到实时频谱电平。
+   * 由预览侧写入（只有它知道“现在谁在出声”），时间轴卡片只读它自己的那一份，
+   * 所以选择器返回的是布尔值，不会因播放头逐帧变化而重渲染整条轨道。
+   */
+  liveClipId: string | null
+  setLiveClipId: (id: string | null) => void
   pushPrompt: (prompt: DialogPrompt) => void
   shiftPrompt: () => void
   beginFontLoad: () => void
@@ -109,6 +116,8 @@ export const useUiStore = create<UiState>((set) => ({
   timelineTools: { snapTogether: false, magneticSnap: false, hoverPreview: false },
   toggleTimelineTool: (tool) =>
     set((state) => ({ timelineTools: { ...state.timelineTools, [tool]: !state.timelineTools[tool] } })),
+  liveClipId: null,
+  setLiveClipId: (id) => set((state) => (state.liveClipId === id ? state : { liveClipId: id })),
   pushPrompt: (prompt) => set((state) => ({ dialogQueue: [...state.dialogQueue, prompt] })),
   shiftPrompt: () => set((state) => ({ dialogQueue: state.dialogQueue.slice(1) })),
   beginFontLoad: () => set((state) => ({ fontLoadingCount: state.fontLoadingCount + 1 })),

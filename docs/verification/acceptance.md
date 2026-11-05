@@ -161,6 +161,99 @@
 | 预览轴（hover preview） | `uiStore.timelineTools.hoverPreview`；鼠标在时间轴上移动时按媒体轨矩形把 x 折成帧（`snapTimeToFrame`），两轨各画一条黄色竖线 + 当前帧码胶囊；根节点加 `timeline--hover-preview` 把蓝色播放头 `visibility: hidden`（“暂时替换”）；移出面板或关掉开关立即收起 | `Timeline.test.tsx`「预览轴：开着时悬停出黄线并顶掉蓝色播放头，移出即消失」 |
 | 工具栏三个开关的选中态 | 复用 `btn--sm` + `btn--primary`（选中态背景变强调色）+ `aria-pressed`，说明只在 `title`；与既有「新建/删除/拆分」按钮同一条工具栏，中间用分隔线隔开 | `Timeline.test.tsx`「三个开关默认关闭，点一下变选中态」 |
 
+## 防抖稳定（v8）的机器化验收
+
+算法路线：ffmpeg 内置 vidstab 两段式（网格运动检测 + `vidstabtransform` 逐帧动态最优缩放），不引入 Python/OpenCV 旁路；口径 = 「用 crop=keep 保留边框避免黑边，用 optzoom=2 最小化画幅损失」。参数名全部经本机 `resources/ffmpeg`（Gyan 9.0.2）`-h filter=` 实证：detect 的输出文件参数是 `result`（非 `resultfile`），`shakiness` 1–10、`accuracy` 1–15。
+
+| 验收项 | 实现口径 | 机器化证据 |
+|---|---|---|
+| 片段级开关与参数 | `MediaClip.stab`（v8，缺省 = 关闭；`enabled/level/tripod` 三字段，全默认整键不落盘，PROJECT_VERSION 保持 2）；UI 只暴露三档（轻度/标准/强）+ 虚拟三脚架，档位→滤镜参数映射只在 `shared/mediaStab` | `mediaStab.test.ts` 9 例（默认纪律/脏值归一/单调性/画幅口径固定/参数合法区间）+ `projectSchema.test.ts`「v8 防抖参数归一」5 例 + `projectStore.test.ts` 2 例 + `MediaClipInspector.test.tsx`「防抖稳定（v8）」4 例 |
+| 零差异纪律：默认关闭时导出 argv 逐字节不变 | 段不带 `stabFile` 时 `buildMediaBasisFilterComplex` 不注入任何滤镜；无防抖任务不启动 detect 进程、不传 `cwd` | `ffmpegArgs.test.ts`「零差异锁定」+ 既有全部 argv 快照未动 + `verify:all` 像素取证通过 |
+| 帧序列对齐（.trf 按帧序号索引的硬前提） | detect 与合成段链共用 `segmentTrimFpsPrefix`（trim→setpts→fps 同一字面量） | `ffmpegArgs.test.ts`：detect `-vf` 前缀与合成段链前缀字符串相等断言（TRIM_PREFIX 同源比对） |
+| pass 1 预分析 | `runStabDetects`（overlayMp4.ts）：按 `stabSegmentKey`（路径+区间+fps+档位+三脚架）去重，同素材多段只分析一次；子进程 `${jobId}-stabN` 独立 id + 200ms cancel-watch；`.trf` 落任务临时目录，随 workspace 清理 | `ffmpegPipeline.test.ts`「pass 1：detect 退出码 0，.trf 非空」（真 FFmpeg）+ `ffmpegArgs.test.ts` detect argv 快照 |
+| pass 2 形变 + 画幅优化 | 段链 `fps` 之后、`setsar` 之前注入 `vidstabtransform=input=<相对名>:smoothing=…:optalgo=opt:optzoom=2:zoomspeed=…:interpol=bicubic:crop=keep`；动态最优缩放 = oximedia Zoom Optimization 口径，crop=keep = 无黑边目标；`.trf` 用相对文件名 + 进程 `cwd`，规避盘符冒号转义陷阱 | `ffmpegPipeline.test.ts`「pass 2：合成链可解，交付尺寸/帧率/像素格式不回退」（输出 320x240/yuv420p/帧数不变）；`ffmpegArgs.test.ts`「transform 注入位置」 |
+| 防抖真实生效 | 防抖输出 vs 不防抖输出的逐帧 PSNR 在「明显补偿」区间（<40 且 >5），排除「参数写了但画面没变」的假实现 | `ffmpegPipeline.test.ts` pass 2 尾段 PSNR 判据（正弦 pan/tilt 夹具） |
+| 导出逐段生效 + 预览经代理生效（v8.1 前为「预览仍播原片」） | stab 不参与 CSS 预览样式；防抖段强制多输入路径 → 音频重编码 AAC（额外 push `TEXT.stab.exportNote`）；预览侧见下节 v8.1 | `MediaClipInspector.test.tsx`（hint 文案）+ 导出拓扑判定（原 `overlayMp4.ts` 的私有函数，v9 起升为 `shared/ffmpegArgs.segmentsNeedMultiInput` 并有自己的 4 例）的防抖分支 + 既有合成测试覆盖 |
+| 取消不泄漏检测进程 | detect 阶段尚无主进程可杀：engine.cancel 置 cancelRequested 后由 200ms watch `terminateJob(子id)`；产物由 engine finally 统一删除 | 手工取证：预分析中点取消 → 进程表无残留、无半成品；自动化覆盖在 pass 1 用例的参数/子 id 口径上 |
+
+已知边界（不属防抖缺陷）：v6 预览几何/调色（`MediaClip.video`）仍只作用于预览，尚未烧进导出链；防抖作用于源帧序列，两者同时设置时导出只体现防抖。
+
+### 虚拟三脚架放大高频抖动（v8.2 缺陷修复）
+
+用户实测：**强防抖 + 虚拟三脚架 → 画面抖动不降反升，愈演愈烈**。经真机受控实验定位根因（非并发/IPC 冲突、非 .trf 帧错位）：
+
+- 随包 FFmpeg `-h filter=vidstabtransform` 明确：`tripod=true` **等价 `relative=0:smoothing=0`**。v8/v8.1 的三脚架实现直接透传 `tripod=1`（且写在 `smoothing=` 之后被其覆盖），等于关掉全部低通并把每帧拽回参考帧 1。
+- 对**机位真实平移**的手持素材，绝对参考 + 零平滑会把带噪声的位移估计逐帧反向施加 → 放大高频残余，且离首帧越远纠得越狠（愈演愈烈）。
+- 二阶差分能量实测（画面内部区，`spikes` 受控脚本，已删）：平移夹具上 `high+tripod` 旧映射 = 原片的 **194%**（复现放大），`high` 常规 = 57%；`invert=1` 对照 = 163%（反证帧序列对齐正确）。
+
+**修复口径**（`shared/mediaStab` 单一真值，导出与预览代理同时生效）：虚拟三脚架不再使用 vidstab 的 `tripod` 宏；改为「detect 恒相对（`tripod=0`）+ transform 超长窗高斯低通 `smoothing=120` + 静态最优缩放留边 `optzoom=1:zoom=6`」，把相机轨迹钉成近直线而绝不放大。预览代理签名加算法修订号 `r2` 使旧缺陷缓存自动失效。
+
+| 证据 | 入口 |
+|---|---|
+| 真机放大护栏（修复前必红、修复后绿） | `ffmpegPipeline.test.ts`「虚拟三脚架不得放大抖动（high+tripod 残余高频抖动 < 原片）」：平移夹具测二阶差分，断言 `after < base` |
+| 参数映射锁定 | `mediaStab.test.ts`「三脚架（v8.2）」（detect 恒相对 + transform mode/静态平滑/`optzoom=1`）；`ffmpegArgs.test.ts`「三脚架（v8.2）」断言滤镜串不含 `tripod=1`/`zoomspeed`、含 `smoothing=120:optalgo=gauss:optzoom=1:zoom=6` |
+| 常规非三脚架路径零改动 | 既有「transform 注入位置」「pass 2 PSNR」用例仍绿（`optzoom=2` 动态缩放行为不变） |
+
+## 防抖预览代理（v8.1）的机器化验收
+
+背景：v8 交付后用户反馈「开了防抖预览毫无效果」。v8.1 的口径：Inspector 防抖区块新增「应用防抖预览」→ 主进程后台两段式作业（进度出现在任务队列）→ 就绪后 PreviewStage 直接播稳定化代理 mp4。**避免实时防抖卡顿，又能看到真正处理后的画面**；导出链不变（代理仅预览用途）。
+
+| 验收项 | 实现口径 | 机器化证据 |
+|---|---|---|
+| 两进程后台作业 | `src/main/stabPreview.ts`：jobId = `stab-<clipId>` 确定性复用（重复点击不排第二份）；detect 用子 id `${jobId}-detect` + 两阶段 200ms cancel-watch；进度/结果走既有 job 事件流 → 自动出现在 ProgressPanel 任务卡（stab- 前缀显「运动检测/代理转码」而非帧数） | `stabPreviewStore.test.ts` 9 例（queued 不记账/成功后记账/失败落 errors/串台忽略）+ 真机 `ffmpegPipeline.test.ts`「v8.1 预览代理」（detect+transform 同主进程链路 exit 0） |
+| 磁盘缓存与新鲜度 | `userData/stab-preview`；文件名 = 签名令牌（区间/帧率/档位/三脚架/源路径 + 源 size/mtime 指纹的 FNV-1a）；命中且非空直接返回 cached+路径（不起进程）；`.trf` 完整则跳过 detect | `mediaStab.test.ts`「防抖预览代理（v8.1）」4 例（令牌确定性/指纹参与/失效维度/文件名安全化） |
+| 预览换源与坐标映射 | `stabProxyTimeOf`（只在 `shared/mediaStab`）：代理时间 = 源时间 − 入点，区间外夹紧；PreviewStage 仅在「记账签名 === 当前参数签名」时换播代理，否则回落原片 | `mediaStab.test.ts` 夹紧/负值例 + `MediaClipInspector.test.tsx`「防抖预览代理按钮（v8.1）」5 例（含改档→「重新应用」自动失效） |
+| 代理交付口径 = 源区间 1:1 | `buildStabPreviewArgs` 与导出合成段链共用 `segmentTrimFpsPrefix` + 同一 transform 串；带声时 `-af atrim` 裁音轨；无声 `-an`；快优先（veryfast+crf20）+ `+faststart`（Range 流边下边播） | `ffmpegArgs.test.ts` 2 例（同前缀/裁音/无声音分支）+ 真机用例断言帧数≈时长×fps、尺寸不回退、音轨存在、moov 在头 64KB |
+| 取消与回收 | 取消共用 `export.cancel`（engine/cfr/stab 三路分发，未知 id 无副作用）；删片段 `removeMediaClip` 联动 `clearForClip` 清账本 + 按 `stab-<clipId>-` 前缀删 mp4/.trf；关防抖同样回收；失败/取消删半成品防脏缓存 | `MediaClipInspector.test.tsx`（取消入口/关闭回收断言）+ `stabPreviewStore.test.ts`（迟到结果不写回） |
+| 零回归 | 导出链/协议/工程 schema 全部未动（PROJECT_VERSION 保持 2；新 IPC 通道只增不改）；不点「应用」时预览行为与 v8 交付完全一致 | `npm run verify` 656/656（含既有全部 argv 快照）+ `verify:all` 全链 PASS |
+
+## 音频轨、音频/图像导入与多层合成（v7）的机器化验收
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 音频轨（独立车道） | `Project.audioClips?: AudioClip[]`（与媒体段同一套秒+帧对齐+时长恒等式，但**允许重叠**）；`shared/audioClips` 负责建段/平移/拖边/取当前组/层号夹取；时间轴三车道 `媒体 / 音频 / 字幕条`，音频卡是**时长指示条**（竖条波形底纹 + 宽度即占比），可平移、拖入出点、点击定位、工具栏删除 | `tests/audioClips.test.ts` 14 例 + `Timeline.test.tsx`「音频轨」3 例（车道渲染/宽度占比/删除联动/错轨拒绝） |
+| 音频导入 | `IMPORTABLE_AUDIO_EXTENSIONS`（mp3/wav/m4a/aac/flac/ogg/opus）；`parseAudioProbeJson`（无视频流分支，`width=0`）；预览协议补音频 mime；素材库 ♪ 角标 | `tests/mxfSupport.test.ts` 同源白名单 + `probe` 单测；`npm run verify` 519 例全绿 |
+| 音频试听与混音（预览） | `AudioBed`：播放头处每一段音频各挂一个 `<audio>`，由浏览器自然混音；暂停精确 seek、播放只纠 >0.35s 漂移 | 与导出同源的 `activeAudioClips`；`Timeline.test.tsx`/`AudioClipCard` 相关用例 |
+| 导出混音 | `buildAudioMixPlan`：每段 `-ss/-t -i`（输入选项）+ `atrim` + `aresample` + `adelay=delays=…:all=1` 定位 + `amix=…:normalize=0` + 末段 `atrim=duration=<span>`；overlay 出口挂在 `[ab]` 上并 `-map [amix]`；透明出口去掉 `-an` 并补 `-map [v]` | `tests/audioMixExport.test.ts` 10 例（含“无音频段时 argv 逐字节不变”回归锁）；**真机实证**：用随包 FFmpeg 跑同一滤镜链，两条链均 exit 0，输出带 AAC 音轨且 `volumedetect` 非静音（mean -21.1dB / -19.5dB） |
+| 图像素材 | `MediaKind='image'` + `inferMediaKind`（按扩展名）+ 入池补默认静帧时长 5s；素材库 ▣ 角标；预览用 `<img>` 渲染（几何/调色滤镜同样生效）；导出用 `-loop 1 -t <dur>` 撑成视频流，该段强制补静音 | `tests/mediaLayers.test.ts`（kind 推断/默认时长/`-loop` argv/`anullsrc`） |
+| 多层叠加渲染 | `MediaClip.layer` / `AudioClip.layer`（0..4，0 不落盘）+ 工具栏「上移层/下移层」；时间轴按层切分车道高度；**预览取最上层**（`topActiveMediaClip`）；**导出先把层解开**（`resolveVisibleMediaClips`：逐区间取上层、相邻同源合并、源坐标同步平移）再进“不重叠+concat”基座链；字幕轨始终在画面之上（Canvas 层叠在视频层） | `tests/mediaLayers.test.ts` 5 例（取最上层/同层后者在上/遮挡区间/三层嵌套）+ `useExportJob` 基座改走 resolve；`verify:all` 20/20 |
+
+### 已知边界
+
+- 预览与导出都按「画面不透明」处理多层：上层**完全覆盖**下层（未实现透明度/混合模式）。
+- `verify:all` 的应用内冒烟工程不含音频/图像段，因此自动化门禁覆盖的是「无音频段时 argv 不变」的回归面；含音频/图像的端到端导出凭证目前是 argv 单测 + 随包 FFmpeg 链实证。
+
+## 片段音频编辑与频谱可视化（v9）的机器化验收
+
+背景：需求要求「媒体卡片底部 1/3 频谱条 + 音量/渐入渐出 + 变速（保持音高）+ 音频段专属面板」，且**参数必须到达导出引擎**。口径：一套语义三处消费——面板滑杆、预览（`playbackRate` + 增益包络 + 频谱条形状）、导出（`atempo`/`asetrate`/`volume`/`afade`/`setpts`）全部只读 `shared/mediaClipAudio`，单位换算只允许写在那一个文件里。
+
+| 验收项 | 实现口径 | 机器化证据 |
+|---|---|---|
+| 变速的时间口径 | **源窗口不变、时间轴伸缩**：`sourceOutSec − sourceInSec = (timelineEndSec − timelineStartSec) × 倍速`（1x 时即旧恒等式）。换算集中在 `sourceSecForTimelineSec`/`timelineSecForSourceSec`，schema 归一、拆分、主轨对齐、层展开、拖边、预览映射、导出 `outLen` 全部走它 | `tests/mediaClipAudio.test.ts` 21 例 + `tests/mediaClips.test.ts`「变速段的时间换算」4 例 + `tests/audioClips.test.ts`「音频段变速」5 例 + `tests/projectSchema.test.ts`「v9 归一」6 例（含恒等式与脏值夹心）+ `projectStore.test.ts`「v9 片段音频与变速动作」9 例 |
+| 音量 0~200% / 渐入渐出 0~5s | `ClipAudio{volumePercent,fadeInSec,fadeOutSec}`；导出 `volume=1.5` + `afade=t=in:st=0:d=X` / `afade=t=out:st=<len−d>:d=d`（各限半段，秒数是**变速后**的本段输出长度）；链序固定为 变速 → 音量 → 淡入 → 淡出 | `tests/ffmpegArgs.test.ts`「v9 片段音频与变速 argv」10 例 + **真机实证**：`ffmpegPipeline.test.ts`「音量 50%」——同一素材只改 `volume`，`volumedetect` 的 `max_volume` 相对差 = −6.02dB（±2） |
+| 变速 0.25x~4x + 保持音高 | 开启 = `atempo` 链（单实例安全区 0.5..2，4x 串两个 2）；关闭 = `aresample=48000,asetrate=48000×s,aresample=48000`（音高随倍速升降）。画面侧 `setpts=(PTS-STARTPTS)/s` **挂在 `fps=` 之后**（保 vidstab `.trf` 帧序号对齐）。预览用 `playbackRate` + `preservesPitch`（含 webkit 前缀） | 同上 argv 用例（`atempoFilters`/`pitchShiftFilters`/链序断言）+ **真机**：「2x 变速」交付 90±5 帧/3s、「0.5x 慢放」360±12 帧/12s、「asetrate」链 exit 0 且时长仍为 3s |
+| 导出链不漏参数 | `segmentsNeedMultiInput`（从主进程提到 `shared/ffmpegArgs` 以便单测锁住）认 `audio`/`speed` 键：单输入 overlay 链没有逐段音频插入点，不强制走 trim 链就会把参数静默吞掉→预览与导出分叉；图像段 `-loop 1 -t` 用**源窗口**长度，无音轨段 `anullsrc` 用**时间轴**长度 | `tests/ffmpegArgs.test.ts`「segmentsNeedMultiInput（导出拓扑判定）」4 例 +（静音长度/`-loop` 长度/默认值不落盘时链串与基线逐字节相等）+ `tests/audioMixExport.test.ts`「混音计划的音频参数（v9）」5 例 |
+| 音频段专属面板 | `selectionKind==='audio'` → `AudioClipInspector`，与视频编辑器**共用** `ClipFxSections`（同一组滑杆、同一份默认值）；画面参数（缩放/旋转/色彩/防抖）在音频模式下**根本不渲染**，而非 disabled | `src/renderer/src/panels/AudioClipInspector.test.tsx` 9 例（分流三态互不卡住、画面分区不在 DOM、数值标签读数、倍速伸缩、恢复默认） |
+| 频谱条（卡片底 1/3） | 数据源 = 主进程一次 FFmpeg 解码单声道 PCM（`-ss/-t` 前置 + `-vn -sn -dn -ac 1 -ar <低率> -f s16le pipe:1`，**绝不带 `-progress`**）→ 等分桶峰值 → −60dBFS 地板折算；柱高再乘「音量 × 淡变包络」，所以滑杆一动形状就动；播放时由 `AnalyserNode` 写 CSS 变量做实时起伏（命令式，不触发 React 渲染）；无音轨/图像/素材已移出 → **一个请求都不发** | `tests/audioPeaks.test.ts` 14 例（折桶数学/成本闸门/柱高/该不该画）+ `tests/ffmpegArgs.test.ts`（argv 不含 `-progress`）+ `MediaClipCard.test.tsx`「音频频谱条」7 例 + **真机**：「频谱取样」从正弦夹具折出 48 根柱（全部 >0.6）、只取后半时字节量减半、无音轨素材返回 0 字节 |
+| 零回归 | 默认值 = 不生效：全默认时 `audio`/`speed` 整键不落盘，`PROJECT_VERSION` 保持 2；无 v9 键时基座与混音 argv 与 v7/v8 **逐字节一致**（由相等断言锁定）；预览从恒定 `muted` 改为 `muted={!audible}`，AudioContext 起不来时自我拆除退回 `element.volume`（最坏情况 = 今日行为） | `npm run verify` 666/666（49 文件）+ `src/renderer/src/audio/previewAudioGraph.test.ts` 6 例（退化纪律）+ `verify:all` 全链 PASS |
+
+### 已知边界（v9）
+
+- 「变速保持音高」的实现按 FFmpeg 物理语义：开启 = `atempo`（只变时长），关闭 = `asetrate`（音高与时长一起变）。需求原文把两条滤镜分配反了（仅 `atempo` 不可能改变音高），已按可工作的方向实现并在 i18n hint 与文件注释写明。
+- 频谱条是**幅度包络**（等分时间桶峰值），不是频域分析；主进程侧是会话内存 LRU（240 键）+ 并发闸门，不落盘也不写进工程。
+- 预览出声只在「播放中 + 有音轨」时打开；浏览器自动播放策略可能拒绝 AudioContext，此时 >100% 增益在预览里听不到（导出仍按 `volume` 生效）。
+- 与 v7 同一限制：`verify:all` 的应用内冒烟工程不放媒体/音频段，因此频谱条「屏幕上的像素」不在自动化门禁里（它由 jsdom 结构断言 + 真机折桶数据两层锁定）；面板滑杆→预览→导出的逐环同步已由上述 argv/包络单测接上。
+
+## 播放键盘（空格 / 方向键逐帧）的机器化验收
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 空格播放/暂停 | `hooks/useTransportKeys`（window keydown）：焦点在 input/textarea/select/contentEditable 里一律放行；`event.repeat` 忽略（按住只切一次）；`preventDefault` 防住「空格滚动预览区」与「当前聚焦按钮被再点一次 = 切换两下」 | `useTransportKeys.test.tsx`（切换/连发/四类文本控件让位/勾选框/修饰键 6 例） |
+| ←/→ 上一帧下一帧 | `App.stepFrame`：帧号取 `PreviewStage` 句柄的 `currentFrame()`（预览时钟的真实帧；UI 时间文本是 100ms 节流值，拿它折算会差好几帧），`shared/fps.stepLocalFrame` 夹在 `[0, totalFrames)` 后 `seekTo(frameTimeSec(...))`，并先接管播放时钟 | `tests/fps.test.ts`「逐帧跳转的落点」4 例（单步/两端夹住不回绕/连跳累加等价单步/空工程） |
+| 长按连续跳转 | 同一模块自己计时：按住 `FRAME_HOLD_DELAY_MS`（320ms）后按 `FRAME_REPEAT_INTERVAL_MS`（60ms）逐帧连发；keyup、窗口 blur、换方向、焦点进输入框四条路径都断开；不认系统按键重复率设置 | `useTransportKeys.test.tsx` 连跳 5 例（阈值前/后、松手、失焦、换方向不叠定时器） |
+| 与门禁弹窗/其他按键消费者共存 | 弹窗排队中整组快捷键不生效（不能拿空格绕过「必须确认」的阻断，规格 §6）；已被别处 `preventDefault` 的按键不接手（分隔线 `role=separator` 的方向键调布局时不会顺带推播放头） | `useTransportKeys.test.tsx` 2 例 |
+| 暂停逐帧时媒体画面真的跟着动 | `PreviewStage` 暂停吸附阈值由固定 0.04s 改为**半帧**（`frameIntervalSec(fps)/2`）：0.04s 在 25/30fps 下正好把「一帧」当噪声放过，于是只动字幕层不动参考视频 | 既有 `mediaClip*`/`mediaLayers` 单测未回归；`FOCUSNEWS_SHOT=spikes/artifacts/ui-transport.png` 可见五键 transport（⏮ \|◀ ▶/❚❚ ▶\| ⏭）与按钮上的快捷键提示 |
+
 ## 重跑取证的最短路径
 
 **一条命令跑完全部可自动化验证**（计划 M4-6「断言脚本化」）：
@@ -170,6 +263,20 @@ npm run verify:all        # 19 步：门禁 6 + CLI 冒烟 2 + 应用内场景 1
 npm run verify:all -- --quick   # 只跑门禁 + CLI（不启 Electron）
 → spikes/verify-all.json（逐步退出码 + 关键读数 + 耗时）
 ```
+
+2026-11-06（v9 交付后）全量重跑（`VERIFY ALL PASS`，20/20）：
+
+| 步骤 | 读数 |
+|---|---|
+| check:env / lint / typecheck×3 | 全部 exit 0 |
+| vitest | exit 0，**49 文件 / 666 用例**（11.8s），无未捕获异常 |
+| CLI 1080p30/10s 透明 MOV / CLI 720p 叠加 | 3.6s / 1.7s |
+| 应用内 1080p30/10s | 5.76s（外推 5.8s，阈值 30s） |
+| 应用内 4K60/2s | 10.46s（外推 6.5s） |
+| 应用内 逐像素一致性 / 错误呈现 / 逐帧评审表 / 视觉检查 | 均 PASS（5 帧、argvSegments 38、24 例 0 failure） |
+| 真机 FFmpeg（`ffmpegPipeline.test.ts`） | v9 六例均 exit 0：频谱折桶/2x 90 帧/0.5x 360 帧/音量相对差 −6dB/asetrate/混音链 |
+
+→ 日志：`spikes/verify-all-v9.log`；结构化结果：`spikes/verify-all.json`
 
 2026-11-04 全量实测（`VERIFY ALL PASS`，19/19）：
 

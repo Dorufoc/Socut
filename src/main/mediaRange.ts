@@ -17,6 +17,17 @@ const VIDEO_MIME_BY_EXTENSION: Record<string, string> = {
   '.mxf': 'video/mxf'
 }
 
+/** v7：音频提取白名单（<audio> 与 WebAudio 都要能读，否则波形/试听不可用） */
+const AUDIO_MIME_BY_EXTENSION: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/opus'
+}
+
 /**
  * 图片扩展名：水印预览走同一条协议（主进程登记后 <img> 才可读），
  * 与视频共用白名单，避开再开一条 custom scheme。
@@ -34,6 +45,7 @@ const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
 
 const PREVIEW_MIME_BY_EXTENSION: Record<string, string> = {
   ...VIDEO_MIME_BY_EXTENSION,
+  ...AUDIO_MIME_BY_EXTENSION,
   ...IMAGE_MIME_BY_EXTENSION
 }
 

@@ -1,5 +1,6 @@
 import { MIN_MEDIA_CLIP_SEC } from './constants'
 import { durationSecToFrames, frameTimeSec, snapTimeToFrame, timeToFrameFloor } from './fps'
+import { sourceSecForTimelineSec, sourceTimeAt, speedValueOf } from './mediaClipAudio'
 import type { Fps, MediaClip } from './types'
 
 /**
@@ -26,10 +27,12 @@ export function splitMediaClipAt(
   const rightMin = clip.timelineEndSec - MIN_MEDIA_CLIP_SEC
   if (cut <= leftMin - 1e-9 || cut >= rightMin + 1e-9) return null
   const deltaSec = cut - clip.timelineStartSec
+  const speed = speedValueOf(clip.speed)
   const left: MediaClip = {
     ...clip,
     timelineEndSec: cut,
-    sourceOutSec: snapTimeToFrame(clip.sourceInSec + deltaSec, fps)
+    // v9：切点往源上投影时要乘上倍速（变速段的 1s 时间轴吃掉 speed 秒源内容）
+    sourceOutSec: snapTimeToFrame(clip.sourceInSec + sourceSecForTimelineSec(speed, deltaSec), fps)
   }
   const right: MediaClip = {
     ...clip,
@@ -94,12 +97,11 @@ export function findActiveMediaClip(tracks: MediaClip[], atSec: number): MediaCl
   return null
 }
 
-/** 时间轴秒 → 该 mediaClip 对应源文件的秒；不在任何段内时返回 null。 */
+/** 时间轴秒 → 该 mediaClip 对应源文件的秒；不在任何段内时返回 null（v9：含倍速）。 */
 export function sourceTimeOf(tracks: MediaClip[], atSec: number): { clip: MediaClip; sourceSec: number } | null {
   const clip = findActiveMediaClip(tracks, atSec)
   if (!clip) return null
-  const offsetSec = Math.max(0, atSec - clip.timelineStartSec)
-  return { clip, sourceSec: clip.sourceInSec + offsetSec }
+  return { clip, sourceSec: sourceTimeAt(clip, atSec) }
 }
 
 /** 给定 mediaClips，返回按 timelineStartSec 升序排列的副本；不修改入参。 */
@@ -132,6 +134,65 @@ export function frameToSec(frame: number, fps: Fps): number {
 }
 
 /**
+ * v7 多层：同一时刻取层号最大的一段（画面不透明，所以**上层直接盖住下层**）。
+ * 同层重叠时取后开始的那条（后放上去的在上）。
+ */
+export function topActiveMediaClip(tracks: MediaClip[], atSec: number): MediaClip | null {
+  let best: MediaClip | null = null
+  for (const clip of tracks) {
+    if (atSec < clip.timelineStartSec || atSec >= clip.timelineEndSec) continue
+    if (!best) {
+      best = clip
+      continue
+    }
+    const layer = clip.layer ?? 0
+    const bestLayer = best.layer ?? 0
+    if (layer > bestLayer || (layer === bestLayer && clip.timelineStartSec >= best.timelineStartSec)) best = clip
+  }
+  return best
+}
+
+/**
+ * v7 多层：把「带层号的时间轴」压成一条**互不重叠、按时间排序**的可见轨道。
+ *
+ * 导出侧的基座假设“段与段不重叠、按顺序 concat”，所以在进入滤镜链之前，
+ * 必须先按层号把重叠段解开（逐个时间区间取上层），而不是把两段都塞进去。
+ * 相邻的同一素材片段会合并回去，避免把一条片段切成很多路输入。
+ */
+export function resolveVisibleMediaClips(tracks: MediaClip[]): MediaClip[] {
+  if (tracks.length <= 1) return sortMediaClips(tracks)
+  const sorted = sortMediaClips(tracks)
+  const bounds = [...new Set(sorted.flatMap((clip) => [clip.timelineStartSec, clip.timelineEndSec]))].sort((a, b) => a - b)
+  const out: MediaClip[] = []
+  for (let i = 0; i < bounds.length - 1; i += 1) {
+    const from = bounds[i]!
+    const to = bounds[i + 1]!
+    if (to - from <= 1e-9) continue
+    const covering = sorted.filter((clip) => clip.timelineStartSec <= from + 1e-9 && clip.timelineEndSec >= to - 1e-9)
+    if (covering.length === 0) continue
+    const winner = covering.reduce((best, clip) => ((clip.layer ?? 0) >= (best.layer ?? 0) ? clip : best))
+    // v9：源坐标是时间轴坐标×倍速的投影（1x 时与旧写法完全一致）
+    const speed = speedValueOf(winner.speed)
+    const last = out[out.length - 1]
+    if (last && last.mediaId === winner.mediaId && (last.layer ?? 0) === (winner.layer ?? 0) && Math.abs(last.timelineEndSec - from) < 1e-9) {
+      const offset = to - winner.timelineStartSec
+      last.timelineEndSec = to
+      last.sourceOutSec = winner.sourceInSec + offset * speed
+      continue
+    }
+    const shift = from - winner.timelineStartSec
+    out.push({
+      ...winner,
+      timelineStartSec: from,
+      timelineEndSec: to,
+      sourceInSec: winner.sourceInSec + shift * speed,
+      sourceOutSec: winner.sourceInSec + (to - winner.timelineStartSec) * speed
+    })
+  }
+  return out
+}
+
+/**
  * 主轨对齐（snap-together）：按时间轴顺序从左到右**紧贴排列**，间隙恒为 0。
  *
  * - 顺序 = 当前的 timelineStartSec 升序（稳定排序，先后来的保持先后）；
@@ -151,7 +212,8 @@ export function compactMediaClips(tracks: MediaClip[], fps: Fps): MediaClip[] {
       ...clip,
       timelineStartSec: start,
       timelineEndSec: end,
-      sourceOutSec: snapTimeToFrame(clip.sourceInSec + (end - start), fps)
+      // v9：时长不变，所以源窗口也不变（乘上倍速才是“吃掉多少源”）
+      sourceOutSec: snapTimeToFrame(clip.sourceInSec + sourceSecForTimelineSec(speedValueOf(clip.speed), end - start), fps)
     }
   })
 }

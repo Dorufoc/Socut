@@ -58,6 +58,11 @@ export function userStripsDir(): string {
   return path.join(app.getPath('userData'), USER_DATA_DIRS.strips)
 }
 
+/** v8.1：防抖预览代理缓存目录（userData/stab-preview：代理 mp4 与 .trf 运动数据同放）。 */
+export function userStabPreviewDir(): string {
+  return path.join(app.getPath('userData'), USER_DATA_DIRS.stabPreview)
+}
+
 /**
  * v5：某次预览条请求的长图路径。
  * 文件名 = 安全化的 mediaId 前缀 + 缓存令牌：前者让「素材移出池」能按前缀回收它的全部预览条，

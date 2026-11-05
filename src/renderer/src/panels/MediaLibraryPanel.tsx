@@ -1,5 +1,6 @@
 import { useEffect, useState, type DragEvent as ReactDragEvent, type ReactElement } from 'react'
 import { detectCompat } from '@shared/probe'
+import { mediaKindOf } from '@shared/audioClips'
 import { formatDuration } from '@shared/timecode'
 import type { MediaItem } from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
@@ -114,7 +115,7 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
                   <img src={item.thumbnailUrl} alt="" draggable={false} />
                 ) : (
                   <span className="media-tile__glyph" aria-hidden="true">
-                    ▶
+                    {mediaKindOf(item) === 'audio' ? '♪' : mediaKindOf(item) === 'image' ? '▣' : '▶'}
                   </span>
                 )}
                 {missing ? <span className="media-tile__badge media-tile__badge--danger">文件缺失</span> : null}

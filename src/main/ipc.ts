@@ -4,7 +4,7 @@ import path from 'node:path'
 import { CHANNELS } from '../shared/ipcChannels'
 import { APP_NAME, WINDOW_TITLE } from '../shared/constants'
 import { validateAllPresets } from '../shared/presets'
-import type { ExportRequest, Fps, MediaStripRequest, MediaStripResult, Project, VideoMeta } from '../shared/types'
+import type { AudioPeaksRequest, AudioPeaksResult, ExportRequest, Fps, MediaStripRequest, MediaStripResult, Project, StabPreviewRequest, StabPreviewResult, VideoMeta } from '../shared/types'
 import type { AppInfo, EstimateInput } from '../shared/api'
 import { describeBinarySource, resolveFfmpegBinaries, userFontsDir } from './paths'
 import { ffmpegVersion } from './ffrun'
@@ -22,7 +22,9 @@ import { pickAndProbeWatermark } from './watermark'
 import { createPreviewUrl } from './media'
 import { ensureThumbRegistered, generateThumbnail, removeThumbnail, thumbUrlFor } from './thumbProtocol'
 import { generateStrip, removeStripsFor } from './stripProtocol'
+import { generateAudioPeaks, removePeaksFor } from './audioPeaks'
 import { cancelCfr, convertToCfr } from './cfrTranscode'
+import { applyStabPreview, cancelStabPreview, removeStabPreviewForClip } from './stabPreview'
 import { smokeConfig, verifySmokeReport, writeSmokeReport } from './smoke'
 import { installFrameIpc } from './export/frameChannel'
 import type { SmokeReport } from '../shared/api'
@@ -267,12 +269,14 @@ export function registerIpc(engine: ExportEngine): void {
     return reregistered ?? thumbUrlFor(mediaId)
   })
 
-  /** v2：素材移出池时回收缩略图与时间帧预览条（userData/thumbs 与 userData/strips）。 */
+  /** v2：素材移出池时回收缩略图、时间帧预览条与频谱取样（userData/thumbs 与 userData/strips）。 */
   ipcMain.handle(CHANNELS.mediaThumbRemove, async (_event, mediaId: string): Promise<void> => {
     if (typeof mediaId === 'string' && mediaId.length > 0) {
       await removeThumbnail(mediaId)
       // 预览条是按「素材+区间+格数」命名的，只能按 mediaId 前缀整批回收
       await removeStripsFor(mediaId)
+      // 频谱取样只活在内存里（同一口径：按 mediaId 前缀整批回收）
+      removePeaksFor(mediaId)
     }
   })
 
@@ -288,9 +292,34 @@ export function registerIpc(engine: ExportEngine): void {
     return generateStrip(request)
   })
 
+  /**
+   * v9：频谱条幅度取样。不可用（无音轨 / 源不在 / FFmpeg 缺失）时 `peaks: []`，
+   * 卡片不画柱子；一次取样失败绝不影响时间轴拖拽与剪辑。
+   */
+  ipcMain.handle(CHANNELS.mediaAudioPeaks, async (_event, request: AudioPeaksRequest): Promise<AudioPeaksResult> => {
+    if (typeof request !== 'object' || request === null) {
+      return { peaks: [], buckets: 0, key: 'invalid', cached: false, hasAudio: false }
+    }
+    return generateAudioPeaks(request)
+  })
+
   ipcMain.handle(CHANNELS.videoCfrConvert, async (event, target: string, fps: Fps, meta: VideoMeta) => {
     const job = await convertToCfr(String(target), fps, meta, senderWindow(event))
     return job
+  })
+
+  /**
+   * v8.1：防抖预览代理：后台两段式作业（运动检测 → 代理转码），进度/结果经 job 事件流；
+   * 命中磁盘缓存时不起子进程直接返回路径。受理失败（未开启/区间脏/源不在/FFmpeg 缺失）抛错给渲染侧。
+   */
+  ipcMain.handle(CHANNELS.videoStabPreview, async (event, request: StabPreviewRequest): Promise<StabPreviewResult> => {
+    if (typeof request !== 'object' || request === null) throw new Error('缺少防抖预览请求参数')
+    return applyStabPreview(request, senderWindow(event))
+  })
+
+  /** v8.1：片段删除/关闭防抖时回收它的代理与运动数据（userData/stab-preview 按 clipId 前缀）。 */
+  ipcMain.handle(CHANNELS.videoStabPreviewRemove, async (_event, clipId: string): Promise<void> => {
+    if (typeof clipId === 'string' && clipId.length > 0) await removeStabPreviewForClip(clipId)
   })
 
   // ---------------------------------------------------------------- 水印
@@ -301,6 +330,8 @@ export function registerIpc(engine: ExportEngine): void {
   ipcMain.handle(CHANNELS.exportCancel, async (_event, jobId: string) => {
     await engine.cancel(String(jobId))
     await cancelCfr(String(jobId))
+    // v8.1：防抖预览作业与导出共用取消入口（jobId 前缀 stab-，不在 engine 注册表里自然无副作用）
+    await cancelStabPreview(String(jobId))
   })
 
   // ---------------------------------------------------------------- 导出

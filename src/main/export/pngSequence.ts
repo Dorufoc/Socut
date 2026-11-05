@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { buildTransparentMovFromSeq, buildTransparentMovQtrleFromSeq } from '../../shared/ffmpegArgs'
+import type { TransparentAudioOptions } from '../../shared/ffmpegArgs'
 import type { Fps, TransparentCodec } from '../../shared/types'
 import { spawnJob, terminateJob } from '../procRegistry'
 import type { FfmpegBinaries } from '../paths'
@@ -77,6 +78,8 @@ export interface EncodeCtx {
   fps: Fps
   framesTotal: number
   codec: TransparentCodec
+  /** v7：音频轨（不传 = 保持 `-an`） */
+  audio?: TransparentAudioOptions
   isCancelled: () => boolean
   onTick: () => void
 }
@@ -85,8 +88,8 @@ export async function encodePngToMov(ctx: EncodeCtx): Promise<void> {
   const pattern = path.join(ctx.dir, 'frame_%06d.png')
   const args =
     ctx.codec === 'qtrle'
-      ? buildTransparentMovQtrleFromSeq(ctx.fps, pattern, ctx.outputPath, 0)
-      : buildTransparentMovFromSeq(ctx.fps, pattern, ctx.outputPath, 0)
+      ? buildTransparentMovQtrleFromSeq(ctx.fps, pattern, ctx.outputPath, 0, ctx.audio)
+      : buildTransparentMovFromSeq(ctx.fps, pattern, ctx.outputPath, 0, ctx.audio)
 
   const parser = new ProgressParser()
   const job = spawnJob({

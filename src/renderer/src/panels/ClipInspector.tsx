@@ -14,22 +14,45 @@ import { ColorPanel } from './ColorPanel'
 import { FontPanel } from './FontPanel'
 import { AnimationPanel } from './AnimationPanel'
 import { MediaClipInspector } from './MediaClipInspector'
+import { AudioClipInspector } from './AudioClipInspector'
+import type { AudioClip } from '@shared/types'
+
+/** 稳定的空音频轨引用（避免选择器每次返回新数组） */
+const EMPTY_AUDIO_CLIPS: AudioClip[] = []
 
 /**
  * 右侧检查器的**总入口**：按最后一次点选的类型分流。
  *
- * - 点中时间轴上的媒体段（`selectionKind === 'media'`）→ 视频片段编辑器；
+ * - 点中媒体轨上的段（`selectionKind === 'media'`）→ 视频片段编辑器；
+ * - 点中音频轨上的段（`selectionKind === 'audio'`，v9）→ 音频片段编辑器；
  * - 否则（字幕条 / 什么都没选）→ 原有的字幕检查器，行为、状态与测试完全不变。
  *
- * 两个选中态可以同时存在（各自服务于不同的时间轴操作），所以分流靠「最后点的是哪类」，
+ * 三个选中态可以同时存在（各自服务于不同的时间轴操作），所以分流靠「最后点的是哪类」，
  * 而不是靠“哪个 id 非空”——否则选完媒体段再点字幕条就会卡在视频面板上。
  */
 export function ClipInspector(): ReactElement {
   const selectionKind = useProjectStore((state) => state.selectionKind)
   const mediaClips = useProjectStore((state) => state.project.mediaClips)
+  const audioClips = useProjectStore((state) => state.project.audioClips) ?? EMPTY_AUDIO_CLIPS
   const mediaPool = useProjectStore((state) => state.project.media)
   const fps = useProjectStore((state) => state.project.fps)
   const selectedMediaClipId = useProjectStore((state) => state.selectedMediaClipId)
+  const selectedAudioClipId = useProjectStore((state) => state.selectedAudioClipId)
+
+  if (selectionKind === 'audio') {
+    const clip = audioClips.find((item) => item.id === selectedAudioClipId) ?? null
+    if (!clip) {
+      return (
+        <div className="inspector">
+          <p className="inspector__empty">{TEXT.audioEditor.noneSelected}</p>
+        </div>
+      )
+    }
+    const ordered = [...audioClips].sort((a, b) => a.timelineStartSec - b.timelineStartSec)
+    const index = ordered.findIndex((item) => item.id === clip.id) + 1
+    const name = mediaPool.find((item) => item.id === clip.mediaId)?.name ?? null
+    return <AudioClipInspector clip={clip} mediaName={name} index={index} total={ordered.length} fps={fps} />
+  }
 
   if (selectionKind !== 'media') return <SubtitleClipInspector />
 

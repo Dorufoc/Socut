@@ -4,6 +4,7 @@ import {
   BT709_TAGS,
   PRORES_PROFILE_4444,
   PRORES_PIX_FMT,
+  buildAudioPeaksArgs,
   buildCfrArgs,
   buildMediaBasisFilterComplex,
   buildOverlayMp4,
@@ -11,6 +12,8 @@ import {
   buildOverlayMp4MultiInput,
   buildOverlayMp4MultiInputDirectPipe,
   buildProbeArgs,
+  buildStabDetectArgs,
+  buildStabPreviewArgs,
   buildThumbnailArgs,
   buildStripArgs,
   buildTransparentMovFromPipe,
@@ -18,10 +21,38 @@ import {
   buildTransparentMovQtrle,
   buildVerifyArgs,
   buildVfrSampleArgs,
-  proresArgs
+  proresArgs,
+  segmentsNeedMultiInput,
+  segmentWantsStab,
+  stabSegmentKey
 } from '@shared/ffmpegArgs'
-import type { ConcatSegment } from '@shared/ffmpegArgs'
+import type { AudioPeaksArgsInput, ConcatSegment } from '@shared/ffmpegArgs'
 import { FPS_23_976, FPS_29_97, FPS_30 } from '@shared/constants'
+import { defaultMediaStab } from '@shared/mediaStab'
+import type { ClipAudio, ClipSpeed, MediaClipStab } from '@shared/types'
+
+/** 夹具：一段多输入基座里的媒体段（v2/v8 两处 describe 共用，所以提到模块作用域） */
+const seg = (over: Partial<ConcatSegment> = {}): ConcatSegment => ({
+  refVideoPath: 'D:/media/a.mp4',
+  timelineStartSec: 0,
+  timelineEndSec: 4,
+  sourceInSec: 2,
+  sourceOutSec: 6,
+  hasAudio: true,
+  ...over
+})
+
+const basis = (segments: ConcatSegment[], withOverlayLabel = '2') => ({
+  segments,
+  spanStartSec: 0,
+  spanEndSec: 10,
+  overlayLabel: withOverlayLabel,
+  outputPath: 'D:/out/comp.mp4',
+  fps: FPS_30,
+  frameSize: { width: 1920, height: 1080 },
+  audioMode: 'aac' as const,
+  fpsMode: 'cfr' as const
+})
 
 /**
  * FFmpeg argv 快照（计划 C1–C5 修正的锁定测试）。
@@ -232,27 +263,6 @@ describe('v2 缩略图与多输入 trim+concat argv', () => {
     expect(negative[negative.indexOf('-ss') + 1]).toBe('0.000000')
   })
 
-  const seg = (over: Partial<ConcatSegment> = {}): ConcatSegment => ({
-    refVideoPath: 'D:/media/a.mp4',
-    timelineStartSec: 0,
-    timelineEndSec: 4,
-    sourceInSec: 2,
-    sourceOutSec: 6,
-    hasAudio: true,
-    ...over
-  })
-  const basis = (segments: ConcatSegment[], withOverlayLabel = '2') => ({
-    segments,
-    spanStartSec: 0,
-    spanEndSec: 10,
-    overlayLabel: withOverlayLabel,
-    outputPath: 'D:/out/comp.mp4',
-    fps: FPS_30,
-    frameSize: { width: 1920, height: 1080 },
-    audioMode: 'aac' as const,
-    fpsMode: 'cfr' as const
-  })
-
   it('两段拼接：逐段 trim + 平移，concat=n=2，透明层取最后一路输入', () => {
     const fc = buildMediaBasisFilterComplex(
       basis([seg(), seg({ refVideoPath: 'D:/media/b.mp4', timelineStartSec: 4, timelineEndSec: 8, sourceInSec: 0, sourceOutSec: 4 })])
@@ -305,3 +315,322 @@ describe('v2 缩略图与多输入 trim+concat argv', () => {
     expect(pngArgs).toContain('image2pipe')
   })
 })
+
+describe('防抖（v8：vidstab 两段式）', () => {
+  const stabOf = (over: Partial<MediaClipStab> = {}): MediaClipStab => ({
+    ...defaultMediaStab(),
+    enabled: true,
+    ...over
+  })
+
+  /** 共用前缀：trim → 归零 → fps（FPS_30 的 fpsToArg = 30/1）；
+   *  detect 与合成段链必须逐字一致（.trf 按帧序号索引） */
+  const TRIM_PREFIX = 'trim=start=2.000000:end=6.000000,setpts=PTS-STARTPTS,fps=30/1'
+
+  it('零差异锁定：段不带 stabFile 时滤镜图不出现 vidstabtransform', () => {
+    // 只带 stab 参数但没分配 .trf（主进程未跑 detect）也不能注入
+    const fc = buildMediaBasisFilterComplex(basis([seg({ stab: stabOf() })]))
+    expect(fc).not.toContain('vidstabtransform')
+    // 与不带 stab 的基线逐字节一致
+    expect(fc).toBe(buildMediaBasisFilterComplex(basis([seg()])))
+  })
+
+  it('buildStabDetectArgs：与合成段链同帧序列前缀 + result 相对名 + 只解码不编码', () => {
+    const args = buildStabDetectArgs({
+      inputPath: 'D:/media/a.mp4',
+      sourceInSec: 2,
+      sourceOutSec: 6,
+      fps: FPS_30,
+      stab: stabOf({ level: 'high' }),
+      resultFile: 'stab_0.trf'
+    })
+    const vf = args[args.indexOf('-vf') + 1] ?? ''
+    expect(vf.startsWith(TRIM_PREFIX)).toBe(true)
+    expect(vf).toContain('vidstabdetect')
+    expect(vf).toContain('result=stab_0.trf')
+    // 画幅口径之外的检测参数：high 档 shakiness=8/accuracy=15
+    expect(vf).toContain('shakiness=8')
+    expect(vf).toContain('accuracy=15')
+    expect(args).toContain('-an')
+    expect(args[args.indexOf('-f') + 1]).toBe('null')
+    expect(args.at(-1)).toBe('-')
+    // 进度管道保留：预分析也要给 UI out_time_us（调用方必须消费 stdout）
+    expect(args).toContain('-progress')
+  })
+
+  it('三脚架（v8.2）：detect 不写绝对参考帧；transform 走静态超长平滑，绝不再写 vidstab tripod=1', () => {
+    const detect = buildStabDetectArgs({
+      inputPath: 'D:/media/a.mp4',
+      sourceInSec: 2,
+      sourceOutSec: 6,
+      fps: FPS_30,
+      stab: stabOf({ tripod: true }),
+      resultFile: 'stab_0.trf'
+    })
+    const dvf = detect[detect.indexOf('-vf') + 1] ?? ''
+    // detect 恒相对：写绝对参考帧会与 transform relative=1 口径冲突
+    expect(dvf).not.toContain('tripod')
+    const fc = buildMediaBasisFilterComplex(basis([seg({ stab: stabOf({ tripod: true }), stabFile: 'stab_0.trf' })]))
+    // 真机实证：vidstabtransform tripod=1 = relative=0:smoothing=0，实拍平移上会放大高频抖动→绝不能用
+    expect(fc).not.toContain('tripod=1')
+    expect(fc).toContain('smoothing=120')
+    expect(fc).toContain('optalgo=gauss')
+    expect(fc).toContain('optzoom=1')
+    expect(fc).toContain('zoom=6')
+    expect(fc).toContain('crop=keep')
+    // 静态模式不写动态变倍速度（避免逐帧变倍脉动）
+    expect(fc).not.toContain('zoomspeed')
+  })
+
+  it('transform 注入位置：fps 之后、setsar 之前；画幅口径 optzoom=2 + crop=keep + bicubic', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis([seg({ stab: stabOf({ level: 'standard' }), stabFile: 'stab_0.trf' })])
+    )
+    // v8 实现：滤镜名与首个选项用 = 连接（真机实证 `vidstabtransform:input=` 报 No option name）；
+    // 只断言「紧跟在 trim 链之后」，不绑定 fps 的写法（fps=30 vs 30/1 两种都能对）
+    expect(fc).toContain(',vidstabtransform=input=stab_0.trf')
+    const chain = fc.split(';')[0]!
+    const at = chain.indexOf('vidstabtransform')
+    expect(chain.indexOf('fps=30')).toBeLessThan(at)
+    expect(chain.indexOf('setsar=1')).toBeGreaterThan(at)
+    expect(chain).toContain('smoothing=15')
+    expect(chain).toContain('optalgo=opt')
+    expect(chain).toContain('optzoom=2')
+    expect(chain).toContain('zoomspeed=0.25')
+    expect(chain).toContain('interpol=bicubic')
+    expect(chain).toContain('crop=keep')
+    // 音频链不受影响：atrim 口径与基线一致
+    expect(fc).toContain('[0:a]atrim=start=2.000000:end=6.000000')
+  })
+
+  it('stabSegmentKey：同源同区间同档位同键；路径/区间/档位/三脚架任一不同则不同键', () => {
+    const a = seg({ stab: stabOf() })
+    expect(stabSegmentKey(a, FPS_30)).toBe(stabSegmentKey(seg({ stab: stabOf() }), FPS_30))
+    expect(stabSegmentKey(a, FPS_30)).not.toBe(stabSegmentKey(seg({ stab: stabOf({ level: 'high' }) }), FPS_30))
+    expect(stabSegmentKey(a, FPS_30)).not.toBe(stabSegmentKey(seg({ stab: stabOf({ tripod: true }) }), FPS_30))
+    expect(stabSegmentKey(a, FPS_30)).not.toBe(stabSegmentKey(seg({ stab: stabOf(), sourceOutSec: 8 }), FPS_30))
+    expect(stabSegmentKey(a, FPS_30)).not.toBe(stabSegmentKey(seg({ stab: stabOf(), refVideoPath: 'D:/media/b.mp4' }), FPS_30))
+    // 帧率也是键的一部分：不同 fps 重采样后的帧序列不同，.trf 不可复用
+    expect(stabSegmentKey(a, FPS_30)).not.toBe(stabSegmentKey(a, FPS_29_97))
+  })
+
+  it('segmentWantsStab：开关打开且分到 .trf 才算防抖段', () => {
+    expect(segmentWantsStab(seg({ stab: stabOf(), stabFile: 'stab_0.trf' }))).toBe(true)
+    expect(segmentWantsStab(seg({ stab: stabOf() }))).toBe(false)
+    expect(segmentWantsStab(seg({ stab: { ...defaultMediaStab() }, stabFile: 'stab_0.trf' }))).toBe(false)
+    expect(segmentWantsStab(seg())).toBe(false)
+  })
+
+  /**
+   * v8.1 预览代理：与导出合成段链同一 transform 串、同一 trim+fps 前缀（.trf 帧序号才对得上），
+   * 但交付坐标是源区间 1:1（不带时间轴平移），速度优先（veryfast/crf20）。
+   */
+  it('buildStabPreviewArgs：同前缀同 transform 串 + 带声时 -af atrim 裁到源区间', () => {
+    const args = buildStabPreviewArgs({
+      inputPath: 'D:/media/a.mp4',
+      sourceInSec: 2,
+      sourceOutSec: 6,
+      fps: FPS_30,
+      stab: stabOf({ level: 'high' }),
+      stabFile: 'stab_clip.trf',
+      hasAudio: true,
+      outputPath: 'C:/userData/stab-preview/stab_clip.mp4'
+    })
+    const vf = args[args.indexOf('-vf') + 1] ?? ''
+    expect(vf.startsWith(TRIM_PREFIX)).toBe(true)
+    // 与导出合成段链同一滤镜串（vidstabtransform 名与首选项 = 连接，真机实证）
+    expect(vf).toContain(',vidstabtransform=input=stab_clip.trf')
+    expect(vf).toContain('smoothing=30')
+    expect(vf).toContain('zoomspeed=0.4')
+    expect(vf).toContain('optzoom=2')
+    expect(vf).toContain('crop=keep')
+    expect(vf).toContain(',setsar=1,format=yuv420p')
+    // 音频：-vf 只动视频，音轨必须同样裁到源区间，否则代理比画面长一整条原音轨
+    const af = args[args.indexOf('-af') + 1] ?? ''
+    expect(af).toContain('atrim=start=2.000000:end=6.000000')
+    expect(af).toContain('asetpts=PTS-STARTPTS')
+    expect(args).toContain('aac')
+    expect(args).not.toContain('-an')
+    // 预览代理要的是尽快可播，不是归档画质
+    expect(args[args.indexOf('-preset') + 1]).toBe('veryfast')
+    expect(args[args.indexOf('-crf') + 1]).toBe('20')
+    expect(args).toContain('+faststart')
+    expect(args.at(-1)).toBe('C:/userData/stab-preview/stab_clip.mp4')
+    // 进度管道保留：任务队列的百分比靠 out_time_us
+    expect(args).toContain('-progress')
+  })
+
+  it('buildStabPreviewArgs：无声时 -an，不带 -af/aac', () => {
+    const args = buildStabPreviewArgs({
+      inputPath: 'D:/media/a.mp4',
+      sourceInSec: 0,
+      sourceOutSec: 3,
+      fps: FPS_30,
+      stab: stabOf(),
+      stabFile: 's.trf',
+      hasAudio: false,
+      outputPath: 'C:/x/s.mp4'
+    })
+    expect(args).toContain('-an')
+    expect(args).not.toContain('-af')
+    expect(args).not.toContain('aac')
+  })
+})
+
+/**
+ * v9 片段音频与变速的 argv（面板上的每个滑杆都必须在这里落到滤镜串）。
+ *
+ * 锁四件事：
+ * 1. **不带 audio/speed 键时段链逐字节不变**——旧工程导出不许变；
+ * 2. 画面变速 `setpts=(PTS-STARTPTS)/s` 挂在 `fps=` **之后**（.trf 帧序号才不错位）；
+ * 3. 音频链顺序变速 → 音量 → 淡入 → 淡出，淡变秒数用**变速后**的本段输出长度；
+ * 4. 频谱取样的 argv 绝不带 `-progress`（进度键值对会污染 stdout 的 PCM）。
+ */
+describe('v9 片段音频与变速 argv', () => {
+  const audioOf = (over: Partial<ClipAudio> = {}): ClipAudio => ({ volumePercent: 100, fadeInSec: 0, fadeOutSec: 0, ...over })
+  const speedOf = (value: number, maintainPitch = true): ClipSpeed => ({ speed: value, maintainPitch })
+  const stabOn = (): MediaClipStab => ({ ...defaultMediaStab(), enabled: true })
+
+  /** 取 filter_complex 里以某串开头的那一句链（不先把整个图拆开看容易误判） */
+  const chainOf = (fc: string, prefix: string): string =>
+    fc.split(';').find((statement) => statement.startsWith(prefix)) ?? ''
+
+  it('不带 audio/speed 键：段链与基线逐字节一致', () => {
+    const fc = buildMediaBasisFilterComplex(basis([seg()]))
+    expect(chainOf(fc, '[0:v]')).toBe(
+      '[0:v]trim=start=2.000000:end=6.000000,setpts=PTS-STARTPTS,fps=30/1,setsar=1,format=yuv420p[pres0]'
+    )
+    expect(fc).not.toContain('atempo')
+    expect(fc).not.toContain('asetrate')
+    expect(fc).not.toContain('volume=')
+    expect(fc).not.toContain('afade')
+    expect(fc).not.toContain('setpts=(PTS-STARTPTS)/')
+  })
+
+  it('默认值的 audio/speed 不落盘：传了也与基线一致', () => {
+    expect(buildMediaBasisFilterComplex(basis([seg({ audio: audioOf(), speed: speedOf(1) })]))).toBe(
+      buildMediaBasisFilterComplex(basis([seg()]))
+    )
+  })
+
+  it('画面：变速挂在 fps 重采样之后、setsar 之前', () => {
+    const fc = buildMediaBasisFilterComplex(basis([seg({ speed: speedOf(2) })]))
+    const chain = chainOf(fc, '[0:v]')
+    expect(chain).toContain(',setpts=(PTS-STARTPTS)/2,setsar=1,format=yuv420p[pres0]')
+    expect(chain.indexOf('fps=30/1')).toBeLessThan(chain.indexOf('setpts=(PTS-STARTPTS)/2'))
+    // 源窗口不变：trim 仍按原入出点切
+    expect(chain).toContain('trim=start=2.000000:end=6.000000')
+  })
+
+  it('画面：防抖 + 变速同时存在时，transform 在前、变速在后', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis([seg({ stab: stabOn(), stabFile: 'stab_0.trf', speed: speedOf(2.5) })])
+    )
+    const chain = chainOf(fc, '[0:v]')
+    expect(chain.indexOf('vidstabtransform')).toBeLessThan(chain.indexOf('setpts=(PTS-STARTPTS)/2.5'))
+    expect(chain.indexOf('fps=30/1')).toBeLessThan(chain.indexOf('vidstabtransform'))
+  })
+
+  it('音频：变速 → 音量 → 淡入 → 淡出，淡变秒数按变速后的本段输出长度', () => {
+    // 源窗口 4s / 2x = 输出 2s；淡入 1s、淡出 1s 正好各占半段
+    const fc = buildMediaBasisFilterComplex(
+      basis([
+        seg({
+          audio: audioOf({ volumePercent: 150, fadeInSec: 1, fadeOutSec: 1 }),
+          speed: speedOf(2)
+        })
+      ])
+    )
+    expect(chainOf(fc, '[0:a]')).toBe(
+      '[0:a]atrim=start=2.000000:end=6.000000,asetpts=PTS-STARTPTS,atempo=2,volume=1.5,' +
+        'afade=t=in:st=0:d=1,afade=t=out:st=1:d=1,aresample=async=1:first_pts=0[preas0]'
+    )
+  })
+
+  it('音频：关掉保持音高就走 asetrate（音高随倍速升降）', () => {
+    const fc = buildMediaBasisFilterComplex(basis([seg({ speed: speedOf(2, false) })]))
+    const chain = chainOf(fc, '[0:a]')
+    expect(chain).not.toContain('atempo')
+    expect(chain).toContain('asetrate=96000')
+    expect(chain).toContain('aresample=48000')
+  })
+
+  it('音频：0.25x 串两个 atempo（单实例只吃 0.5..2）', () => {
+    const fc = buildMediaBasisFilterComplex(basis([seg({ speed: speedOf(0.25) })]))
+    expect(chainOf(fc, '[0:a]')).toContain('atempo=0.5,atempo=0.5')
+  })
+
+  it('无音轨段补的静音长度用时间轴长度（变速后仍然对得上 concat）', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis([seg({ hasAudio: false, timelineEndSec: 2, sourceInSec: 0, sourceOutSec: 4, speed: speedOf(2) })])
+    )
+    expect(fc).toContain('anullsrc=channel_layout=stereo:sample_rate=48000[ns0]')
+    expect(fc).toContain('[ns0]atrim=duration=2.000000')
+  })
+
+  it('图像段 -loop 1 -t 用源窗口长度（变速前的长度）', () => {
+    const args = buildOverlayMp4MultiInput({
+      ...basis([seg({ isImage: true, sourceInSec: 0, sourceOutSec: 8, speed: speedOf(2) })], '1'),
+      overlayPath: 'C:/tmp/o.mov'
+    })
+    const joined = args.join(' ')
+    expect(joined).toContain('-loop 1 -t 8.000000 -i D:/media/a.mp4')
+  })
+
+  it('频谱取样 argv：-ss/-t 在 -i 前、只留声轨、单声道 s16le 到 stdout，绝不带 -progress', () => {
+    const request: AudioPeaksArgsInput = {
+      inputPath: 'C:/media/a.mp4',
+      sourceInSec: 2,
+      sourceOutSec: 8,
+      sampleRate: 2000
+    }
+    const args = buildAudioPeaksArgs(request)
+    const joined = args.join(' ')
+    expect(args.slice(0, 7)).toEqual(['-hide_banner', '-loglevel', 'error', '-ss', '2.000000', '-t', '6.000000'])
+    expect(args[7]).toBe('-i')
+    expect(joined).not.toContain('-progress')
+    expect(joined).toContain('-vn -sn -dn -ac 1 -ar 2000 -f s16le pipe:1')
+    // 极短区间也给得到至少一帧，不会算出 -t 0
+    expect(buildAudioPeaksArgs({ ...request, sourceOutSec: 2.001 })).toContain('0.040000')
+  })
+})
+
+/**
+ * 单/多输入拓扑判定（从主进程里提上来锁住）。
+ *
+ * 这条判定决定「参数会不会落进滤镜链」：需要逐段插入点的参数一旦走到
+ * 旧单输入链，就会被默默吞掉（预览看得到、导出听不到）。
+ */
+describe('segmentsNeedMultiInput（导出拓扑判定）', () => {
+  /** 「整段从头覆盖」的单段：只有这种形状才允许回到旧单输入链 */
+  const whole = (over: Partial<ConcatSegment> = {}): ConcatSegment =>
+    seg({ timelineStartSec: 0, timelineEndSec: 10, sourceInSec: 0, sourceOutSec: 10, ...over })
+
+  it('空轨与「整段从头覆盖」的单段：走旧单输入（argv 零差异）', () => {
+    expect(segmentsNeedMultiInput(undefined)).toBe(false)
+    expect(segmentsNeedMultiInput([])).toBe(false)
+    expect(segmentsNeedMultiInput([whole()])).toBe(false)
+  })
+
+  it('剪裁/不在 0 起点/多段：走 trim+concat', () => {
+    expect(segmentsNeedMultiInput([seg({ sourceInSec: 1 })])).toBe(true)
+    expect(segmentsNeedMultiInput([seg({ timelineStartSec: 2 })])).toBe(true)
+    expect(segmentsNeedMultiInput([seg({ timelineEndSec: 3 }), seg({ timelineStartSec: 3 })])).toBe(true)
+  })
+
+  it('v8：开启防抖必须走 trim 链才能注入 transform', () => {
+    expect(segmentsNeedMultiInput([whole({ stab: { ...defaultMediaStab(), enabled: true } })])).toBe(true)
+    // 没开防抖不影响拓扑
+    expect(segmentsNeedMultiInput([whole({ stab: { ...defaultMediaStab(), enabled: false } })])).toBe(false)
+  })
+
+  it('v9：带 audio/speed 的单段也必须走 trim 链，否则参数会被吞掉', () => {
+    expect(segmentsNeedMultiInput([whole({ audio: { volumePercent: 150, fadeInSec: 0, fadeOutSec: 0 } })])).toBe(true)
+    expect(segmentsNeedMultiInput([whole({ speed: { speed: 2, maintainPitch: true } })])).toBe(true)
+    // 不改时长的写法（只关音高保持）同样要算：单看旧时长恒等式分支看不出来
+    expect(segmentsNeedMultiInput([whole({ speed: { speed: 1, maintainPitch: false } })])).toBe(true)
+    // 而「没写过这些键」依旧走单输入（旧 argv 逐字节不变）
+    expect(segmentsNeedMultiInput([whole({ audio: undefined, speed: undefined })])).toBe(false)
+  })
+})
+

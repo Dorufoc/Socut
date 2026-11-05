@@ -90,6 +90,15 @@ export const TEXT = {
     splitHint: '在播放头处拆分（Ctrl+B）',
     removeMediaClip: '删除媒体段',
     emptyMedia: '空轨：从素材库拖入',
+    /** v7：音频轨 */
+    audioLane: '音频',
+    emptyAudio: '空轨：从素材库拖入音频',
+    removeAudioClip: '删除音频段',
+    /** v7：叠层 */
+    layerUp: '上移层',
+    layerDown: '下移层',
+    layerUpHint: '把选中片段叠到上一层（上层盖住下层）',
+    layerDownHint: '把选中片段落到下一层',
     inPoint: '入点',
     outPoint: '出点',
     duration: '时长',
@@ -150,7 +159,72 @@ export const TEXT = {
     interact: '交互',
     interactHint: '在预览里拖角缩放、拖画面平移、拖顶部圆点旋转',
     reset: '恢复默认',
-    resetHint: '本条片段的画面参数全部回到默认值'
+    resetHint: '本条片段的画面、音频与变速参数全部回到默认值'
+  },
+
+  /** v9：片段音频（媒体段原声与音频段共用一套控件） */
+  clipAudio: {
+    title: '音频',
+    volume: '音量',
+    fadeIn: '渐入',
+    fadeOut: '渐出',
+    volumeHint: '0%~200%，100% 为原始音量（导出侧 volume 滤镜同一增益）',
+    fadeInHint: '从静音升到正常音量所需时间（导出侧 afade=t=in）',
+    fadeOutHint: '从正常音量降到静音所需时间（导出侧 afade=t=out）'
+  },
+
+  /** v9：片段变速 */
+  clipSpeed: {
+    title: '变速',
+    rate: '倍速',
+    maintainPitch: '变速保持音高',
+    on: '保持音高',
+    off: '连动音高',
+    rateHint: '源内容不变，片段在时间轴上按倍速伸缩',
+    maintainPitchHint: '开启：只变时长（atempo）；关闭：音高随倍速升降（asetrate）'
+  },
+
+  /** v9：音频片段编辑器（与视频编辑器同一套分区，只是没有画面参数） */
+  audioEditor: {
+    title: '音频片段',
+    edited: '已编辑',
+    noneSelected: '未选择音频片段',
+    missingMedia: '素材已移出',
+    reset: '恢复默认',
+    resetHint: '本条音频的音量、渐变与变速全部回到默认值'
+  },
+
+  /** v8：时间轴片段级视频防抖（ffmpeg vidstab 两段式；导出逐段生效，预览经「应用防抖预览」代理） */
+  stab: {
+    title: '防抖稳定',
+    on: '防抖',
+    off: '已关闭',
+    hint: '导出时逐段预分析并补偿镜头抖动；预览需点「应用防抖预览」生成稳定化代理',
+    levelLabel: '强度',
+    levelLow: '轻度',
+    levelStandard: '标准',
+    levelHigh: '强',
+    levelHint: '越强的抖动用越高的搜索精度，预分析也越慢',
+    tripod: '虚拟三脚架',
+    tripodHint: '用超长窗口平滑把相机轨迹钉成一条直线，模拟三脚架锁定；对持续平移的机位比常规档拉得更紧',
+    analyzeNotice: (done: number, total: number) => `防抖预分析：第 ${done}/${total} 段`,
+    exportNote: '含防抖片段：基座逐段重编码，音频转为 AAC 192k。',
+    /** v8.1：预览代理（Inspector 应用按钮 + 主进程后台作业） */
+    previewApply: '应用防抖预览',
+    previewApplying: '正在生成防抖代理…',
+    previewQueued: '已排队，等待生成…',
+    previewApplied: '防抖代理已就绪',
+    previewStale: '参数已改动，需重新应用',
+    previewReapply: '重新应用防抖预览',
+    previewCancel: '取消生成',
+    previewDetect: '运动检测',
+    previewTranscode: '代理转码',
+    previewCancelled: '防抖预览生成已取消',
+    applyDisabled: '未开启防抖，无需生成预览代理',
+    applyBadRange: '片段区间无效，无法生成防抖代理',
+    sourceMissing: (p: string) => `源文件不存在或不可读：${p}`,
+    detectFailed: '运动检测未生成有效的分析数据，请重试',
+    proxyEmpty: (p: string) => `防抖代理产物为空：${p}`
   },
 
   // 检查器
@@ -222,7 +296,7 @@ export const TEXT = {
     saveAs: '另存为',
     autosaved: '已自动保存',
     autosaveFailed: '自动保存失败',
-    restoreAutosave: '检测到上次未保存的工程，是否恢复？',
+    restoredAutosave: '已自动恢复上次编辑的进度',
     refVideoMissing: '参考视频文件不存在或已被移动，请重新定位。',
     newProject: '新建工程'
   },

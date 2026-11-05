@@ -418,6 +418,39 @@ describe('媒体段画面编辑与检查器分流', () => {
     expect(mediaClipOf(second).video?.contrast).toBe(40)
   })
 
+  it('v8：updateMediaClipStab 增量合并；回到全默认时整键删除', () => {
+    const id = seedMediaClip()
+    useProjectStore.getState().updateMediaClipStab(id, { enabled: true })
+    expect(mediaClipOf(id).stab).toEqual({ enabled: true, level: 'standard', tripod: false })
+
+    // 增量：改档位不丢开关
+    useProjectStore.getState().updateMediaClipStab(id, { level: 'high' })
+    expect(mediaClipOf(id).stab).toEqual({ enabled: true, level: 'high', tripod: false })
+
+    // 关掉开关但留着非默认档位 → 键仍落盘（与 video 的逐项默认纪律一致）
+    useProjectStore.getState().updateMediaClipStab(id, { enabled: false })
+    expect(mediaClipOf(id).stab).toEqual({ enabled: false, level: 'high', tripod: false })
+
+    // 拉回标准档 → 全默认，整键消失
+    useProjectStore.getState().updateMediaClipStab(id, { level: 'standard' })
+    expect(mediaClipOf(id).stab).toBeUndefined()
+  })
+
+  it('v8：resetMediaClipVideo 连防抖一起清，不牵连其他段', () => {
+    const first = seedMediaClip()
+    const store = useProjectStore.getState()
+    const second = store.insertMediaClip({ mediaId: store.project.media[0]!.id, timelineStartSec: 20 })!.id
+    useProjectStore.getState().updateMediaClipVideo(first, { scalePercent: 130 })
+    useProjectStore.getState().updateMediaClipStab(first, { enabled: true, level: 'low' })
+    useProjectStore.getState().updateMediaClipStab(second, { enabled: true })
+
+    useProjectStore.getState().resetMediaClipVideo(first)
+
+    expect(mediaClipOf(first).video).toBeUndefined()
+    expect(mediaClipOf(first).stab).toBeUndefined()
+    expect(mediaClipOf(second).stab).toEqual({ enabled: true, level: 'standard', tripod: false })
+  })
+
   it('删掉正在编辑的最后一条媒体段 → 检查器退回字幕编辑器', () => {
     const id = seedMediaClip()
     useProjectStore.getState().selectMediaClip(id)
@@ -427,5 +460,135 @@ describe('媒体段画面编辑与检查器分流', () => {
 
     expect(useProjectStore.getState().selectedMediaClipId).toBeNull()
     expect(useProjectStore.getState().selectionKind).toBe('subtitle')
+  })
+})
+
+/**
+ * v9：片段音频与变速的 store 口径。
+ *
+ * 除「增量合并 + 回默认删键」，最关键的是**变速时源窗口不动、时间轴伸缩**，
+ * 以及「恢复默认」必须连音频与变速一起清掉（否则预览与导出会分叉）。
+ */
+describe('v9 片段音频与变速动作', () => {
+  function seedMedia(): string {
+    freshProject()
+    const store = useProjectStore.getState()
+    return store.addMedia(seedItem())
+  }
+  const mediaClipOf = (id: string) => useProjectStore.getState().project.mediaClips.find((clip) => clip.id === id)!
+  const audioClipOf = (id: string) => useProjectStore.getState().project.audioClips!.find((clip) => clip.id === id)!
+
+  /** 夹具：素材长 10s，默认整段入轨 → 时间轴 0→10、源 0→10 */
+  function seedClipAt0(): string {
+    const mediaId = seedMedia()
+    return useProjectStore.getState().insertMediaClip({ mediaId, timelineStartSec: 0 })!.id
+  }
+  function seedAudioAt0(): string {
+    const mediaId = seedMedia()
+    return useProjectStore.getState().insertAudioClip({ mediaId, timelineStartSec: 0 })!.id
+  }
+
+  it('updateMediaClipAudio 增量合并；回到全默认整键删除', () => {
+    const id = seedClipAt0()
+    useProjectStore.getState().updateMediaClipAudio(id, { volumePercent: 140 })
+    expect(mediaClipOf(id).audio).toEqual({ volumePercent: 140, fadeInSec: 0, fadeOutSec: 0 })
+    useProjectStore.getState().updateMediaClipAudio(id, { fadeInSec: 1.5 })
+    expect(mediaClipOf(id).audio).toEqual({ volumePercent: 140, fadeInSec: 1.5, fadeOutSec: 0 })
+    useProjectStore.getState().updateMediaClipAudio(id, { volumePercent: 100, fadeInSec: 0 })
+    expect('audio' in mediaClipOf(id)).toBe(false)
+  })
+
+  it('越界值写入时就夹好（面板上拖到头也不会落脏数据）', () => {
+    const id = seedClipAt0()
+    useProjectStore.getState().updateMediaClipAudio(id, { volumePercent: 900, fadeOutSec: -2 })
+    expect(mediaClipOf(id).audio).toEqual({ volumePercent: 200, fadeInSec: 0, fadeOutSec: 0 })
+  })
+
+  it('updateMediaClipSpeed：源窗口不动，时间轴出点按倍速伸缩', () => {
+    const id = seedClipAt0()
+    useProjectStore.getState().updateMediaClipSpeed(id, { speed: 2 })
+    const fast = mediaClipOf(id)
+    expect(fast.timelineStartSec).toBe(0)
+    expect(fast.timelineEndSec).toBeCloseTo(5, 6)
+    expect(fast.sourceInSec).toBe(0)
+    expect(fast.sourceOutSec).toBe(10)
+    expect(fast.speed).toEqual({ speed: 2, maintainPitch: true })
+
+    useProjectStore.getState().updateMediaClipSpeed(id, { speed: 4 })
+    expect(mediaClipOf(id).timelineEndSec).toBeCloseTo(2.5, 6)
+
+    // 回到 1x：时间轴回到源窗口长度，整键消失
+    useProjectStore.getState().updateMediaClipSpeed(id, { speed: 1 })
+    expect(mediaClipOf(id).timelineEndSec).toBeCloseTo(10, 6)
+    expect('speed' in mediaClipOf(id)).toBe(false)
+  })
+
+  it('只改音高开关不改时长，但 speed 键仍落盘', () => {
+    const id = seedClipAt0()
+    useProjectStore.getState().updateMediaClipSpeed(id, { maintainPitch: false })
+    expect(mediaClipOf(id).timelineEndSec).toBeCloseTo(10, 6)
+    expect(mediaClipOf(id).speed).toEqual({ speed: 1, maintainPitch: false })
+  })
+
+  it('变速不推挤其他段，也不改它们的参数', () => {
+    const first = seedClipAt0()
+    const mediaId = useProjectStore.getState().project.media[0]!.id
+    const second = useProjectStore.getState().insertMediaClip({ mediaId, timelineStartSec: 0 })!.id
+    useProjectStore.getState().updateMediaClipSpeed(first, { speed: 2 })
+    expect(mediaClipOf(second).timelineEndSec).toBeCloseTo(10, 6)
+    expect(mediaClipOf(second).speed).toBeUndefined()
+  })
+
+  it('变速后再拖边：恒等式仍成立（源位移 = 时间轴位移 × 倍速）', () => {
+    const id = seedClipAt0()
+    useProjectStore.getState().updateMediaClipSpeed(id, { speed: 2 })
+    useProjectStore.getState().trimMediaClip(id, { timelineStartSec: 1 })
+    const trimmed = mediaClipOf(id)
+    expect(trimmed.sourceInSec).toBeCloseTo(2, 6)
+    expect(trimmed.sourceOutSec - trimmed.sourceInSec).toBeCloseTo(
+      (trimmed.timelineEndSec - trimmed.timelineStartSec) * 2,
+      6
+    )
+  })
+
+  it('resetMediaClipVideo 连音频与变速一起清，时间轴回到源窗口长度', () => {
+    const id = seedClipAt0()
+    useProjectStore.getState().updateMediaClipVideo(id, { scalePercent: 130 })
+    useProjectStore.getState().updateMediaClipAudio(id, { volumePercent: 60 })
+    useProjectStore.getState().updateMediaClipSpeed(id, { speed: 2 })
+
+    useProjectStore.getState().resetMediaClipVideo(id)
+
+    const cleared = mediaClipOf(id)
+    expect(cleared.video).toBeUndefined()
+    expect(cleared.audio).toBeUndefined()
+    expect(cleared.speed).toBeUndefined()
+    expect(cleared.timelineEndSec).toBeCloseTo(10, 6)
+  })
+
+  it('选中音频段把检查器切到 audio；删掉后退回 subtitle', () => {
+    const id = seedAudioAt0()
+    useProjectStore.getState().selectAudioClip(id)
+    expect(useProjectStore.getState().selectionKind).toBe('audio')
+
+    useProjectStore.getState().removeAudioClip(id)
+    expect(useProjectStore.getState().selectedAudioClipId).toBeNull()
+    expect(useProjectStore.getState().selectionKind).toBe('subtitle')
+  })
+
+  it('音频段同样一套：音量落盘/删键、倍速伸缩、恢复默认', () => {
+    const id = seedAudioAt0()
+    useProjectStore.getState().updateAudioClipAudio(id, { volumePercent: 150, fadeInSec: 2 })
+    expect(audioClipOf(id).audio).toEqual({ volumePercent: 150, fadeInSec: 2, fadeOutSec: 0 })
+
+    useProjectStore.getState().updateAudioClipSpeed(id, { speed: 2 })
+    expect(audioClipOf(id).timelineEndSec).toBeCloseTo(5, 6)
+    expect(audioClipOf(id).sourceOutSec).toBe(10)
+
+    useProjectStore.getState().resetAudioClipFx(id)
+    const cleared = audioClipOf(id)
+    expect('audio' in cleared).toBe(false)
+    expect('speed' in cleared).toBe(false)
+    expect(cleared.timelineEndSec).toBeCloseTo(10, 6)
   })
 })

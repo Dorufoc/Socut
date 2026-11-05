@@ -1,6 +1,9 @@
 import { WATERMARK_BASE_RESOLUTION, WATERMARK_DISPLAY_SCALE, WATERMARK_MARGIN_PX } from './constants'
 import { fpsToArg } from './fps'
-import type { ExportTarget, Fps, Resolution } from './types'
+import { stabDetectProfile, stabTransformProfile } from './mediaStab'
+import { clipAudioFilterChain, clipVideoSpeedFilter, speedValueOf } from './mediaClipAudio'
+import type { MediaClipStab } from './mediaStab'
+import type { ClipAudio, ClipSpeed, ExportTarget, Fps, Resolution } from './types'
 
 /**
  * FFmpeg 参数构造（纯函数，argv 快照测试锁定；规格 §5 + 计划 C1–C5 修正）。
@@ -64,7 +67,8 @@ export function buildTransparentMovFromSeq(
   fps: Fps,
   framePattern: string,
   outputPath: string,
-  startNumber = 0
+  startNumber = 0,
+  audio?: TransparentAudioOptions
 ): string[] {
   return [
     ...common({}),
@@ -75,7 +79,8 @@ export function buildTransparentMovFromSeq(
     '-i',
     framePattern,
     ...proresArgs(),
-    '-an',
+    // v7：有音频段就带音轨（多段 amix），否则保持原来的 `-an`
+    ...(buildTransparentAudioArgs(audio) ?? ['-an']),
     // 中间产物无需 faststart（计划 C5：moov 重定位会带来整文件重写）
     '-f',
     'mov',
@@ -132,13 +137,22 @@ export function buildTransparentMovFromPipe(
   fps: Fps,
   outputPath: string,
   frameFormat: 'raw' | 'png' = 'raw',
-  size?: { width: number; height: number }
+  size?: { width: number; height: number },
+  audio?: TransparentAudioOptions
 ): string[] {
   const input =
     frameFormat === 'raw'
       ? rawPipeInputArgs(fps, size?.width ?? 1920, size?.height ?? 1080)
       : pipeInputArgs(fps)
-  return [...common({}), ...input, ...proresArgs(), '-an', '-f', 'mov', outputPath]
+  return [
+    ...common({}),
+    ...input,
+    ...proresArgs(),
+    ...(buildTransparentAudioArgs(audio) ?? ['-an']),
+    '-f',
+    'mov',
+    outputPath
+  ]
 }
 
 /** 素材卡片缩略图：-ss 放在 -i 前做关键帧快定位，尾部缩到 320 宽（高度按比例取偶数）供 <img> 显示。 */
@@ -212,6 +226,51 @@ export function buildStripArgs(input: StripArgsInput): string[] {
     '-q:v',
     '6',
     input.outputPath
+  ]
+}
+
+// ---------------------------------------------------------------------------
+// 频谱条（v9）：把片段的源区间解成单声道 PCM 从 stdout 交回，柱高由渲染层折算
+// ---------------------------------------------------------------------------
+
+export interface AudioPeaksArgsInput {
+  inputPath: string
+  sourceInSec: number
+  sourceOutSec: number
+  /** 目标取样率（单声道 s16le；由 shared/audioPeaks 按区间长度与桶数选档） */
+  sampleRate: number
+}
+
+/**
+ * 频谱条取样：`-f s16le pipe:1` 把纯 PCM 写到 stdout。
+ *
+ * 三个必须不同的地方（与预览条/透明出口的 argv 对比）：
+ * - **绝不带 `-progress pipe:1`**：那会把进度键值对混进 PCM 字节流，取样结果直接变成噪声；
+ * - `-ss` / `-t` 放在 `-i` 之前：只为频谱服务，关键帧级定位就够，长音频不会拖慢时间轴；
+ * - `-ac 1 -ar <低取样率>`：柱子是等分时间桶的峰值，不需要立体声也不需要 48k。
+ */
+export function buildAudioPeaksArgs(input: AudioPeaksArgsInput): string[] {
+  const duration = Math.max(0.04, input.sourceOutSec - input.sourceInSec)
+  return [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-ss',
+    formatSec(Math.max(0, input.sourceInSec)),
+    '-t',
+    formatSec(duration),
+    '-i',
+    input.inputPath,
+    '-vn',
+    '-sn',
+    '-dn',
+    '-ac',
+    '1',
+    '-ar',
+    String(Math.max(1000, Math.round(input.sampleRate))),
+    '-f',
+    's16le',
+    'pipe:1'
   ]
 }
 
@@ -325,6 +384,200 @@ export interface ConcatSegment {
   sourceOutSec: number
   /** 本段有没有音轨；false 时用 anullsrc 补静音，保证 concat 两侧流结构一致 */
   hasAudio: boolean
+  /** v7：图像素材（需要 `-loop 1 -t` 才能撑成一段视频流） */
+  isImage?: boolean
+  /** v8：防抖参数（缺省/未启用 = 不防抖） */
+  stab?: MediaClipStab
+  /** v8：detect（pass 1）产出的运动数据文件名（相对任务工作目录，如 stab_0.trf）；由主进程分配 */
+  stabFile?: string
+  /** v9：该段原声的音量与渐入渐出（缺省 = 不动原声） */
+  audio?: ClipAudio
+  /** v9：该段变速（缺省 = 1x；视频走 `setpts`，音频走 `atempo`/`asetrate`） */
+  speed?: ClipSpeed
+}
+
+/** v8：该段本次导出是否需要防抖（开关打开且已分配到运动数据文件）。 */
+export function segmentWantsStab(seg: ConcatSegment): boolean {
+  return seg.stab?.enabled === true && typeof seg.stabFile === 'string' && seg.stabFile.length > 0
+}
+
+/** v8：detect 去重键：同一源文件、同一帧序列、同一档位只需分析一次。
+ *  主进程按本键分配 stabFile，同键段共享同一份 .trf。 */
+export function stabSegmentKey(
+  seg: Pick<ConcatSegment, 'refVideoPath' | 'sourceInSec' | 'sourceOutSec' | 'stab'>,
+  fps: Fps
+): string {
+  const stab = seg.stab
+  return [
+    seg.refVideoPath,
+    formatSec(seg.sourceInSec),
+    formatSec(seg.sourceOutSec),
+    fpsToArg(fps),
+    stab?.level ?? 'standard',
+    stab?.tripod === true ? 'tripod' : 'smooth'
+  ].join('|')
+}
+
+/** `segmentsNeedMultiInput` 只需看时间坐标与逐段开关，不要求调用方交整段。 */
+type MultiInputDecisionSegment = Pick<
+  ConcatSegment,
+  'timelineStartSec' | 'timelineEndSec' | 'sourceInSec' | 'sourceOutSec' | 'stab' | 'audio' | 'speed'
+>
+
+/**
+ * 是否走多输入 trim+concat 基座（v2 阶段 7）。
+ *
+ * 单段且时间轴/源都从头覆盖时回退旧单输入（argv 快照与旧行为零差异）；
+ * 否则逐段 trim 后 concat，段间空隙由滤镜链补黑+静音。
+ *
+ * v8/v9 的关键纪律：**任何需要「逐段插入点」的参数都必须走 trim 链**。
+ * 旧单输入链里没有 `vidstabtransform` / `atempo` / `volume` / `afade` / `setpts` 的位置，
+ * 不切过去参数就会被默默吞掉（预览与导出分叉）。
+ */
+export function segmentsNeedMultiInput(segments: MultiInputDecisionSegment[] | undefined): boolean {
+  if (!segments || segments.length === 0) return false
+  if (segments.length > 1) return true
+  // v8：任一防抖段必须走 trim 链才能注入 transform
+  if (segments.some((seg) => seg.stab?.enabled === true)) return true
+  // v9：音量/渐变/变速同上；`{speed:1,maintainPitch:false}` 这种不改时长的写法也要算
+  if (segments.some((seg) => seg.audio !== undefined || seg.speed !== undefined)) return true
+  const only = segments[0]
+  if (!only) return false
+  // 单段但被剪裁/不在 0 起点：时长恒等式下 timelineEndSec - timelineStartSec === sourceOutSec - sourceInSec，
+  // 任何一个坐标偏离「整段从头覆盖」都必须走 trim 路径
+  return (
+    only.sourceInSec > 1e-6 ||
+    only.timelineStartSec > 1e-6 ||
+    only.timelineEndSec - only.timelineStartSec !== only.sourceOutSec - only.sourceInSec ||
+    only.timelineEndSec < only.sourceOutSec - 1e-6
+  )
+}
+
+/**
+ * 段链公共前缀（v8）：trim → 归零 → 按目标帧率重采样。
+ * detect（pass 1）与合成段链必须共用本 helper：.trf 按帧序号索引，
+ * 两侧帧序列逐帧对齐是补偿不错位的硬前提。
+ */
+function segmentTrimFpsPrefix(sourceInSec: number, sourceOutSec: number, rate: string): string {
+  return `trim=start=${formatSec(sourceInSec)}:end=${formatSec(sourceOutSec)},setpts=PTS-STARTPTS,fps=${rate}`
+}
+
+/** v8：vidstabtransform 滤镜串（导出合成链与 v8.1 预览代理共用；诊断脚本也直接消费本函数，保证取证与生产逐字一致）。
+ *  文件名固定相对任务工作目录，无盘符冒号转义问题；
+ *  滤镜名与首个选项用 `=` 连接（真机实证：`vidstabtransform:input=` 报 No option name）。 */
+export function stabTransformFilter(stab: MediaClipStab, stabFile: string): string {
+  const p = stabTransformProfile(stab)
+  const zoom =
+    p.mode === 'tripod'
+      ? // 虚拟三脚架：静态最优缩放 + 固定内缩边距（无逐帧变倍脉动），绝不写 vidstab tripod 宏
+        [`optzoom=${p.optzoom}`, `zoom=${p.zoomMargin}`]
+      : // 常规：逐帧动态最优缩放 + zoomspeed（已真机验证能抑制抖动，非本次缺陷路径）
+        [`optzoom=${p.optzoom}`, `zoomspeed=${p.zoomspeed}`]
+  return [
+    `vidstabtransform=input=${stabFile}`,
+    `smoothing=${p.smoothing}`,
+    `optalgo=${p.optalgo}`,
+    ...zoom,
+    `interpol=${p.interpol}`,
+    `crop=${p.crop}`
+  ].join(':')
+}
+
+/** v8：vidstabdetect 滤镜串；tripod 参考帧号 >0 时才写（默认 0 = 关）。 */
+function stabDetectFilter(stab: MediaClipStab, resultFile: string): string {
+  const p = stabDetectProfile(stab)
+  return [
+    `vidstabdetect=shakiness=${p.shakiness}`,
+    `accuracy=${p.accuracy}`,
+    `result=${resultFile}`,
+    ...(p.tripod > 0 ? [`tripod=${p.tripod}`] : [])
+  ].join(':')
+}
+
+export interface StabDetectArgsInput {
+  inputPath: string
+  sourceInSec: number
+  sourceOutSec: number
+  fps: Fps
+  stab: MediaClipStab
+  /** 运动数据输出文件名（相对 ffmpeg 工作目录）；调用方需把 cwd 设为任务临时目录 */
+  resultFile: string
+}
+
+/**
+ * v8：防抖 pass 1（运动检测）：只解码不编码，`-f null` 丢弃像素，.trf 落到工作目录。
+ * 帧序列前缀与合成段链同源（segmentTrimFpsPrefix），保证帧序号逐帧对齐。
+ */
+export function buildStabDetectArgs(input: StabDetectArgsInput): string[] {
+  const prefix = segmentTrimFpsPrefix(input.sourceInSec, input.sourceOutSec, fpsToArg(input.fps))
+  return [
+    ...common({}),
+    '-i',
+    input.inputPath,
+    '-vf',
+    `${prefix},${stabDetectFilter(input.stab, input.resultFile)}`,
+    '-an',
+    '-f',
+    'null',
+    '-'
+  ]
+}
+
+export interface StabPreviewArgsInput {
+  inputPath: string
+  sourceInSec: number
+  sourceOutSec: number
+  fps: Fps
+  stab: MediaClipStab
+  /** 运动数据文件名（相对工作目录，detect 产物） */
+  stabFile: string
+  /** 是否携带该区间原声（预览代理要能出声） */
+  hasAudio: boolean
+  outputPath: string
+}
+
+/**
+ * v8.1：防抖预览代理的单进程转码（detect 产物已就绪后跑）：
+ * 与导出合成同一 transform 滤镜串与同一 trim+fps 前缀，交付坐标 = 源区间 1:1；
+ * 速度优先（veryfast + crf 20）——预览代理要的是尽快可播，不是归档画质。
+ */
+export function buildStabPreviewArgs(input: StabPreviewArgsInput): string[] {
+  const prefix = segmentTrimFpsPrefix(input.sourceInSec, input.sourceOutSec, fpsToArg(input.fps))
+  const args: string[] = [
+    ...common({}),
+    '-i',
+    input.inputPath,
+    '-vf',
+    `${prefix},${stabTransformFilter(input.stab, input.stabFile)},setsar=1,format=yuv420p`
+  ]
+  if (input.hasAudio) {
+    // -vf 只动视频；音频必须同样裁到源区间，否则代理会比画面长一整条原音轨
+    args.push(
+      '-af',
+      `atrim=start=${formatSec(input.sourceInSec)}:end=${formatSec(input.sourceOutSec)},asetpts=PTS-STARTPTS`,
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k'
+    )
+  } else {
+    args.push('-an')
+  }
+  args.push(
+    '-c:v',
+    'libx264',
+    '-crf',
+    '20',
+    '-preset',
+    'veryfast',
+    '-fps_mode',
+    'cfr',
+    ...BT709_TAGS,
+    '-movflags',
+    '+faststart',
+    input.outputPath
+  )
+  return args
 }
 
 export interface MediaBasisOverlayInput {
@@ -346,6 +599,119 @@ export interface MediaBasisOverlayInput {
   fpsMode: 'cfr' | 'vfr'
   /** 水印（可选）：作为紧接透明层之后的一路输入，合成在最后一层 */
   watermark?: WatermarkInput
+  /** v7：音频轨（可选）：全部追加在水印之后，与基座原声混在一起输出 */
+  audioClips?: AudioMixClip[]
+}
+
+/** v7：一条要混进成片的音频段（时间轴口径，秒） */
+export interface AudioMixClip {
+  path: string
+  timelineStartSec: number
+  timelineEndSec: number
+  sourceInSec: number
+  /** v9：源出点。变速时它比时间轴长度更长（缺省 = 按时间轴长度，argv 与旧版一致） */
+  sourceOutSec?: number
+  /** v9：音量与渐入渐出 */
+  audio?: ClipAudio
+  /** v9：变速 */
+  speed?: ClipSpeed
+}
+
+export interface AudioMixPlan {
+  /** 要在现有输入之后追加的 `-ss/-t/-i` 参数 */
+  inputArgs: string[]
+  /** 追加到 filter_complex 的语句（已用 `;` 连接，不带尾部 `;`） */
+  filter: string
+  /** 最终音频标签（调用方 `-map [label]`） */
+  label: string
+}
+
+/**
+ * 音频轨混音（v7）：把时间轴上的音频段各当成一路输入，按时间轴位置延迟后与基座原声 amix。
+ *
+ * 口径：
+ * - `-ss/-t` 放在 `-i` **之前**：只解码用得到的那一段，长音频不会拖慢导出；
+ * - `adelay=delays=…:all=1`：对单声道/立体声都成立（不依赖“声道数 = 延迟个数”）；
+ * - `normalize=0`：amix 默认会把每路除以路数，会把原声越混越小；关掉才是真正的混音；
+ * - 最后统一 `atrim=duration=<span>`：不管各路长短，输出恰好等于本次导出的时间窗。
+ *
+ * 没有音频段时返回 null——调用方保持原 argv 一字不改（旧工程导出行为不变）。
+ */
+export function buildAudioMixPlan(input: {
+  clips: AudioMixClip[]
+  /** 第一个音频输入的全局下标（前面已有多少路 `-i`） */
+  baseIndex: number
+  spanStartSec: number
+  spanEndSec: number
+  /** 基座原声标签（如 `[ab]`）；不传 = 只混这些音频段 */
+  baseLabel?: string
+}): AudioMixPlan | null {
+  if (input.clips.length === 0) return null
+  const spanLen = formatSec(Math.max(0.01, input.spanEndSec - input.spanStartSec))
+  const inputArgs: string[] = []
+  const statements: string[] = []
+  const labels: string[] = []
+
+  input.clips.forEach((clip, index) => {
+    const outLen = Math.max(0.01, clip.timelineEndSec - clip.timelineStartSec)
+    const speed = speedValueOf(clip.speed)
+    // 源窗口：变速时才是真的“读多少源”；不变速时等于输出长度（argv 与 v7 逐字节一致）
+    const sourceLen = Math.max(
+      0.01,
+      clip.sourceOutSec !== undefined ? clip.sourceOutSec - clip.sourceInSec : outLen * speed
+    )
+    const delayMs = Math.max(0, Math.round((clip.timelineStartSec - input.spanStartSec) * 1000))
+    inputArgs.push('-ss', formatSec(Math.max(0, clip.sourceInSec)), '-t', formatSec(sourceLen), '-i', clip.path)
+    const label = `ai${index}`
+    const fx = clipAudioFilterChain({ audio: clip.audio, speed: clip.speed, outputDurationSec: outLen })
+    statements.push(
+      `[${input.baseIndex + index}:a]atrim=duration=${formatSec(sourceLen)},asetpts=PTS-STARTPTS` +
+        `${fx.length > 0 ? `,${fx}` : ''},` +
+        `aresample=async=1:first_pts=0,adelay=delays=${delayMs}:all=1[${label}]`
+    )
+    labels.push(`[${label}]`)
+  })
+
+  const sources = input.baseLabel ? [input.baseLabel, ...labels] : labels
+  if (sources.length === 1) {
+    statements.push(`${sources[0]}atrim=duration=${spanLen},asetpts=PTS-STARTPTS[amix]`)
+  } else {
+    statements.push(
+      `${sources.join('')}amix=inputs=${sources.length}:duration=longest:dropout_transition=0:normalize=0[mx]`
+    )
+    statements.push(`[mx]atrim=duration=${spanLen},asetpts=PTS-STARTPTS[amix]`)
+  }
+  return { inputArgs, filter: statements.join(';'), label: 'amix' }
+}
+
+/** v7：透明出口的音频选项（帧流是 0 号输入，音频从 1 号开始） */
+export interface TransparentAudioOptions {
+  clips: AudioMixClip[]
+  spanStartSec: number
+  spanEndSec: number
+}
+
+/**
+ * 透明出口的音频参数：存在音频段时返回 argv 片段（输入 + filter_complex + map + 编码），
+ * 不存在时返回 null（调用方保持原 argv，包括 `-an`）。
+ */
+export function buildTransparentAudioArgs(audio: TransparentAudioOptions | undefined): string[] | null {
+  if (!audio || audio.clips.length === 0) return null
+  const plan = buildAudioMixPlan({ clips: audio.clips, baseIndex: 1, spanStartSec: audio.spanStartSec, spanEndSec: audio.spanEndSec })
+  if (!plan) return null
+  return [
+    ...plan.inputArgs,
+    '-filter_complex',
+    `[0:v]null[v];${plan.filter}`,
+    '-map',
+    '[v]',
+    '-map',
+    `[${plan.label}]`,
+    '-c:a',
+    'aac',
+    '-b:a',
+    '192k'
+  ]
 }
 
 /**
@@ -391,13 +757,26 @@ export function buildMediaBasisFilterComplex(
     const segOut = formatSec(seg.sourceOutSec)
     const shift = formatSec(Math.max(0, seg.timelineStartSec - input.spanStartSec))
     const label = `s${i}`
-    chains.push(`[${i}:v]trim=start=${segIn}:end=${segOut},setpts=PTS-STARTPTS,fps=${rate},setsar=1,format=yuv420p[pre${label}]`)
+    // v9：变速后的输出长度（= 时间轴长度）；音频滤镜的渐出起点与补静音长度都按它算
+    const speed = speedValueOf(seg.speed)
+    const outLen = Math.max(0, (seg.sourceOutSec - seg.sourceInSec) / speed)
+    // v8：防抖段在 fps 重采样之后、setsar 之前插入 transform（与 detect 同一帧序列）
+    const stabChain = segmentWantsStab(seg) ? `,${stabTransformFilter(seg.stab!, seg.stabFile!)}` : ''
+    // v9：画面变速挂在 fps 之后（.trf 按帧序号索引，不能在重采样前改 PTS）
+    const speedChain = clipVideoSpeedFilter(seg.speed)
+    chains.push(
+      `[${i}:v]${segmentTrimFpsPrefix(seg.sourceInSec, seg.sourceOutSec, rate)}${stabChain}${speedChain ? `,${speedChain}` : ''},setsar=1,format=yuv420p[pre${label}]`
+    )
     parts.push(`[pre${label}]setpts=PTS+${shift}/TB[vs${i}]`)
     if (seg.hasAudio) {
-      chains.push(`[${i}:a]atrim=start=${segIn}:end=${segOut},asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0[prea${label}]`)
+      const audioFx = clipAudioFilterChain({ audio: seg.audio, speed: seg.speed, outputDurationSec: outLen })
+      chains.push(
+        `[${i}:a]atrim=start=${segIn}:end=${segOut},asetpts=PTS-STARTPTS${audioFx.length > 0 ? `,${audioFx}` : ''},` +
+          `aresample=async=1:first_pts=0[prea${label}]`
+      )
       parts.push(`[prea${label}]asetpts=PTS+${shift}/TB[as${i}]`)
     } else {
-      const len = formatSec(Math.max(0, seg.sourceOutSec - seg.sourceInSec))
+      const len = formatSec(Math.max(0, seg.timelineEndSec - seg.timelineStartSec))
       chains.push(`anullsrc=channel_layout=stereo:sample_rate=48000[n${label}]`)
       parts.push(`[n${label}]atrim=duration=${len},asetpts=PTS-STARTPTS[prea${label}]`)
       parts.push(`[prea${label}]asetpts=PTS+${shift}/TB[as${i}]`)
@@ -438,6 +817,11 @@ export function buildOverlayMp4MultiInput(input: MediaBasisOverlayInput): string
   const audioArgs = input.audioMode === 'copy' ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']
   const args: string[] = [...common({})]
   for (const seg of input.segments) {
+    // v7：图像没有帧流，必须用 `-loop 1 -t <时长>` 把它撑成一段视频
+    // v9：这个 `-t` 是**变速前**的长度（源窗口），所以用源入出点而不是时间轴长度
+    if (seg.isImage) {
+      args.push('-loop', '1', '-t', formatSec(Math.max(0.01, seg.sourceOutSec - seg.sourceInSec)))
+    }
     args.push('-i', seg.refVideoPath)
   }
   // 透明 MOV 这一路只能给 `-t`：`-loop` 与 `-framerate` 都是 image2 解封装器的选项，
@@ -451,13 +835,22 @@ export function buildOverlayMp4MultiInput(input: MediaBasisOverlayInput): string
     input.overlayPath
   )
   if (input.watermark) args.push(...buildWatermarkInputArgs(input.watermark, input.fps))
+  // v7：音频轨追加在水印之后；没有音频段时 audioPlan 为 null，原 argv 一字不变
+  const audioPlan = buildAudioMixPlan({
+    clips: input.audioClips ?? [],
+    baseIndex: Number(input.overlayLabel) + 1 + (input.watermark ? 1 : 0),
+    spanStartSec: input.spanStartSec,
+    spanEndSec: input.spanEndSec,
+    baseLabel: '[ab]'
+  })
+  if (audioPlan) args.push(...audioPlan.inputArgs)
   args.push(
     '-filter_complex',
-    buildMediaBasisFilterComplex(input),
+    audioPlan ? `${buildMediaBasisFilterComplex(input)};${audioPlan.filter}` : buildMediaBasisFilterComplex(input),
     '-map',
     '[v]',
     '-map',
-    '[ab]',
+    audioPlan ? `[${audioPlan.label}]` : '[ab]',
     '-c:v',
     'libx264',
     '-crf',
@@ -486,17 +879,28 @@ export function buildOverlayMp4MultiInputDirectPipe(
       : pipeInputArgs(input.fps)
   const args: string[] = [...common({})]
   for (const seg of input.segments) {
+    if (seg.isImage) {
+      args.push('-loop', '1', '-t', formatSec(Math.max(0.01, seg.sourceOutSec - seg.sourceInSec)))
+    }
     args.push('-i', seg.refVideoPath)
   }
   args.push(...frameInput)
   if (input.watermark) args.push(...buildWatermarkInputArgs(input.watermark, input.fps))
+  const audioPlan = buildAudioMixPlan({
+    clips: input.audioClips ?? [],
+    baseIndex: Number(input.overlayLabel) + 1 + (input.watermark ? 1 : 0),
+    spanStartSec: input.spanStartSec,
+    spanEndSec: input.spanEndSec,
+    baseLabel: '[ab]'
+  })
+  if (audioPlan) args.push(...audioPlan.inputArgs)
   args.push(
     '-filter_complex',
-    buildMediaBasisFilterComplex(input),
+    audioPlan ? `${buildMediaBasisFilterComplex(input)};${audioPlan.filter}` : buildMediaBasisFilterComplex(input),
     '-map',
     '[v]',
     '-map',
-    '[ab]',
+    audioPlan ? `[${audioPlan.label}]` : '[ab]',
     '-c:v',
     'libx264',
     '-crf',
@@ -520,7 +924,8 @@ export function buildTransparentMovQtrle(
   fps: Fps,
   outputPath: string,
   frameFormat: 'raw' | 'png' = 'raw',
-  size?: { width: number; height: number }
+  size?: { width: number; height: number },
+  audio?: TransparentAudioOptions
 ): string[] {
   const input =
     frameFormat === 'raw'
@@ -536,7 +941,7 @@ export function buildTransparentMovQtrle(
     ...BT709_TAGS,
     '-color_range',
     'pc',
-    '-an',
+    ...(buildTransparentAudioArgs(audio) ?? ['-an']),
     '-f',
     'mov',
     outputPath
@@ -548,7 +953,8 @@ export function buildTransparentMovQtrleFromSeq(
   fps: Fps,
   framePattern: string,
   outputPath: string,
-  startNumber = 0
+  startNumber = 0,
+  audio?: TransparentAudioOptions
 ): string[] {
   return [
     ...common({}),
@@ -565,7 +971,7 @@ export function buildTransparentMovQtrleFromSeq(
     ...BT709_TAGS,
     '-color_range',
     'pc',
-    '-an',
+    ...(buildTransparentAudioArgs(audio) ?? ['-an']),
     '-f',
     'mov',
     outputPath

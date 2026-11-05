@@ -1,22 +1,29 @@
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   ALPHA_DROPPED_MARKER,
+  buildAudioPeaksArgs,
   buildCfrArgs,
   buildOverlayMp4,
   buildOverlayMp4DirectPipe,
   buildOverlayMp4MultiInput,
   buildProbeArgs,
+  buildStabDetectArgs,
+  buildStabPreviewArgs,
   buildTransparentMovFromPipe,
   buildVerifyArgs,
   buildVfrSampleArgs,
   computeWatermarkGeometry,
   formatSec
 } from '@shared/ffmpegArgs'
-import type { ConcatSegment } from '@shared/ffmpegArgs'
+import type { AudioMixClip, ConcatSegment } from '@shared/ffmpegArgs'
+import { defaultMediaStab } from '@shared/mediaStab'
+import { spectrumPeaksFromPcm } from '@shared/audioPeaks'
+import type { MediaClipStab } from '@shared/types'
 import {
   analyzeVfrSample,
   detectCompat,
@@ -67,9 +74,9 @@ interface RunResult {
   stderr: string
 }
 
-function run(bin: string, args: string[], stdin?: Buffer): Promise<RunResult> {
+function run(bin: string, args: string[], stdin?: Buffer, opts?: { cwd?: string }): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { windowsHide: true })
+    const child = spawn(bin, args, { windowsHide: true, cwd: opts?.cwd })
     const out: Buffer[] = []
     let stderr = ''
     child.stdout.on('data', (chunk: Buffer) => out.push(chunk))
@@ -728,6 +735,453 @@ describe('alpha 语义与选项取值（计划 C2）', () => {
   }, 180_000)
 })
 
+/**
+ * v8 防抖全链（vidstab 两段式）：用生产同一套 argv 构造函数跑真 FFmpeg。
+ * 夹具是正弦 pan/tilt 抖动（运动特征充分），验证三件事：
+ *  1. pass 1 在本机滤镜上可用（参数名全部实证过：result/shakiness/accuracy）；
+ *  2. 合成段链里注入 vidstabtransform 后整条 filter_complex 可解、交付规格不变；
+ *  3. 防抖真实改变了画面（与不防抖对照的 PSNR 在「明显补偿」区间）。
+ * 缺少捆绑二进制时本组直接跳过（计划步骤 12 的 skipIf 口径；不依赖 PATH 回退）。
+ */
+const HAS_BUNDLED_FFMPEG = fsSync.existsSync(BUNDLED_FFMPEG) && fsSync.existsSync(BUNDLED_FFPROBE)
+describe.skipIf(!HAS_BUNDLED_FFMPEG)('视频防抖 vidstab 全链（v8）', () => {
+  const OUT_W = 320
+  const OUT_H = 240
+  const SHAKE_FRAMES = 60 // 2s × 30fps
+  const shakePath = path.join(WORK_DIR, 'stab-shake.mp4')
+  const layerPath = path.join(WORK_DIR, 'stab-layer.mov')
+  const trfFile = 'stab_0.trf'
+  const trfPath = path.join(WORK_DIR, trfFile)
+  const stabOn: MediaClipStab = { ...defaultMediaStab(), enabled: true }
+
+  const seg = (over: Partial<ConcatSegment> = {}): ConcatSegment => ({
+    refVideoPath: shakePath,
+    timelineStartSec: 0,
+    timelineEndSec: 2,
+    sourceInSec: 0,
+    sourceOutSec: 2,
+    hasAudio: true,
+    ...over
+  })
+
+  const detectArgs = () =>
+    buildStabDetectArgs({
+      inputPath: shakePath,
+      sourceInSec: 0,
+      sourceOutSec: 2,
+      fps: FPS_30,
+      stab: stabOn,
+      resultFile: trfFile
+    })
+
+  const compositeArgs = (segments: ConcatSegment[], output: string) =>
+    buildOverlayMp4MultiInput({
+      segments,
+      spanStartSec: 0,
+      spanEndSec: 2,
+      overlayLabel: '1',
+      overlayPath: layerPath,
+      outputPath: output,
+      fps: FPS_30,
+      frameSize: { width: OUT_W, height: OUT_H },
+      audioMode: 'aac',
+      fpsMode: 'cfr'
+    })
+
+  beforeAll(async () => {
+    // 抖动夹具：大画面裁内框，x/y 做不同频率的正弦平移 → 真抖动 + 充分纹理
+    const gen = await run(
+      ffmpeg,
+      [
+        '-hide_banner',
+        '-y',
+        '-loglevel',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        `testsrc2=size=${OUT_W + 32}x${OUT_H + 24}:rate=30:duration=2`,
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=440:duration=2',
+        '-vf',
+        `crop=${OUT_W}:${OUT_H}:16+14*sin(2*PI*t*3):12+10*cos(2*PI*t*2)`,
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-shortest',
+        shakePath
+      ],
+      undefined
+    )
+    expect(gen.code, gen.stderr.slice(-600)).toBe(0)
+    const layer = await runWithFrames(
+      buildTransparentMovFromPipe(FPS_30, layerPath, 'png', { width: OUT_W, height: OUT_H }),
+      alphaFrames(OUT_W, OUT_H, SHAKE_FRAMES)
+    )
+    expect(layer.code).toBe(0)
+  }, 240_000)
+
+  it('pass 1：detect 退出码 0，.trf 落在 cwd 且非空', async () => {
+    await fs.rm(trfPath, { force: true }).catch(() => undefined)
+    const result = await run(ffmpeg, detectArgs(), undefined, { cwd: WORK_DIR })
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const stat = await fs.stat(trfPath)
+    expect(stat.size).toBeGreaterThan(0)
+  }, 240_000)
+
+  it('pass 2：注入 transform 的合成链可解，交付尺寸/帧率/像素格式不回退', async () => {
+    await run(ffmpeg, detectArgs(), undefined, { cwd: WORK_DIR })
+    const stabOut = path.join(WORK_DIR, 'stab-composited.mp4')
+    const plainOut = path.join(WORK_DIR, 'stab-plain.mp4')
+
+    const stabRun = await run(ffmpeg, compositeArgs([seg({ stab: stabOn, stabFile: trfFile })], stabOut), undefined, { cwd: WORK_DIR })
+    expect(stabRun.code, stabRun.stderr.slice(-600)).toBe(0)
+    const plainRun = await run(ffmpeg, compositeArgs([seg()], plainOut), undefined)
+    expect(plainRun.code, plainRun.stderr.slice(-600)).toBe(0)
+
+    const verified = await verifyJson(stabOut)
+    expect(verified).not.toBeNull()
+    if (verified) {
+      expect(verified.width).toBe(OUT_W)
+      expect(verified.height).toBe(OUT_H)
+      expect(frameRateMatches(verified, FPS_30)).toBe(true)
+      // 防抖不改画幅也不改帧数：crop=keep + optzoom 内缩，输出尺寸恒定
+      expect(Number(verified.nbFrames)).toBeGreaterThanOrEqual(SHAKE_FRAMES - 2)
+      expect(Number(verified.nbFrames)).toBeLessThanOrEqual(SHAKE_FRAMES + 2)
+      expect(isDeliveryYuv420p(verified)).toBe(true)
+    }
+
+    // 「真实生效」判据：防抖输出与不防抖输出的逐帧 PSNR：
+    // 补偿改变了画面 → 远低于同一素材两次编码的水平（>45），又不至于面目全非（>5）
+    const psnr = await run(ffmpeg, [
+      '-hide_banner',
+      '-loglevel',
+      'info',
+      '-i',
+      stabOut,
+      '-i',
+      plainOut,
+      '-lavfi',
+      'psnr',
+      '-f',
+      'null',
+      '-'
+    ])
+    const match = /average:\s*([0-9.inf]+)/i.exec(psnr.stderr)
+    expect(match, psnr.stderr.slice(-400)).not.toBeNull()
+    const avg = Number.parseFloat(match?.[1] ?? 'NaN')
+    expect(Number.isFinite(avg)).toBe(true)
+    expect(avg).toBeLessThan(40)
+    expect(avg).toBeGreaterThan(5)
+  }, 300_000)
+
+  /**
+   * v8.1 预览代理：与主进程 stabPreview.ts 同一条两进程链（detect 后 transform），
+   * 锁代理的交付口径：源区间 1:1（帧数 = 时长×fps）、尺寸不回退、带裁过的音轨、可流式播放。
+   */
+  it('v8.1 预览代理：detect+transform 产出的 mp4 = 源区间 1:1 + 音频裁到区间', async () => {
+    await run(ffmpeg, detectArgs(), undefined, { cwd: WORK_DIR })
+    const proxyOut = path.join(WORK_DIR, 'stab-proxy.mp4')
+    await fs.rm(proxyOut, { force: true }).catch(() => undefined)
+    const result = await run(
+      ffmpeg,
+      buildStabPreviewArgs({
+        inputPath: shakePath,
+        sourceInSec: 0,
+        sourceOutSec: 2,
+        fps: FPS_30,
+        stab: stabOn,
+        stabFile: trfFile,
+        hasAudio: true,
+        outputPath: proxyOut
+      }),
+      undefined,
+      { cwd: WORK_DIR }
+    )
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const stat = await fs.stat(proxyOut)
+    expect(stat.size).toBeGreaterThan(0)
+
+    const verified = await verifyJson(proxyOut)
+    expect(verified).not.toBeNull()
+    if (verified) {
+      expect(verified.width).toBe(OUT_W)
+      expect(verified.height).toBe(OUT_H)
+      expect(frameRateMatches(verified, FPS_30)).toBe(true)
+      // 代理就是源区间的 1:1 内容：预览的坐标换算（源时 − 入点）才成立
+      expect(Number(verified.nbFrames)).toBeGreaterThanOrEqual(SHAKE_FRAMES - 2)
+      expect(Number(verified.nbFrames)).toBeLessThanOrEqual(SHAKE_FRAMES + 2)
+      expect(isDeliveryYuv420p(verified)).toBe(true)
+    }
+
+    // 带声：-af atrim 裁过音轨（主进程 hasAudio 分支的真实产物形态）
+    const probe = await run(ffprobe, buildProbeArgs(proxyOut))
+    expect(probe.code, probe.stderr.slice(-300)).toBe(0)
+    const parsed = JSON.parse(probe.stdout.toString('utf8')) as { streams?: { codec_type?: string }[] }
+    expect((parsed.streams ?? []).some((s) => s.codec_type === 'audio')).toBe(true)
+
+    // faststart：moov 在前，focusnews-media:// 的 Range 流才能边下边播
+    const head = (await fs.readFile(proxyOut)).subarray(0, 64 * 1024).toString('latin1')
+    expect(head).toContain('moov')
+  }, 300_000)
+
+  /**
+   * v8.2 缺陷护栏：用户实测「强防抖 + 虚拟三脚架」后高频抖动反而愈演愈烈。
+   * 真机定位到根因：vidstabtransform `tripod=1` = `relative=0:smoothing=0`，在实拍平移素材上
+   * 会把每帧拽回参考帧 1 且不低通，实测放大到原片的 ~194%。修复后改为超长窗相对平滑。
+   * 本用例用二阶差分能量（画面内部区，避开游动黑边）度量残余抖动，断言**防抖后不得高于原片**。
+   */
+  it('虚拟三脚架不得放大抖动（high+tripod 残余高频抖动 < 原片）', async () => {
+    const pan = path.join(WORK_DIR, 'stab-pan-guard.mp4')
+    // 机位持续平移 + 7~8Hz 高频抖动（用户手持实拍的代理场景）
+    const gen = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `testsrc2=size=${OUT_W + 80}x${OUT_H + 80}:rate=30:duration=4`,
+      '-vf', `crop=${OUT_W}:${OUT_H}:40+25*t+5*sin(2*PI*t*7):40+6*sin(2*PI*t*0.4)+5*cos(2*PI*t*8)`,
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', pan
+    ])
+    expect(gen.code, gen.stderr.slice(-400)).toBe(0)
+
+    const stabTripod: MediaClipStab = { ...defaultMediaStab(), enabled: true, level: 'high', tripod: true }
+    const trf = 'stab_guard.trf'
+    const detect = await run(
+      ffmpeg,
+      buildStabDetectArgs({ inputPath: pan, sourceInSec: 0, sourceOutSec: 4, fps: FPS_30, stab: stabTripod, resultFile: trf }),
+      undefined,
+      { cwd: WORK_DIR }
+    )
+    expect(detect.code, detect.stderr.slice(-400)).toBe(0)
+
+    const out = path.join(WORK_DIR, 'stab-pan-guard-tripod.mp4')
+    const tr = await run(
+      ffmpeg,
+      buildStabPreviewArgs({ inputPath: pan, sourceInSec: 0, sourceOutSec: 4, fps: FPS_30, stab: stabTripod, stabFile: trf, hasAudio: false, outputPath: out }),
+      undefined,
+      { cwd: WORK_DIR }
+    )
+    expect(tr.code, tr.stderr.slice(-400)).toBe(0)
+
+    // 内部 180x130 区域（居中）逐帧二阶差分 mean|f[i+1]-2f[i]+f[i-1]| = 高频抖动能量
+    const jitter = async (file: string): Promise<number> => {
+      const r = await run(ffmpeg, [
+        '-hide_banner', '-loglevel', 'error', '-i', file,
+        '-vf', 'crop=180:130:70:55,format=gray,fps=30', '-f', 'rawvideo', '-'
+      ])
+      expect(r.code, r.stderr.slice(-300)).toBe(0)
+      const fb = 180 * 130
+      const n = Math.floor(r.stdout.length / fb)
+      expect(n).toBeGreaterThan(30)
+      let sum = 0
+      let count = 0
+      for (let i = 1; i < n - 1; i += 1) {
+        const a = r.stdout.subarray((i - 1) * fb, i * fb)
+        const b = r.stdout.subarray(i * fb, (i + 1) * fb)
+        const c = r.stdout.subarray((i + 1) * fb, (i + 2) * fb)
+        for (let p = 0; p < fb; p += 1) {
+          sum += Math.abs((c[p] ?? 0) - 2 * (b[p] ?? 0) + (a[p] ?? 0))
+          count += 1
+        }
+      }
+      return sum / count
+    }
+    const base = await jitter(pan)
+    const after = await jitter(out)
+    // 关键：修复后残余抖动必须低于原片；若退回 vidstab tripod 宏会放大到 ~190% 而使本断言失败
+    expect(after, `虚拟三脚架把抖动放大了：after=${after.toFixed(3)} base=${base.toFixed(3)}`).toBeLessThan(base)
+  }, 300_000)
+})
+
 // alpha 语义的量化断言已归入上方「alpha 语义与选项取值」块（旧版此处重复了两个同名的
 // describe，且其中「premultiplied 与 straight 像素结果不同」的断言与 FFmpeg 8.1.1 实测不符，
 // 已删除：实测两种写法在 RGBA 直通素材上得到相同像素，真正可靠的证据是枚举定义与期望混合值）。
+
+/**
+ * v9 音频与变速的实机验收（随包 FFmpeg，与导出走同一套 argv 构造函数）。
+ *
+ * 只断言「滤镜串能解析」不够，必须量化结果：
+ * 1. 频谱取样的 argv 真能从声轨里折出桶，且无音轨时只给空字节（不抛异常）；
+ * 2. 2x / 0.5x 变速后的**交付时长与帧数**按倍速收缩（画面 setpts 与音频 atempo 对齐）；
+ * 3. volume=0.5 与 afade 在输出文件的音频上留下可测痕迹（峰值电平下降、首尾柱低于中段）；
+ * 4. 音高连动的 asetrate 链与音频轨混音的 atempo+volume 链都真实可解。
+ */
+describe.skipIf(!HAS_BUNDLED_FFMPEG)('音频与变速滤镜链（v9 · 实机 FFmpeg）', () => {
+  const OUT_W = 320
+  const OUT_H = 240
+  const SRC_SEC = 6
+  const srcPath = path.join(WORK_DIR, 'fx-audio-source.mp4')
+  const silentPath = path.join(WORK_DIR, 'fx-silent-source.mp4')
+  const layerPath = path.join(WORK_DIR, 'fx-layer.mov')
+
+  const seg = (over: Partial<ConcatSegment> = {}): ConcatSegment => ({
+    refVideoPath: srcPath,
+    timelineStartSec: 0,
+    timelineEndSec: SRC_SEC,
+    sourceInSec: 0,
+    sourceOutSec: SRC_SEC,
+    hasAudio: true,
+    ...over
+  })
+
+  const compositeArgs = (
+    segments: ConcatSegment[],
+    output: string,
+    spanEndSec: number,
+    extra: { audioClips?: AudioMixClip[] } = {}
+  ): string[] =>
+    buildOverlayMp4MultiInput({
+      segments,
+      spanStartSec: 0,
+      spanEndSec,
+      overlayLabel: '1',
+      overlayPath: layerPath,
+      outputPath: output,
+      fps: FPS_30,
+      frameSize: { width: OUT_W, height: OUT_H },
+      audioMode: 'aac',
+      fpsMode: 'cfr',
+      ...extra
+    })
+
+  /** 取一个文件的频谱柱（与时间轴卡片同一条代码路径）。 */
+  const barsOf = async (target: string, from: number, to: number, buckets: number): Promise<number[]> => {
+    const sampled = await run(ffmpeg, buildAudioPeaksArgs({ inputPath: target, sourceInSec: from, sourceOutSec: to, sampleRate: 4000 }))
+    return spectrumPeaksFromPcm(sampled.stdout, buckets)
+  }
+
+  beforeAll(async () => {
+    // 有音轨夹具：6s 画面 + 6s 连续 440Hz 正弦（本机构建输出约 -18dBFS，断言只看相对差）
+    const withAudio = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `testsrc=size=${OUT_W}x${OUT_H}:rate=30:duration=${SRC_SEC}`,
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=6',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', srcPath
+    ])
+    expect(withAudio.code, withAudio.stderr.slice(-600)).toBe(0)
+
+    // 无音轨夹具：频谱必须得不出任何东西
+    const noAudio = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `testsrc=size=${OUT_W}x${OUT_H}:rate=30:duration=${SRC_SEC}`,
+      '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', silentPath
+    ])
+    expect(noAudio.code, noAudio.stderr.slice(-600)).toBe(0)
+
+    const layer = await runWithFrames(
+      buildTransparentMovFromPipe(FPS_30, layerPath, 'png', { width: OUT_W, height: OUT_H }),
+      alphaFrames(OUT_W, OUT_H, SRC_SEC * 30)
+    )
+    expect(layer.code, layer.stderr.slice(-600)).toBe(0)
+  }, 240_000)
+
+  it('频谱取样：argv 折得出包络；-ss 只解需要的那一段；无音轨时给空字节', async () => {
+    const full = await run(ffmpeg, buildAudioPeaksArgs({ inputPath: srcPath, sourceInSec: 0, sourceOutSec: SRC_SEC, sampleRate: 2000 }))
+    expect(full.code, full.stderr.slice(-600)).toBe(0)
+    expect(full.stdout.length).toBeGreaterThan(4000)
+    const bars = spectrumPeaksFromPcm(full.stdout, 48)
+    expect(bars).toHaveLength(48)
+    // 连续正弦：每一桶都接近满刻度（dB 折算后不会有的贴底）
+    expect(Math.min(...bars)).toBeGreaterThan(0.6)
+
+    // 只取后一半：输出字节量跟着减半（-ss/-t 在 -i 之前才会）
+    const half = await run(ffmpeg, buildAudioPeaksArgs({ inputPath: srcPath, sourceInSec: 3, sourceOutSec: SRC_SEC, sampleRate: 2000 }))
+    expect(half.code, half.stderr.slice(-600)).toBe(0)
+    expect(half.stdout.length).toBeLessThan(full.stdout.length)
+
+    // 无音轨：不报错也不给任何 PCM（主进程据此判 hasAudio=false → 卡片不画频谱）
+    const silent = await run(ffmpeg, buildAudioPeaksArgs({ inputPath: silentPath, sourceInSec: 0, sourceOutSec: SRC_SEC, sampleRate: 2000 }))
+    expect(silent.stdout.length).toBe(0)
+  }, 240_000)
+
+  it('2x 变速：交付时长与帧数按倍速收缩，声轨不消失', async () => {
+    const out = path.join(WORK_DIR, 'fx-speed2.mp4')
+    const result = await run(ffmpeg, compositeArgs([seg({ timelineEndSec: 3, speed: { speed: 2, maintainPitch: true } })], out, 3))
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+
+    const verified = await verifyJson(out)
+    expect(Number(verified?.nbFrames)).toBeGreaterThanOrEqual(85)
+    expect(Number(verified?.nbFrames)).toBeLessThanOrEqual(95)
+    const probe = parseProbeJson(await probeJson(out), out)
+    expect(probe?.durationSec).toBeGreaterThan(2.6)
+    expect(probe?.durationSec).toBeLessThan(3.4)
+    expect(probe?.audioCodec).toBeTruthy()
+  }, 300_000)
+
+  it('0.5x 慢放：时间轴长度翻倍（画面与音频一起拉长）', async () => {
+    const out = path.join(WORK_DIR, 'fx-speed05.mp4')
+    const result = await run(
+      ffmpeg,
+      compositeArgs([seg({ timelineEndSec: 12, speed: { speed: 0.5, maintainPitch: true } })], out, 12)
+    )
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const verified = await verifyJson(out)
+    expect(Number(verified?.nbFrames)).toBeGreaterThanOrEqual(350)
+    expect(Number(verified?.nbFrames)).toBeLessThanOrEqual(372)
+  }, 300_000)
+
+  it('音量 50%：峰值电平正好比不动增益时低 6dB；淡入淡出让首尾柱低于中段', async () => {
+    const plain = path.join(WORK_DIR, 'fx-gain-plain.mp4')
+    const halved = path.join(WORK_DIR, 'fx-gain-half.mp4')
+    const base = { timelineEndSec: 3, speed: { speed: 2, maintainPitch: true } }
+    const plainRun = await run(ffmpeg, compositeArgs([seg(base)], plain, 3))
+    expect(plainRun.code, plainRun.stderr.slice(-600)).toBe(0)
+    const halfRun = await run(
+      ffmpeg,
+      compositeArgs([seg({ ...base, audio: { volumePercent: 50, fadeInSec: 0.5, fadeOutSec: 0.5 } })], halved, 3)
+    )
+    expect(halfRun.code, halfRun.stderr.slice(-600)).toBe(0)
+
+    const maxDbOf = async (target: string): Promise<number> => {
+      const detect = await run(ffmpeg, ['-hide_banner', '-loglevel', 'info', '-i', target, '-af', 'volumedetect', '-f', 'null', '-'])
+      const match = /max_volume:\s*(-?[0-9.]+) dB/i.exec(detect.stderr)
+      expect(match, detect.stderr.slice(-400)).not.toBeNull()
+      return Number.parseFloat(match?.[1] ?? 'NaN')
+    }
+
+    // 用**相对差**而不是绝对电平：本机构 lavfi `sine` 源输出约 -18dBFS，
+    // 但体积滤镜只关心比例：半增益 = -6.02dB（afade 不动中段，所以差值就是增益差）
+    const delta = (await maxDbOf(halved)) - (await maxDbOf(plain))
+    expect(delta).toBeLessThan(-4)
+    expect(delta).toBeGreaterThan(-8)
+
+    // 淡入淡出真的落在声音上：首尾柱明显低于中段
+    const bars = await barsOf(halved, 0, 3, 48)
+    const middle = Math.max(...bars.slice(12, 36))
+    expect(middle).toBeGreaterThan(0.3)
+    expect(bars[0]).toBeLessThan(middle * 0.6)
+    expect(bars[bars.length - 1]).toBeLessThan(middle * 0.6)
+  }, 300_000)
+
+  it('关掉保持音高（asetrate）：链可解且时长仍按倍速收缩', async () => {
+    const out = path.join(WORK_DIR, 'fx-speed2-pitch.mp4')
+    const result = await run(ffmpeg, compositeArgs([seg({ timelineEndSec: 3, speed: { speed: 2, maintainPitch: false } })], out, 3))
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const probe = parseProbeJson(await probeJson(out), out)
+    expect(probe?.durationSec).toBeGreaterThan(2.6)
+    expect(probe?.durationSec).toBeLessThan(3.4)
+  }, 300_000)
+
+  it('音频轨带倍速与音量：混音链（atempo + volume + adelay）与基座原声一起可解', async () => {
+    const out = path.join(WORK_DIR, 'fx-audio-track.mp4')
+    const bed: AudioMixClip = {
+      path: srcPath,
+      timelineStartSec: 1,
+      timelineEndSec: 4,
+      sourceInSec: 0,
+      sourceOutSec: 6,
+      audio: { volumePercent: 80, fadeInSec: 0.5, fadeOutSec: 0 },
+      speed: { speed: 2, maintainPitch: true }
+    }
+    const argv = compositeArgs([seg()], out, SRC_SEC, { audioClips: [bed] })
+    expect(argv.join(' ')).toContain('atempo=2')
+    const result = await run(ffmpeg, argv, undefined, { cwd: WORK_DIR })
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const probe = parseProbeJson(await probeJson(out), out)
+    expect(probe?.audioCodec).toBeTruthy()
+    expect(probe?.durationSec).toBeGreaterThan(5.5)
+  }, 300_000)
+})

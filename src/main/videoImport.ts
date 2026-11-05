@@ -1,9 +1,15 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { BrowserWindow, dialog } from 'electron'
-import { COPYABLE_AUDIO_CODECS, IMPORTABLE_VIDEO_EXTENSIONS, VFR_SAMPLE_PACKETS } from '../shared/constants'
+import {
+  COPYABLE_AUDIO_CODECS,
+  IMPORTABLE_AUDIO_EXTENSIONS,
+  IMPORTABLE_IMAGE_EXTENSIONS,
+  IMPORTABLE_VIDEO_EXTENSIONS,
+  VFR_SAMPLE_PACKETS
+} from '../shared/constants'
 import { buildProbeArgs, buildVfrSampleArgs } from '../shared/ffmpegArgs'
-import { buildProbeResult, parseProbeJson } from '../shared/probe'
+import { buildProbeResult, parseAudioProbeJson, parseProbeJson } from '../shared/probe'
 import type { Fps, VideoMeta, VideoProbeResult } from '../shared/types'
 import { runFfprobeJson } from './ffrun'
 import { resolveFfmpegBinaries } from './paths'
@@ -40,7 +46,15 @@ export async function probeVideo(target: string, jobId = 'probe', force = false)
 
   const payload = await runFfprobeJson<unknown>(buildProbeArgs(target), `${jobId}-probe`, binaries)
   const meta = parseProbeJson(payload, target)
-  if (!meta) throw new Error(`无法解析视频流：${target}`)
+  if (!meta) {
+    // v7：没有视频流不一定是坏文件——纯音频（mp3/wav/m4a…）走这条分支；
+    // compat 由 buildProbeResult 从 meta 推导（无画面、无 HDR、帧率恒定），不会弹兼容性确认。
+    const audioMeta = parseAudioProbeJson(payload, target)
+    if (!audioMeta) throw new Error(`无法解析视频流：${target}`)
+    const audioResult = buildProbeResult(audioMeta)
+    if (stat) cache.set(target, { key: cacheKey(target, stat.mtimeMs, stat.size), result: audioResult, at: Date.now() })
+    return audioResult
+  }
 
   // VFR 需要 PTS 抽样佐证（成本远低于 -count_frames）
   let packets: unknown
@@ -80,7 +94,11 @@ export function dropProbeCache(target?: string): void {
  * `mxf` 是广播交付的主容器（XDCAM / AVC-Intra / DNxHD），ffprobe/ffmpeg 原生可读，
  * 导入、探测、导出全链路都能走；但 Chromium 没有 MXF 解封装器，预览需要代理转码。
  */
-const VIDEO_EXTENSIONS: string[] = [...IMPORTABLE_VIDEO_EXTENSIONS]
+const VIDEO_EXTENSIONS: string[] = [
+  ...IMPORTABLE_VIDEO_EXTENSIONS,
+  ...IMPORTABLE_AUDIO_EXTENSIONS,
+  ...IMPORTABLE_IMAGE_EXTENSIONS
+]
 
 /** 选择参考视频文件并探测（门禁确认在渲染进程完成，规格 §6）。 */
 export async function pickAndProbeVideo(
@@ -89,7 +107,7 @@ export async function pickAndProbeVideo(
   const options = {
     title: '选择参考视频（MP4/MOV/...）',
     properties: ['openFile'] as ['openFile'],
-    filters: [{ name: '视频文件', extensions: VIDEO_EXTENSIONS }, { name: '所有文件', extensions: ['*'] }]
+    filters: [{ name: '媒体文件', extensions: VIDEO_EXTENSIONS }, { name: '所有文件', extensions: ['*'] }]
   }
   // 窗口级模态：避开预览区被遮挡后用户误以为导入失败
   const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
@@ -109,7 +127,7 @@ export async function pickManyAndProbeVideos(
   const options = {
     title: '选择参考视频（可多选）',
     properties: ['openFile', 'multiSelections'] as ['openFile', 'multiSelections'],
-    filters: [{ name: '视频文件', extensions: VIDEO_EXTENSIONS }, { name: '所有文件', extensions: ['*'] }]
+    filters: [{ name: '媒体文件', extensions: VIDEO_EXTENSIONS }, { name: '所有文件', extensions: ['*'] }]
   }
   const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
   if (result.canceled) return []

@@ -368,13 +368,53 @@ export interface MediaClip {
   /** 时间轴上的起始/结束秒 */
   timelineStartSec: number
   timelineEndSec: number
-  /** 对应源视频的入出点秒（与时长一致：timelineEndSec - timelineStartSec === sourceOutSec - sourceInSec） */
+  /**
+   * 对应源视频的入出点秒。**变速时它表示「片段要读的源窗口」**：
+   * 时长恒等式在 speed ≠ 1 时变成 `timelineEndSec - timelineStartSec === (sourceOutSec - sourceInSec) / speed`
+   * （见 shared/mediaClipAudio 的换算函数）。
+   */
   sourceInSec: number
   sourceOutSec: number
   /** v6：画面变换与调色（缺省 = 全部默认值） */
   video?: MediaClipVideo
   /** v7：叠放层号（0 = 最底层）；同轨同层互斥，层高由轨道按最大层数均分 */
   layer?: number
+  /** v8：视频防抖（缺省 = 关闭；仅导出时生效，预览仍播原片） */
+  stab?: MediaClipStab
+  /** v9：音频增益与渐入渐出（缺省 = 100% / 0 / 0） */
+  audio?: ClipAudio
+  /** v9：变速（缺省 = 1.0x 保持音高） */
+  speed?: ClipSpeed
+}
+
+/**
+ * v9：片段的音频参数（媒体段与音频段共用同一套语义）。
+ *
+ * 与 `MediaClipVideo` 同一套纪律：**默认值 = 不生效**（100% / 0 / 0），
+ * 全部默认时整键不落盘；换算只允许写在 `shared/mediaClipAudio`，
+ * 预览（增益包络）与导出（`volume` / `afade`）读的是同一份口径。
+ */
+export interface ClipAudio {
+  /** 音量百分比，0..200（100 = 原始增益） */
+  volumePercent: number
+  /** 渐入时长（秒，0..5）：从静音升到正常音量 */
+  fadeInSec: number
+  /** 渐出时长（秒，0..5）：从正常音量降到静音 */
+  fadeOutSec: number
+}
+
+/**
+ * v9：片段的变速。
+ *
+ * 口径：**源窗口不变，时间轴长度随倍速伸缩**
+ * （2x → 同一份源内容只占一半时间轴，0.5x → 占两倍），
+ * 所以变速不会改动源入出点，也不会让画面参数换语义。
+ */
+export interface ClipSpeed {
+  /** 倍速，0.25..4（1 = 原速） */
+  speed: number
+  /** 变速保持音高（默认 true：走 `atempo`；false：走 `asetrate` 连动音高） */
+  maintainPitch: boolean
 }
 
 /**
@@ -390,6 +430,26 @@ export interface AudioClip {
   sourceOutSec: number
   /** 叠放层号（0 = 最底层） */
   layer?: number
+  /** v9：音频增益与渐入渐出（缺省 = 100% / 0 / 0） */
+  audio?: ClipAudio
+  /** v9：变速（缺省 = 1.0x 保持音高） */
+  speed?: ClipSpeed
+}
+
+/** v8：防抖档位（UI 只暴露三档，滤镜参数映射见 shared/mediaStab） */
+export type StabLevel = 'low' | 'standard' | 'high'
+
+/**
+ * v8：媒体片段的视频防抖（ffmpeg vidstab 两段式）。
+ *
+ * 设计口径与 `MediaClipVideo` 同一套：**默认值 = 不生效**（false / standard / false），
+ * 全部默认时整键不落盘；参数属于**时间轴片段**，导出时生效，预览仍播原片。
+ */
+export interface MediaClipStab {
+  enabled: boolean
+  level: StabLevel
+  /** 虚拟三脚架：运动与一个参考帧比较而非累积平滑，适合几乎静止的机位 */
+  tripod: boolean
 }
 
 /** 曲线上的一个控制点（x = 输入亮度，y = 输出亮度，均为 0..1） */
@@ -470,6 +530,36 @@ export interface MediaStripResult {
   key: string
   /** 命中磁盘缓存（本轮未起子进程） */
   cached: boolean
+}
+
+/**
+ * 频谱条（v9）的一次采样请求：从源区间提取等分桶的幅度峰值。
+ *
+ * 与预览条同一纪律：**派生数据不写进工程 JSON**——桶数随卡片宽度、
+ * 区间随入出点/变速变化，落盘必然过期。缓存只放主进程内存（+ 渲染层内存）。
+ */
+export interface AudioPeaksRequest {
+  /** 素材池 id（缓存回收与并发排队的归属） */
+  mediaId: string
+  /** 取样的实际文件（VFR 转 CFR / 重新定位后会变） */
+  path: string
+  sourceInSec: number
+  sourceOutSec: number
+  /** 期望桶数（主进程不信任这个值，会自己再夹一次上限） */
+  buckets: number
+}
+
+export interface AudioPeaksResult {
+  /** 归一化到 0..1 的峰值；无音轨 / 探测失败时为空数组 */
+  peaks: number[]
+  /** 主进程实际使用的桶数（渲染层以此为准） */
+  buckets: number
+  /** 缓存令牌：同一 key 二次请求不会重跑 FFmpeg */
+  key: string
+  /** 命中内存缓存（本轮未起子进程） */
+  cached: boolean
+  /** 该素材到底有没有音轨（false = 卡片不画频谱条，且不再重试） */
+  hasAudio: boolean
 }
 
 /**
@@ -695,6 +785,54 @@ export interface OverlaySegment {
   sourceInSec: number
   /** 到源文件的这个出点结束 */
   sourceOutSec: number
+  /** v8：该段的防抖参数（缺省 = 不防抖；主进程会先跑 detect 再在段链注入 transform） */
+  stab?: MediaClipStab
+  /** v7：图像素材（主进程用 `-loop 1 -t` 把静帧撑成一段视频） */
+  isImage?: boolean
+  /** v9：该段的音频参数（音量/渐入渐出，作用在参考视频自带音轨上） */
+  audio?: ClipAudio
+  /** v9：该段的变速（视频 `setpts` + 音频 `atempo`/`asetrate`） */
+  speed?: ClipSpeed
+}
+
+/**
+ * v8.1：防抖预览预处理请求（渲染 → 主进程）。
+ * 主进程把源的 [sourceInSec, sourceOutSec] 区间两段式防抖后编成代理 mp4，
+ * 命中磁盘缓存时不起子进程直接返回路径。
+ */
+export interface StabPreviewRequest {
+  clipId: string
+  sourcePath: string
+  sourceInSec: number
+  sourceOutSec: number
+  fps: Fps
+  stab: MediaClipStab
+  /** 代理是否携带该区间的原声（预览音频跟着代理播） */
+  hasAudio: boolean
+}
+
+/** v8.1：防抖预览受理结果。queued = 后台作业已入队（进度走 job 事件流）；cached = 直接命中磁盘缓存。 */
+export interface StabPreviewResult {
+  status: 'queued' | 'cached'
+  jobId: string
+  /** cached 时直接可用的代理文件绝对路径；queued 时为 null（完成后经 jobResult 回传 outputs[0]） */
+  path: string | null
+  /** 本次受理对应的签名（渲染侧据此判定代理新鲜度） */
+  signature: string
+}
+
+/** v7：导出用音频段（渲染侧已按本次导出 span 裁剪/对到 span 起点） */
+export interface AudioMixClipRequest {
+  path: string
+  timelineStartSec: number
+  timelineEndSec: number
+  sourceInSec: number
+  /** v9：源出点（变速时 = 入点 + 时间轴长度 × 倍速）；缺省按时间轴长度取 */
+  sourceOutSec?: number
+  /** v9：音量与渐入渐出 */
+  audio?: ClipAudio
+  /** v9：变速 */
+  speed?: ClipSpeed
 }
 
 export interface ExportRequest {
@@ -704,6 +842,12 @@ export interface ExportRequest {
   frameSpec: FrameSpec
   /** 透明 MOV：image2pipe 主路径 / PNG 序列回退 */
   frameDelivery: 'pipe' | 'pngSequence'
+  /**
+   * v7：音频轨（可选）。两个出口都吃：
+   * - overlay：与参考视频原声 amix；
+   * - transparent：单独混出音轨（没有音频段时保持 `-an`，argv 与旧版一致）。
+   */
+  audioClips?: AudioMixClipRequest[]
   /** 管道内的帧形式（默认 raw：实测 PNG 编码是 1080p 吞吐率瓶颈） */
   pipeTransport?: 'raw' | 'png'
   /** 透明出口编码（默认 ProRes 4444；qtrle 为兼容模式回退） */

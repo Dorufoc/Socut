@@ -1,5 +1,6 @@
 import type { JobProgress, JobResult } from '@shared/types'
 import { useExportStore } from './exportStore'
+import { useStabPreviewStore } from './stabPreviewStore'
 
 /**
  * 主进程事件分发（进度 / 结果）。
@@ -14,6 +15,8 @@ export function bindJobEvents(): () => void {
   })
   const offResult = window.focusnews.job.onResult((result: JobResult) => {
     useExportStore.getState().setResult(result)
+    // v8.1：防抖预览代理作业（stab- 前缀）完成后额外记账代理路径，PreviewStage 据此换源
+    useStabPreviewStore.getState().handleJobResult(result)
     const resolve = waiters.get(result.jobId)
     if (resolve) {
       waiters.delete(result.jobId)

@@ -62,9 +62,14 @@ export function ProgressPanel(): ReactElement | null {
                 />
               </div>
               <div className="job-card__stats">
-                <span className="mono">
-                  {job.framesDone}/{job.framesTotal} 帧
-                </span>
+                {job.jobId.startsWith('stab-') ? (
+                  /** v8.1：防抖预览代理是「两段式阶段」不是逐帧任务（framesTotal=2），帧口径改显阶段 */
+                  <span className="mono">
+                    {job.phase === 'preparing' ? TEXT.stab.previewDetect : job.phase === 'rendering' ? TEXT.stab.previewTranscode : PHASE_LABEL[job.phase] ?? job.phase}
+                  </span>
+                ) : (
+                  <span className="mono">{job.framesDone}/{job.framesTotal} 帧</span>
+                )}
                 <span className="mono">{Math.round(job.percent * 100)}%</span>
                 <span className="mono muted">{formatBytes(job.bytesWritten)}</span>
                 <span className="mono muted">{(job.elapsedMs / 1000).toFixed(1)}s</span>

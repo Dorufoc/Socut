@@ -2577,6 +2577,77 @@ input[type='color']:disabled {
   z-index: 4;
 }
 
+/* 音频轨（v7）：与媒体轨同构，但只贡献声音 */
+.timeline__track--audio {
+  background-color: #1b2422;
+}
+
+.timeline__track--audio .timeline__empty {
+  left: 64px;
+}
+
+/* 音频段：底纹是等距竖条的波形示意，宽度即时长占比 */
+.audio-clip-card {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid rgba(126, 214, 173, 0.5);
+  border-radius: 4px;
+  background: linear-gradient(180deg, rgba(58, 122, 96, 0.95), rgba(34, 78, 62, 0.95));
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+}
+
+.audio-clip-card--selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-ring);
+}
+
+.audio-clip-card--orphan {
+  border-style: dashed;
+  opacity: 0.6;
+}
+
+.audio-clip-card__wave {
+  position: absolute;
+  inset: 0;
+  opacity: 0.5;
+  background-image: repeating-linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.42) 0 1px,
+    transparent 1px 4px
+  );
+}
+
+.audio-clip-card__label {
+  position: relative;
+  display: block;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.audio-clip-card__handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.audio-clip-card__handle--in {
+  left: 0;
+}
+
+.audio-clip-card__handle--out {
+  right: 0;
+}
+
 /*
  * 媒体轨片段卡片：底图是主进程一次抽帧拼好的时间帧预览条（长图），
  * 拉满卡片宽度 → 每格覆盖的时间 = 片段时长 / 格数（需求明确不要求保持原始比例）。
@@ -2721,6 +2792,63 @@ input[type='color']:disabled {
 
 .media-clip-card__handle--right {
   right: 0;
+}
+
+/*
+ * 频谱条（v9）：卡片底部 1/3 的音频幅度条。
+ * - 柱子等分卡片宽度，高度 = 提取到的幅度 × 音量 × 淡入淡出包络（由内联 style 给出）；
+ * - 渐变从蓝到青（需求指定），底衬一层暗色渐变保证在亮色预览条上也不糊；
+ * - `--spectrum-live` 是播放时的实时电平（`useSpectrumLive` 命令式写入），
+ *   缺省 1 = 不缩放，所以拿不到电平就是静态幅度；
+ * - `pointer-events: none` + 不入手柄，时间轴交互与原来一模一样。
+ */
+.media-clip-card__spectrum {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 33.333%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  padding: 0 2px 2px;
+  background: linear-gradient(180deg, rgba(10, 12, 14, 0), rgba(10, 12, 14, 0.42));
+  pointer-events: none;
+  transform: scaleY(var(--spectrum-live, 1));
+  transform-origin: bottom center;
+  transition: transform 70ms linear;
+}
+
+.media-clip-card__spectrum-bar {
+  flex: 1 1 0;
+  min-width: 1px;
+  border-radius: 1px 1px 0 0;
+  background: linear-gradient(180deg, #55e0f0 0%, #2f8fff 68%, #1b57c9 100%);
+}
+
+/* 有频谱条时把文字行抬到条上方：两者都是“必须读得清”的东西，不让谁盖谁 */
+.media-clip-card--spectrum .media-clip-card__label {
+  bottom: 33.333%;
+  padding-top: 6px;
+}
+
+/* 叠层时卡片只有二十几 px：文字改贴顶，频谱条继续占底部 1/3 */
+.media-clip-card--layered.media-clip-card--spectrum .media-clip-card__label {
+  bottom: auto;
+  top: 0;
+  padding: 1px 8px 0 7px;
+  background: linear-gradient(180deg, rgba(12, 14, 16, 0.82), rgba(12, 14, 16, 0));
+}
+
+.media-clip-card--layered.media-clip-card--spectrum .media-clip-card__meta {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .media-clip-card__spectrum {
+    transition: none;
+  }
 }
 
 .timeline__divider {

@@ -99,6 +99,44 @@ export function parseProbeJson(payload: unknown, path: string): VideoMeta | null
 }
 
 /**
+ * 纯音频文件（mp3/wav/m4a/aac…）→ VideoMeta 形状。
+ *
+ * 音频没有画面，所以 width/height/pixFmt/色彩标签全部置 0 或 null；
+ * 下游只需要 `durationSec`、`audioCodec`、`audioChannels` 三项就能建音频段。
+ * 没有任何音频流时返回 null（调用方按“不是音视频文件”处理）。
+ */
+export function parseAudioProbeJson(payload: unknown, path: string): VideoMeta | null {
+  const root = asObject(payload)
+  if (!root) return null
+  const streams = Array.isArray(root['streams']) ? root['streams'] : []
+  const audio = streams.map(asObject).find((s) => s && asString(s['codec_type']) === 'audio')
+  if (!audio) return null
+  const format = asObject(root['format'])
+  const durationSec = asNumber(audio['duration']) ?? asNumber(format?.['duration']) ?? 0
+  return {
+    path,
+    containerName: asString(format?.['format_name']) ?? 'unknown',
+    width: 0,
+    height: 0,
+    sar: null,
+    displayRatio: 16 / 9,
+    rFrameRate: { num: 25, den: 1 },
+    avgFrameRate: { num: 25, den: 1 },
+    pixFmt: 'none',
+    colorPrimaries: null,
+    colorSpace: null,
+    colorTransfer: null,
+    colorRange: null,
+    videoCodec: 'none',
+    audioCodec: asString(audio['codec_name']),
+    audioChannels: asNumber(audio['channels']),
+    durationSec,
+    nbFrames: null,
+    bitRateKbps: asNumber(format?.['bit_rate']) !== null ? (asNumber(format?.['bit_rate']) ?? 0) / 1000 : null
+  }
+}
+
+/**
  * 图片尺寸解析（水印导入用）：ffprobe 对 PNG/JPG 给的是同一路图片流，
  * 这里只取 width/height，不要求帧率/色彩标签等视频字段。
  * 任何一项不可用就返回 null（调用方按“探测失败”提示用户换图）。

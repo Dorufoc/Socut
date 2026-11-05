@@ -39,7 +39,13 @@ export const CHANNELS = {
   mediaThumbRemove: 'media:thumbRemove',
   /** v5：主进程均匀抽帧并拼成时间帧预览条（Thumbnail Strip）长图 */
   mediaGenerateStrip: 'media:generateStrip',
+  /** v9：主进程把片段源区间解成单声道 PCM，折成频谱条的等分桶峰值 */
+  mediaAudioPeaks: 'media:audioPeaks',
   videoCfrConvert: 'video:cfrConvert',
+  /** v8.1：防抖预览预处理：主进程后台生成稳定化代理文件（进度经 job 事件流，jobId 前缀 stab-） */
+  videoStabPreview: 'video:stabPreview',
+  /** v8.1：片段删除/关闭防抖时回收它的代理 mp4 与 .trf 运动数据 */
+  videoStabPreviewRemove: 'video:stabPreviewRemove',
 
   exportEstimate: 'export:estimate',
   exportStart: 'export:start',

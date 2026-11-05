@@ -2,8 +2,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { FPS_30 } from '@shared/constants'
 import { secondsToTimecode } from '@shared/timecode'
-import type { MediaClip, MediaItem, MediaStripRequest, MediaStripResult, VideoMeta } from '@shared/types'
+import type { AudioPeaksRequest, AudioPeaksResult, MediaClip, MediaItem, MediaStripRequest, MediaStripResult, VideoMeta } from '@shared/types'
 import { MediaClipCard, type MediaClipCardProps } from './MediaClipCard'
+import { resetSpectrumCache } from './useMediaPeaks'
 import { resetStripCache } from './useMediaStrips'
 
 /**
@@ -71,6 +72,16 @@ let stripImpl: (request: MediaStripRequest) => Promise<MediaStripResult> = async
   cached: false
 })
 
+/** 可控的频谱取样 IPC：默认给满刻度平峰，单个用例可临时改写 */
+let peaksCalls: AudioPeaksRequest[] = []
+let peaksImpl: (request: AudioPeaksRequest) => Promise<AudioPeaksResult> = async (request) => ({
+  peaks: Array.from({ length: request.buckets }, () => 1),
+  buckets: request.buckets,
+  key: 'token',
+  cached: false,
+  hasAudio: true
+})
+
 beforeAll(() => {
   Element.prototype.setPointerCapture = () => undefined
   Element.prototype.releasePointerCapture = () => undefined
@@ -91,8 +102,12 @@ beforeAll(() => {
     stripCalls.push(request)
     return stripImpl(request)
   })
+  const peaks = vi.fn(async (request: AudioPeaksRequest): Promise<AudioPeaksResult> => {
+    peaksCalls.push(request)
+    return peaksImpl(request)
+  })
   ;(window as unknown as { focusnews: unknown }).focusnews = {
-    media: { strip },
+    media: { strip, peaks },
     app: { writeLog: async () => undefined }
   }
 })
@@ -100,11 +115,20 @@ beforeAll(() => {
 beforeEach(() => {
   stripCalls = []
   stripImpl = async (request) => ({ url: `focusnews-strip://${request.frames}`, frames: request.frames, key: 'token', cached: false })
+  peaksCalls = []
+  peaksImpl = async (request) => ({
+    peaks: Array.from({ length: request.buckets }, () => 1),
+    buckets: request.buckets,
+    key: 'token',
+    cached: false,
+    hasAudio: true
+  })
 })
 
 afterEach(() => {
   cleanup()
   resetStripCache()
+  resetSpectrumCache()
 })
 
 function makeProps(overrides: Partial<MediaClipCardProps> = {}): MediaClipCardProps {
@@ -267,5 +291,88 @@ describe('MediaClipCard 时间帧预览条', () => {
     cleanup()
     await renderCard(makeProps({ widthPx: 1100 }))
     expect(stripCalls).toHaveLength(2)
+  })
+})
+
+/**
+ * 音频频谱条（v9）：卡片底 1/3 的幅度包络。
+ *
+ * 除了「看得见」，更关键的是**不该画的时候一个请求都不发**（无音轨 / 图像 / 素材已移出），
+ * 以及取样拿不到时只能没有柱子，不许拖垮预览条与原有拖入出点交互。
+ */
+describe('MediaClipCard 音频频谱条', () => {
+  it('有音轨：按卡片像素宽请求峰，柱子铺满整卡并标记 --spectrum', async () => {
+    const card = await renderCard(makeProps())
+
+    expect(peaksCalls).toHaveLength(1)
+    expect(peaksCalls[0]).toMatchObject({ mediaId: 'media-1', path: 'C:/media/a.mp4', sourceInSec: 1, sourceOutSec: 7 })
+    // 1000px 宽 / 每 7px 一根 → 上限档 96
+    expect(peaksCalls[0]!.buckets).toBe(96)
+    const spectrum = card.querySelector('.media-clip-card__spectrum') as HTMLElement
+    expect(spectrum.getAttribute('data-bars')).toBe('96')
+    expect(spectrum.querySelectorAll('.media-clip-card__spectrum-bar')).toHaveLength(96)
+    expect(card.className).toContain('media-clip-card--spectrum')
+    // 频谱是纯装饰，不能抢读屏与鼠标
+    expect(spectrum.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('无音轨：一个取样请求都不发，也不画柱子', async () => {
+    const card = await renderCard(makeProps({ item: { ...item, meta: meta({ audioCodec: null }) } }))
+
+    expect(peaksCalls).toHaveLength(0)
+    expect(card.querySelector('.media-clip-card__spectrum-bar')).toBeNull()
+    expect(card.className).not.toContain('media-clip-card--spectrum')
+  })
+
+  it('图像素材没有声流：同样不请求', async () => {
+    await renderCard(makeProps({ item: { ...item, kind: 'image' } }))
+    expect(peaksCalls).toHaveLength(0)
+  })
+
+  it('素材已移出池：不请求（文件都不在了）', async () => {
+    const card = await renderCard(makeProps({ item: null }))
+    expect(peaksCalls).toHaveLength(0)
+    expect(card.querySelector('.media-clip-card__spectrum-bar')).toBeNull()
+  })
+
+  it('主进程取不到峰：安静地不画，预览条与文字照旧', async () => {
+    peaksImpl = async (request) => ({ peaks: [], buckets: request.buckets, key: 'token', cached: false, hasAudio: false })
+    const card = await renderCard(makeProps())
+
+    expect(peaksCalls).toHaveLength(1)
+    expect(card.querySelector('.media-clip-card__spectrum-bar')).toBeNull()
+    expect(card.querySelector('.media-clip-card__strip')).not.toBeNull()
+    // 失败结果也进缓存：不会重渲染一次就轰炸主进程
+    cleanup()
+    await renderCard(makeProps())
+    expect(peaksCalls).toHaveLength(1)
+  })
+
+  it('音量与淡入立刻改变柱子高度（频谱条是音频参数的真实反馈）', async () => {
+    const half = await renderCard(makeProps({ clip: { ...clip, audio: { volumePercent: 50, fadeInSec: 0, fadeOutSec: 0 } } }))
+    expect((half.querySelector('.media-clip-card__spectrum-bar') as HTMLElement).style.height).toBe('50%')
+
+    cleanup()
+    const muted = await renderCard(makeProps({ clip: { ...clip, audio: { volumePercent: 0, fadeInSec: 0, fadeOutSec: 0 } } }))
+    // 音量 0：柱子塌到底（只保留可见基准）
+    expect((muted.querySelector('.media-clip-card__spectrum-bar') as HTMLElement).style.height).toBe('4%')
+
+    cleanup()
+    const faded = await renderCard(makeProps({ clip: { ...clip, audio: { volumePercent: 100, fadeInSec: 3, fadeOutSec: 0 } } }))
+    const bars = faded.querySelectorAll('.media-clip-card__spectrum-bar') as NodeListOf<HTMLElement>
+    // 渐入 3s / 片段 6s：起点仍是静音
+    expect(bars[0]!.style.height).toBe('4%')
+    // 后半段恢复到满刻度
+    expect(bars[bars.length - 1]!.style.height).toBe('100%')
+  })
+
+  it('拖入出点改变源区间 → 取样键变，重新折一次峰', async () => {
+    await renderCard(makeProps())
+    expect(peaksCalls).toHaveLength(1)
+
+    cleanup()
+    await renderCard(makeProps({ clip: { ...clip, sourceOutSec: 8 } }))
+    expect(peaksCalls).toHaveLength(2)
+    expect(peaksCalls[1]!.sourceOutSec).toBe(8)
   })
 })

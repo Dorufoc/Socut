@@ -3,10 +3,15 @@ import { DEFAULT_FPS, DEFAULT_RESOLUTION, MIN_MEDIA_CLIP_SEC } from '@shared/con
 import { applyClipStyleToAll, createClip, createId, duplicateClip, normalizeProject } from '@shared/projectSchema'
 import { snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
 import { alignAfterOverlap, compactMediaClips, findActiveMediaClip, splitMediaClipAt } from '@shared/mediaClips'
+import { useStabPreviewStore } from './stabPreviewStore'
 import type {
+  AudioClip,
+  ClipAudio,
+  ClipSpeed,
   FontRecord,
   Fps,
   MediaClip,
+  MediaClipStab,
   MediaClipVideo,
   MediaItem,
   PresetId,
@@ -19,17 +24,22 @@ import type {
 import { getPreset } from '@shared/presets'
 import { clipWithPresetDefaults, hasKeys } from '@shared/clipStyle'
 import { defaultMediaVideo, normalizeMediaVideo } from '@shared/mediaClipVideo'
+import { defaultMediaStab, normalizeMediaStab } from '@shared/mediaStab'
+import { defaultClipAudio, defaultClipSpeed, normalizeClipAudio, normalizeClipSpeed, speedValueOf } from '@shared/mediaClipAudio'
+import { IMAGE_STILL_SEC, applyAudioClipSpeed, inferMediaKind, makeAudioClip, moveAudioClip, normalizeLayer, sortAudioClips, trimAudioClip } from '@shared/audioClips'
 
 /** 工程状态（规格 §4.6）。所有时间值在写入时已吸附到帧边界，存储仍为秒。 */
 
-/** 右侧检查器当前跟谁：刚点中的是字幕条还是媒体段（两者可同时处于选中态）。 */
-export type SelectionKind = 'subtitle' | 'media'
+/** 右侧检查器当前跟谁：刚点中的是字幕条、媒体段还是音频段（三者可同时处于选中态）。 */
+export type SelectionKind = 'subtitle' | 'media' | 'audio'
 
 export interface ProjectState {
   project: Project
   selectedClipId: string | null
   /** v2：媒体轨上选中的片段（拆分/删除/拖拽的目标） */
   selectedMediaClipId: string | null
+  /** v7：音频轨上选中的片段 */
+  selectedAudioClipId: string | null
   /** v6：最后一次点选的类型——决定右侧检查器渲染字幕编辑器还是视频编辑器 */
   selectionKind: SelectionKind
   /** 字体库（内置 + 用户导入） */
@@ -114,8 +124,47 @@ export interface ProjectState {
   // ---------------------------------------------------------------- v6 画面编辑
   /** 写回媒体段的画面变换/调色（patch 为增量；全部默认时整键删除） */
   updateMediaClipVideo: (id: string, patch: Partial<MediaClipVideo>) => void
-  /** 一条片段的所有画面编辑回到默认（缩放 100% / 无翻转 / 参数归零 / 曲线直线） */
+  /** 一条片段的所有画面编辑回到默认（缩放 100% / 无翻转 / 参数归零 / 曲线直线；v8：连防抖一起清） */
   resetMediaClipVideo: (id: string) => void
+
+  // ---------------------------------------------------------------- v8 防抖
+  /** 写回媒体段的防抖参数（patch 为增量；全部默认时整键删除） */
+  updateMediaClipStab: (id: string, patch: Partial<MediaClipStab>) => void
+
+  // ---------------------------------------------------------------- v9 音频与变速
+  /** 写回媒体段原声的音量/渐入渐出（patch 为增量；全默认整键删除） */
+  updateMediaClipAudio: (id: string, patch: Partial<ClipAudio>) => void
+  /**
+   * 写回媒体段变速。**源窗口不动**，时间轴出点按 `源窗口 / 倍速` 重算，
+   * 所以 2x 会让片段在时间轴上缩短一半（不去推挤其他片段：叠层重叠是 v7 的正常形态）。
+   */
+  updateMediaClipSpeed: (id: string, patch: Partial<ClipSpeed>) => void
+  /** 写回音频段的音量/渐入渐出 */
+  updateAudioClipAudio: (id: string, patch: Partial<ClipAudio>) => void
+  /** 写回音频段变速（同上：源窗口不动，时间轴长度伸缩） */
+  updateAudioClipSpeed: (id: string, patch: Partial<ClipSpeed>) => void
+  /** 本条音频的音量/渐变/变速全部回到默认（时间轴长度回到源窗口长度） */
+  resetAudioClipFx: (id: string) => void
+
+  // ---------------------------------------------------------------- v7 音频轨
+  selectAudioClip: (id: string | null) => void
+  /** 把音频素材丢到音频轨 [start, start + duration]；返回新片段（null = 素材缺失或区间退化） */
+  insertAudioClip: (input: {
+    mediaId: string
+    timelineStartSec: number
+    durationSec?: number
+    sourceInSec?: number
+    layer?: number
+  }) => AudioClip | null
+  /** 整段平移（音频允许互相重叠，不与其它段推挤） */
+  moveAudioClip: (id: string, timelineStartSec: number) => void
+  /** 拖入点 / 出点（保持时长恒等式） */
+  trimAudioClip: (id: string, patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
+  removeAudioClip: (id: string) => void
+  /** v7：把媒体段放到第 n 层（0 = 底层，上层盖下层；clamp 0..4） */
+  setMediaClipLayer: (id: string, layer: number) => void
+  /** v7：把音频段放到第 n 层（同时发声的多轨靠它叠起来） */
+  setAudioClipLayer: (id: string, layer: number) => void
 
   // ---------------------------------------------------------------- 时间轴工具
   /**
@@ -142,7 +191,9 @@ export function createInitialProject(): Project {
 export function timelineDurationSec(project: Project): number {
   const clipsEnd = project.clips.reduce((acc, clip) => Math.max(acc, clip.endTime), 0)
   const mediaEnd = project.mediaClips.reduce((acc, clip) => Math.max(acc, clip.timelineEndSec), 0)
-  const furthest = Math.max(clipsEnd, mediaEnd)
+  // v7：音频轨也算进尺规总长，否则拖到后面的音频会跑出尺规
+  const audioEnd = (project.audioClips ?? []).reduce((acc, clip) => Math.max(acc, clip.timelineEndSec), 0)
+  const furthest = Math.max(clipsEnd, mediaEnd, audioEnd)
   return furthest > 0 ? furthest : 5
 }
 
@@ -157,6 +208,27 @@ function withClips(project: Project, clips: SubtitleClip[]): Project {
 
 function withMediaClips(project: Project, mediaClips: MediaClip[]): Project {
   return { ...project, mediaClips: [...mediaClips].sort((a, b) => a.timelineStartSec - b.timelineStartSec) }
+}
+
+/**
+ * v7：入池前把素材补全成「带 kind 的完整条目」。
+ * - 图像：ffprobe 读不出时长（单帧），给一个默认静帧时长，否则上轨后长度为 0；
+ * - 音频：没有画面（width=0），不带兼容性确认；
+ * - 视频：不写 kind（旧工程 JSON 形状不变）。
+ */
+function normalizeImportedMedia(item: MediaItem): MediaItem {
+  const kind = item.kind ?? inferMediaKind(item.path, item.meta)
+  const meta = kind === 'image' && !(item.meta.durationSec > 0) ? { ...item.meta, durationSec: IMAGE_STILL_SEC } : item.meta
+  return { ...item, meta, ...(kind !== 'video' ? { kind } : {}) }
+}
+
+/** v7：音频轨写入口（按时间排序；空轨道时删掉整个键，保持 JSON 干净） */
+function withAudioClips(project: Project, audioClips: AudioClip[]): Project {
+  const sorted = sortAudioClips(audioClips)
+  const next: Project = { ...project }
+  if (sorted.length > 0) next.audioClips = sorted
+  else delete next.audioClips
+  return next
 }
 
 /** 时长恒等式（timelineEnd - timelineStart === sourceOut - sourceIn）的唯一写入口。 */
@@ -182,6 +254,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   project: createInitialProject(),
   selectedClipId: null,
   selectedMediaClipId: null,
+  selectedAudioClipId: null,
   selectionKind: 'subtitle',
   fonts: [],
   revision: 0,
@@ -193,6 +266,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       currentPath: path ?? null,
       selectedClipId: project.clips[0]?.id ?? null,
       selectedMediaClipId: project.mediaClips[0]?.id ?? null,
+      selectedAudioClipId: project.audioClips?.[0]?.id ?? null,
       // 打开工程默认先看字幕（这是主任务）；没有字幕条时才落到视频编辑器
       selectionKind: project.clips.length > 0 ? 'subtitle' : 'media',
       revision: state.revision + 1
@@ -361,7 +435,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       })
       return existing.id
     }
-    const media: MediaItem = { ...item, id: item.id ?? createId('media') }
+    const media: MediaItem = normalizeImportedMedia({ ...item, id: item.id ?? createId('media') })
     set({ project: { ...state.project, media: [...state.project.media, media] }, revision: state.revision + 1 })
     return media.id
   },
@@ -465,6 +539,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const sourceIn = snapTimeToFrame(Math.max(0, input.sourceInSec ?? 0), fps)
     const sourceOut = snapTimeToFrame(Math.min(item.meta.durationSec, sourceIn + durationSec), fps)
     if (sourceOut - sourceIn < MIN_MEDIA_CLIP_SEC) return null
+    // 新建段一律 1x（无 speed 键），所以 `(sourceOut - sourceIn) / 1` 与旧写法逐字节一致
     let end = snapTimeToFrame(start + (sourceOut - sourceIn), fps)
     if (end - start < MIN_MEDIA_CLIP_SEC) end = snapTimeToFrame(start + MIN_MEDIA_CLIP_SEC, fps)
     const clip = makeMediaClip({
@@ -510,6 +585,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!current) return
     const item = state.project.media.find((m) => m.id === current.mediaId)
     const sourceDuration = item?.meta.durationSec ?? Number.POSITIVE_INFINITY
+    // v9：拖边时时间轴位移与源位移之间差一个倍速（1x 时与旧写法逐字节一致）
+    const speed = speedValueOf(current.speed)
     let next = { ...current }
     if (patch.timelineStartSec !== undefined) {
       const start = snapTimeToFrame(
@@ -517,13 +594,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         fps
       )
       const delta = start - current.timelineStartSec
-      const sourceIn = snapTimeToFrame(Math.max(0, Math.min(sourceDuration - MIN_MEDIA_CLIP_SEC, current.sourceInSec + delta)), fps)
+      const sourceIn = snapTimeToFrame(Math.max(0, Math.min(sourceDuration - MIN_MEDIA_CLIP_SEC, current.sourceInSec + delta * speed)), fps)
       const duration = current.timelineEndSec - start
       next = {
         ...next,
         timelineStartSec: start,
         sourceInSec: sourceIn,
-        sourceOutSec: snapTimeToFrame(sourceIn + duration, fps)
+        sourceOutSec: snapTimeToFrame(sourceIn + duration * speed, fps)
       }
     }
     if (patch.timelineEndSec !== undefined) {
@@ -532,10 +609,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         fps
       )
       const duration = end - next.timelineStartSec
-      const sourceOut = snapTimeToFrame(Math.min(Math.max(sourceDuration, next.sourceInSec + MIN_MEDIA_CLIP_SEC), next.sourceInSec + duration), fps)
+      const sourceOut = snapTimeToFrame(
+        Math.min(Math.max(sourceDuration, next.sourceInSec + MIN_MEDIA_CLIP_SEC * speed), next.sourceInSec + duration * speed),
+        fps
+      )
       next = {
         ...next,
-        timelineEndSec: snapTimeToFrame(next.timelineStartSec + (sourceOut - next.sourceInSec), fps),
+        timelineEndSec: snapTimeToFrame(next.timelineStartSec + (sourceOut - next.sourceInSec) / speed, fps),
         sourceOutSec: sourceOut
       }
     }
@@ -553,6 +633,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const mediaClips = state.project.mediaClips.filter((c) => c.id !== id)
     const removedSelected = state.selectedMediaClipId === id
     const selectedMediaClipId = removedSelected ? (mediaClips[0]?.id ?? null) : state.selectedMediaClipId
+    // v8.1：片段没了，它的防抖代理账本与磁盘缓存一起回收（fire-and-forget，不阻塞删轨）
+    useStabPreviewStore.getState().clearForClip(id, true)
     set({
       project: withMediaClips(state.project, mediaClips),
       selectedMediaClipId,
@@ -610,9 +692,204 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (clip.id !== id) return clip
       const next: MediaClip = { ...clip }
       delete next.video
+      // v8：「恢复默认」语义覆盖防抖（画面与稳定都回到不做任何处理）
+      delete next.stab
+      // v9：音频与变速也是“这一条的处理”，一并回到默认（时间轴长度回到源窗口长度）
+      delete next.audio
+      delete next.speed
+      next.timelineEndSec = snapTimeToFrame(
+        next.timelineStartSec + Math.max(MIN_MEDIA_CLIP_SEC, clip.sourceOutSec - clip.sourceInSec),
+        state.project.fps
+      )
       return next
     })
     set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
+
+  // ---------------------------------------------------------------- v8 防抖
+
+  updateMediaClipStab: (id, patch) => {
+    const state = get()
+    const mediaClips = state.project.mediaClips.map((clip) => {
+      if (clip.id !== id) return clip
+      // 与 updateMediaClipVideo 同一套纪律：增量合并 → 纯函数归一 → 全默认整键删除
+      const current = clip.stab ?? defaultMediaStab()
+      const normalized = normalizeMediaStab({ ...current, ...patch })
+      const next: MediaClip = { ...clip }
+      if (normalized) next.stab = normalized
+      else delete next.stab
+      return next
+    })
+    set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
+
+  // ---------------------------------------------------------------- v9 音频与变速
+
+  updateMediaClipAudio: (id, patch) => {
+    const state = get()
+    const mediaClips = state.project.mediaClips.map((clip) => {
+      if (clip.id !== id) return clip
+      const current = clip.audio ?? defaultClipAudio()
+      const normalized = normalizeClipAudio({ ...current, ...patch })
+      const next: MediaClip = { ...clip }
+      if (normalized) next.audio = normalized
+      else delete next.audio
+      return next
+    })
+    set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
+
+  updateMediaClipSpeed: (id, patch) => {
+    const state = get()
+    const fps = state.project.fps
+    const mediaClips = state.project.mediaClips.map((clip) => {
+      if (clip.id !== id) return clip
+      const current = clip.speed ?? defaultClipSpeed()
+      const normalized = normalizeClipSpeed({ ...current, ...patch })
+      const next: MediaClip = { ...clip }
+      if (normalized) next.speed = normalized
+      else delete next.speed
+      // 源窗口不动，时间轴出点跟着倍速伸缩（1x 时就是源窗口长度，与旧恒等式一致）
+      const sourceLen = Math.max(MIN_MEDIA_CLIP_SEC, clip.sourceOutSec - clip.sourceInSec)
+      next.timelineEndSec = snapTimeToFrame(
+        clip.timelineStartSec + Math.max(MIN_MEDIA_CLIP_SEC, sourceLen / speedValueOf(normalized)),
+        fps
+      )
+      return next
+    })
+    set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
+
+  updateAudioClipAudio: (id, patch) => {
+    const state = get()
+    const audioClips = (state.project.audioClips ?? []).map((clip) => {
+      if (clip.id !== id) return clip
+      const current = clip.audio ?? defaultClipAudio()
+      const normalized = normalizeClipAudio({ ...current, ...patch })
+      const next: AudioClip = { ...clip }
+      if (normalized) next.audio = normalized
+      else delete next.audio
+      return next
+    })
+    set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
+  },
+
+  updateAudioClipSpeed: (id, patch) => {
+    const state = get()
+    const fps = state.project.fps
+    const audioClips = (state.project.audioClips ?? []).map((clip) => {
+      if (clip.id !== id) return clip
+      const current = clip.speed ?? defaultClipSpeed()
+      const normalized = normalizeClipSpeed({ ...current, ...patch })
+      return applyAudioClipSpeed(clip, normalized, fps)
+    })
+    set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
+  },
+
+  resetAudioClipFx: (id) => {
+    const state = get()
+    const fps = state.project.fps
+    const audioClips = (state.project.audioClips ?? []).map((clip) => {
+      if (clip.id !== id) return clip
+      const cleared: AudioClip = { ...clip }
+      delete cleared.audio
+      // 变速归位后时间轴长度要回到源窗口长度
+      return applyAudioClipSpeed(cleared, undefined, fps)
+    })
+    set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
+  },
+
+  // ---------------------------------------------------------------- v7 音频轨
+
+  selectAudioClip: (id) =>
+    set({ selectedAudioClipId: id, ...(id ? { selectionKind: 'audio' as const } : {}) }),
+
+  insertAudioClip: (input) => {
+    const state = get()
+    const item = state.project.media.find((m) => m.id === input.mediaId)
+    if (!item) return null
+    const clip = makeAudioClip(
+      {
+        id: createId('aclip'),
+        mediaId: input.mediaId,
+        timelineStartSec: input.timelineStartSec,
+        durationSec: input.durationSec ?? item.meta.durationSec,
+        sourceInSec: input.sourceInSec ?? 0,
+        layer: input.layer,
+        sourceDurationSec: item.meta.durationSec
+      },
+      state.project.fps
+    )
+    if (!clip) return null
+    const audioClips = [...(state.project.audioClips ?? []), clip]
+    set({
+      project: withAudioClips(state.project, audioClips),
+      selectedAudioClipId: clip.id,
+      revision: state.revision + 1
+    })
+    return clip
+  },
+
+  moveAudioClip: (id, timelineStartSec) => {
+    const state = get()
+    const audioClips = (state.project.audioClips ?? []).map((clip) =>
+      clip.id === id ? moveAudioClip(clip, timelineStartSec, state.project.fps) : clip
+    )
+    set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
+  },
+
+  trimAudioClip: (id, patch) => {
+    const state = get()
+    const audioClips = (state.project.audioClips ?? []).map((clip) => {
+      if (clip.id !== id) return clip
+      const item = state.project.media.find((m) => m.id === clip.mediaId)
+      return trimAudioClip(clip, patch, state.project.fps, item?.meta.durationSec ?? Number.POSITIVE_INFINITY)
+    })
+    set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
+  },
+
+  removeAudioClip: (id) => {
+    const state = get()
+    const audioClips = (state.project.audioClips ?? []).filter((clip) => clip.id !== id)
+    const removedSelected = state.selectedAudioClipId === id
+    const selectedAudioClipId = removedSelected ? (audioClips[0]?.id ?? null) : state.selectedAudioClipId
+    set({
+      project: withAudioClips(state.project, audioClips),
+      ...(removedSelected ? { selectedAudioClipId } : {}),
+      // 删掉了正在编辑的音频段且再无音频段：检查器退回字幕编辑器，不留一个空音频面板
+      ...(removedSelected && selectedAudioClipId === null && state.selectionKind === 'audio'
+        ? { selectionKind: 'subtitle' as const }
+        : {}),
+      revision: state.revision + 1
+    })
+  },
+
+  // ---------------------------------------------------------------- v7 叠层
+
+  setMediaClipLayer: (id, layer) => {
+    const state = get()
+    const next = normalizeLayer(layer)
+    const mediaClips = state.project.mediaClips.map((clip) => {
+      if (clip.id !== id) return clip
+      const updated: MediaClip = { ...clip }
+      if (next > 0) updated.layer = next
+      else delete updated.layer
+      return updated
+    })
+    set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
+
+  setAudioClipLayer: (id, layer) => {
+    const state = get()
+    const next = normalizeLayer(layer)
+    const audioClips = (state.project.audioClips ?? []).map((clip) => {
+      if (clip.id !== id) return clip
+      const updated: AudioClip = { ...clip }
+      if (next > 0) updated.layer = next
+      else delete updated.layer
+      return updated
+    })
+    set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
   },
 
   compactTimeline: () => {

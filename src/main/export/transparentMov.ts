@@ -1,5 +1,6 @@
 import { BrowserWindow } from 'electron'
 import { buildTransparentMovFromPipe, buildTransparentMovQtrle } from '../../shared/ffmpegArgs'
+import type { TransparentAudioOptions } from '../../shared/ffmpegArgs'
 import type { Fps, TransparentCodec } from '../../shared/types'
 import { spawnJob, terminateJob } from '../procRegistry'
 import type { SpawnedJob } from '../procRegistry'
@@ -28,6 +29,8 @@ export interface TransparentRunCtx {
   codec: TransparentCodec
   /** 管道内帧形式（默认 raw） */
   frameFormat: 'raw' | 'png'
+  /** v7：音频轨（不传 = 保持 `-an`，argv 与旧版一致） */
+  audio?: TransparentAudioOptions
   isCancelled: () => boolean
   /** 进度节流由引擎统一调度 */
   onTick: () => void
@@ -43,14 +46,20 @@ export function waitForClose(job: SpawnedJob): Promise<number | null> {
 export async function runTransparentMov(ctx: TransparentRunCtx, channel: FrameChannelHandle): Promise<'done' | 'cancelled'> {
   const args =
     ctx.codec === 'qtrle'
-      ? buildTransparentMovQtrle(ctx.fps, ctx.outputPath, ctx.frameFormat, {
-          width: ctx.width,
-          height: ctx.height
-        })
-      : buildTransparentMovFromPipe(ctx.fps, ctx.outputPath, ctx.frameFormat, {
-          width: ctx.width,
-          height: ctx.height
-        })
+      ? buildTransparentMovQtrle(
+          ctx.fps,
+          ctx.outputPath,
+          ctx.frameFormat,
+          { width: ctx.width, height: ctx.height },
+          ctx.audio
+        )
+      : buildTransparentMovFromPipe(
+          ctx.fps,
+          ctx.outputPath,
+          ctx.frameFormat,
+          { width: ctx.width, height: ctx.height },
+          ctx.audio
+        )
 
   const parser = new ProgressParser()
   const job = spawnJob({

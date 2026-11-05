@@ -14,7 +14,9 @@ export const USER_DATA_DIRS = {
   /** v2：素材卡片缩略图缓存（与 media 池 id 同名 jpg） */
   thumbs: 'thumbs',
   /** v5：媒体片段时间帧预览条（Thumbnail Strip）长图缓存，按 素材+区间+格数 命名 */
-  strips: 'strips'
+  strips: 'strips',
+  /** v8.1：防抖预览代理（稳定化后的区间 mp4 + .trf 运动数据），按 片段+签名指纹 命名 */
+  stabPreview: 'stab-preview'
 } as const
 
 export const FONTS_MANIFEST_FILE = 'fonts.json'
@@ -27,6 +29,15 @@ export const AUTOSAVE_BACKUP_FILE = 'autosave.focusnews.bak.json'
  * 导入、探测、导出全链路都可用；但 Chromium 没有 MXF 解封装器，需要代理转码才能进 <video> 预览。
  */
 export const IMPORTABLE_VIDEO_EXTENSIONS = ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'wmv', 'mts', 'm2ts', 'mxf'] as const
+
+/**
+ * v7：可导入的音频扩展名（不带点）。
+ * ffprobe 能读、Chromium 能直提：mp3/wav/m4a/aac/flac/ogg 都在两边支持集内。
+ */
+export const IMPORTABLE_AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus'] as const
+
+/** v7：可导入的图像扩展名（作为视觉素材上媒体轨） */
+export const IMPORTABLE_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'tif', 'tiff'] as const
 
 /**
  * 字幕条**布局边距** = 安全区内缩 × 该系数。
@@ -334,8 +345,11 @@ export const DEFAULT_ANIMATION_OUT_SEC = 1
  */
 export const MAX_ANIMATION_SEC = 3
 
-/** 自动保存 debounce */
-export const AUTOSAVE_DEBOUNCE_MS = 800
+/** 自动保存 debounce：一次操作完成（revision 停止变化）后尽快落盘；拖拽连续改值时把整段手势合并成一次写入 */
+export const AUTOSAVE_DEBOUNCE_MS = 250
+
+/** 退出前等待在途自动存档写入落盘的上限（超时放行，避免坏盘/锁文件卡死退出流程） */
+export const AUTOSAVE_FLUSH_TIMEOUT_MS = 2_000
 
 /**
  * 品牌字体导入提示（规格 §4.5 / §8）。

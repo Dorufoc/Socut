@@ -6,6 +6,7 @@ import {
   fpsToString
 } from '@shared/constants'
 import { createClip, createDefaultProject, normalizeProject } from '@shared/projectSchema'
+import { frameTimeSec, stepLocalFrame } from '@shared/fps'
 import { secondsToTimecode } from '@shared/timecode'
 import { TEXT } from '@shared/i18n'
 import type { AppInfo } from '@shared/api'
@@ -15,6 +16,7 @@ import { useProjectStore } from './state/projectStore'
 import { useUiStore } from './state/uiStore'
 import { useExportStore } from './state/exportStore'
 import { usePreviewSpec } from './hooks/usePreviewSpec'
+import { useTransportKeys, isEditableTarget } from './hooks/useTransportKeys'
 import { useProjectAutosave } from './hooks/useProjectAutosave'
 import { runAppSmoke } from './smoke/runAppSmoke'
 import { renderReviewSheet } from './smoke/renderReviewSheet'
@@ -22,8 +24,7 @@ import { runPixelParityCheck } from './smoke/runPixelParityCheck'
 import { runErrorDemo } from './smoke/runErrorDemo'
 import { runVisualCheck } from './smoke/runVisualCheck'
 import { ensureFontRegistered } from './hooks/useFontLoader'
-import { askConfirm } from './dialog/ask'
-import { PreviewStage } from './components/PreviewStage'
+import { PreviewStage, type StageSeekHandle } from './components/PreviewStage'
 import { InfoBar } from './components/ui/InfoBar'
 import { Splitter } from './components/ui/Splitter'
 import { usePaneLayout } from './layout/usePaneLayout'
@@ -37,6 +38,17 @@ import { CompatModal } from './dialog/CompatModal'
 import { MediaLibraryPanel } from './panels/MediaLibraryPanel'
 import { CaptionListPanel } from './panels/CaptionListPanel'
 import { WatermarkPanel } from './panels/WatermarkPanel'
+import type { Project } from '@shared/types'
+
+/** 自动存档里是否有值得恢复的编辑进度：字幕/媒体/音频任一轨有内容，或水印已启用 */
+export function hasRestoreProgress(project: Project): boolean {
+  return (
+    project.clips.length > 0 ||
+    project.mediaClips.length > 0 ||
+    (project.audioClips?.length ?? 0) > 0 ||
+    project.watermark?.enabled === true
+  )
+}
 
 /**
  * 主界面（WinUI 3 / Fluent）：标题栏 + 命令栏 + 左侧 Tab 壳（素材库/水印/字幕/导出/进度） + 中央预览 + 右侧字幕条检查器 + 双轨时间轴。
@@ -78,19 +90,23 @@ export function App(): ReactElement {
   // 规格 §8（v2 枚级）：素材池里的文件被移动/删除时提示重新定位（而不是等到导出才报错）
   useMediaIntegrity()
 
-  const seekRef = useRef<((sec: number) => void) | null>(null)
+  /**
+   * 预览句柄（时间轴定位 + 键盘逐帧跳转共用）：PreviewStage 每次渲染补登一次，
+   * 所以 totalFrames / currentFrame 取到的都是当前规格下的读数。
+   */
+  const stageRef = useRef<StageSeekHandle | null>(null)
   const setDisplayTime = useUiStore((state) => state.setDisplayTime)
   const seekTo = useCallback(
     (sec: number): void => {
-      seekRef.current?.(sec)
+      stageRef.current?.seekTime(sec)
       // 拖拽刮擦时同步 UI 时间文本：预览循环是节流的，不等它才能让时间码/播放头即刻跟随
       setDisplayTime(sec)
     },
     [setDisplayTime]
   )
 
-  const registerHandle = useCallback((handle: { seekTime: (sec: number) => void; seekFrame: (f: number) => void }) => {
-    seekRef.current = handle.seekTime
+  const registerHandle = useCallback((handle: StageSeekHandle): void => {
+    stageRef.current = handle
   }, [])
 
   /**
@@ -103,16 +119,42 @@ export function App(): ReactElement {
   }, [seekTo])
 
   /**
+   * 逐帧跳转（← / →，长按连跳）：帧号取预览时钟的真实当前帧——
+   * UI 时间文本是 100ms 节流值，拿它折算会差好几帧。落点夹在总帧数内（到头停住、不回绕），
+   * 并且先接管播放时钟：播放中不暂停的话，跳完这一帧立刻被时钟带走，等于没跳。
+   */
+  const stepFrame = useCallback(
+    (deltaFrames: number): void => {
+      const stage = stageRef.current
+      if (!stage || !spec) return
+      const ui = useUiStore.getState()
+      if (ui.playing) ui.setPlaying(false)
+      // currentFrame() 是绝对帧号，减去工程起点才是预览循环用的相对帧
+      const local = stepLocalFrame(stage.currentFrame() - spec.startFrame, deltaFrames, stage.totalFrames)
+      seekTo(frameTimeSec(local, spec.fps))
+    },
+    [seekTo, spec]
+  )
+
+  // 空格播放/暂停 + 方向键逐帧（长按连跳）：焦点在输入框或门禁弹窗排队中自动让位
+  useTransportKeys({
+    togglePlay: () => {
+      const ui = useUiStore.getState()
+      ui.setPlaying(!ui.playing)
+    },
+    stepFrame
+  })
+
+  /**
    * 快捷键（阶段 6）：
    * - Ctrl/Cmd+B：在播放头处拆分媒体段；
    * - Delete：选中媒体段且焦点不在输入控件时删除该段。
    * 输入控件里不拦：文本框内的 Ctrl+B（如浏览器式加粗）不得被抢走。
+   * 空格与方向键在 `useTransportKeys` 里，共用同一条 `isEditableTarget` 判据。
    */
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      const target = event.target as HTMLElement | null
-      const tag = target?.tagName
-      const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable === true
+      const inField = isEditableTarget(event.target)
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b' && !inField) {
         event.preventDefault()
         const ui = useUiStore.getState()
@@ -272,14 +314,14 @@ export function App(): ReactElement {
           return
         }
         const saved = await window.focusnews.project.autosaveRead()
-        if (saved && saved.clips.length > 0) {
-          const ok = await askConfirm(TEXT.project.newProject, TEXT.project.restoreAutosave, '恢复')
-          if (ok) {
-            const restored = normalizeProject(saved) ?? saved
-            setProject(restored)
-            // 工程里存过的左侧栏 Tab 恢复现场（无则保持冷启动默认素材库）
-            if (restored.ui?.leftTab) useUiStore.getState().setLeftTab(restored.ui.leftTab)
-          }
+        // 自动恢复上次编辑进度（不再弹确认）：任意一轨有内容或开了水印就恢复，
+        // 纯参数改动（分辨率/帧率/空工程）不值得打扰冷启动默认态
+        if (saved && hasRestoreProgress(saved)) {
+          const restored = normalizeProject(saved) ?? saved
+          setProject(restored)
+          // 工程里存过的左侧栏 Tab 恢复现场（无则保持冷启动默认素材库）
+          if (restored.ui?.leftTab) useUiStore.getState().setLeftTab(restored.ui.leftTab)
+          setNotice(TEXT.project.restoredAutosave)
         }
       } catch (bootFailure) {
         setBootError(String(bootFailure))
@@ -512,15 +554,39 @@ export function App(): ReactElement {
               <div className="transport__group">
                 <button
                   type="button"
+                  className="iconbtn"
+                  aria-label="回到起点"
+                  title="回到起点"
+                  onClick={() => seekTo(0)}
+                >
+                  ⏮
+                </button>
+                <button
+                  type="button"
+                  className="iconbtn"
+                  aria-label="上一帧"
+                  title="上一帧（←，按住连跳）"
+                  onClick={() => stepFrame(-1)}
+                >
+                  |◀
+                </button>
+                <button
+                  type="button"
                   className="iconbtn iconbtn--accent"
                   aria-label={playing ? TEXT.preview.pause : TEXT.preview.play}
-                  title={playing ? TEXT.preview.pause : TEXT.preview.play}
+                  title={`${playing ? TEXT.preview.pause : TEXT.preview.play}（空格）`}
                   onClick={() => setPlaying(!playing)}
                 >
                   {playing ? '❚❚' : '▶'}
                 </button>
-                <button type="button" className="iconbtn" aria-label="回到起点" title="回到起点" onClick={() => seekTo(0)}>
-                  ⏮
+                <button
+                  type="button"
+                  className="iconbtn"
+                  aria-label="下一帧"
+                  title="下一帧（→，按住连跳）"
+                  onClick={() => stepFrame(1)}
+                >
+                  ▶|
                 </button>
                 <button
                   type="button"

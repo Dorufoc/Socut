@@ -5,9 +5,11 @@ import { snapTimeToFrame } from '@shared/fps'
 import {
   alignAfterOverlap,
   canSplitMediaClipAt,
+  compactMediaClips,
   findActiveMediaClip,
   mediaClipsOverlap,
   mediaSpanFrames,
+  resolveVisibleMediaClips,
   sortMediaClips,
   sourceTimeOf,
   splitMediaClipAt
@@ -18,6 +20,8 @@ import type { MediaClip } from '@shared/types'
 
 function clip(over: Partial<MediaClip> = {}): MediaClip {
   return {
+    // 其余可选键（layer / video / stab / audio / speed）原样透传
+    ...over,
     id: over.id ?? 'mclip-a',
     mediaId: over.mediaId ?? 'media-1',
     timelineStartSec: over.timelineStartSec ?? 0,
@@ -140,5 +144,59 @@ describe('mediaClips.canSplitMediaClipAt（UI 按钮态谓词）', () => {
     // 谓词结论与实际拆分结果一致
     expect(splitMediaClipAt(tracks[0]!, 3, FPS_30, newId)).not.toBeNull()
     expect(splitMediaClipAt(tracks[0]!, 1 + MIN_MEDIA_CLIP_SEC / 2, FPS_30, newId)).toBeNull()
+  })
+})
+
+/**
+ * v9：变速段的时间轴↔源坐标换算。
+ *
+ * 口径：**源窗口不变、时间轴伸缩**（与预览 `playbackRate` / 导出 `setpts` 同一语义），
+ * 所以任何往源上投影的地方都要乘倍速，1x 时必须退回旧写法。
+ */
+describe('mediaClips 变速段的时间换算（v9）', () => {
+  it('拆分：切点往源上投影要乘倍速，两半源窗口相接', () => {
+    const base = clip({
+      timelineStartSec: 0,
+      timelineEndSec: 4,
+      sourceInSec: 10,
+      sourceOutSec: 18,
+      speed: { speed: 2, maintainPitch: true }
+    })
+    const { left, right } = splitMediaClipAt(base, 2, FPS_30, newId)!
+    expect(left.sourceOutSec).toBe(14)
+    expect(right.sourceInSec).toBe(14)
+    expect(right.sourceOutSec).toBe(18)
+    // 两半各自仍满足恒等式：时间轴 2s @ 2x = 源 4s
+    expect(left.sourceOutSec - left.sourceInSec).toBeCloseTo((left.timelineEndSec - left.timelineStartSec) * 2, 6)
+    expect(right.sourceOutSec - right.sourceInSec).toBeCloseTo((right.timelineEndSec - right.timelineStartSec) * 2, 6)
+  })
+
+  it('sourceTimeOf：播放头走到段中 = 吃了一半源窗口（不是时间轴偏移）', () => {
+    const base = clip({ timelineStartSec: 0, timelineEndSec: 2, sourceInSec: 10, sourceOutSec: 14, speed: { speed: 2, maintainPitch: true } })
+    expect(sourceTimeOf([base], 1.5)!.sourceSec).toBeCloseTo(13, 6)
+    // 1x 时仍是旧口径
+    expect(sourceTimeOf([clip({ timelineStartSec: 0, timelineEndSec: 4, sourceInSec: 10, sourceOutSec: 14 })], 1.5)!.sourceSec).toBeCloseTo(11.5, 6)
+  })
+
+  it('层号取上层：被遮蔽后的源窗口按倍速投影', () => {
+    const top = clip({ id: 'top', timelineStartSec: 0, timelineEndSec: 4, sourceInSec: 0, sourceOutSec: 8, layer: 1, speed: { speed: 2, maintainPitch: true } })
+    const bottom = clip({ id: 'bottom', mediaId: 'media-2', timelineStartSec: 2, timelineEndSec: 6, sourceInSec: 20, sourceOutSec: 28, speed: { speed: 2, maintainPitch: true } })
+    const visible = resolveVisibleMediaClips([top, bottom])
+    expect(visible.map((c) => [c.id, c.timelineStartSec, c.timelineEndSec])).toEqual([
+      ['top', 0, 4],
+      ['bottom', 4, 6]
+    ])
+    // 下层被遮掉前 2s：源入点往后吃 2s × 2 = 4s
+    expect(visible[1]!.sourceInSec).toBeCloseTo(24, 6)
+    expect(visible[1]!.sourceOutSec).toBeCloseTo(28, 6)
+  })
+
+  it('主轨对齐：只改时间轴落点，源窗口跟着倍速重算', () => {
+    const a = clip({ id: 'a', timelineStartSec: 2, timelineEndSec: 4, sourceInSec: 0, sourceOutSec: 4, speed: { speed: 2, maintainPitch: true } })
+    const compacted = compactMediaClips([a], FPS_30)
+    expect(compacted[0]!.timelineStartSec).toBe(0)
+    expect(compacted[0]!.timelineEndSec).toBe(2)
+    // 时间轴 2s @ 2x → 仍读 4s 源
+    expect(compacted[0]!.sourceOutSec).toBeCloseTo(4, 6)
   })
 })

@@ -300,6 +300,73 @@ describe('Timeline 字幕轨示意条', () => {
   })
 })
 
+/** 音频轨（v7.1）：独立车道 + 时长条宽度 = 片段占比，删除按钮跟选中态联动 */
+describe('音频轨', () => {
+  function seedAudio(): void {
+    seedTools()
+    const project = useProjectStore.getState().project
+    useProjectStore.setState({
+      project: {
+        ...project,
+        audioClips: [
+          { id: 'a1', mediaId: 'media-1', timelineStartSec: 2, timelineEndSec: 10, sourceInSec: 0, sourceOutSec: 8 }
+        ]
+      },
+      selectedAudioClipId: null
+    })
+  }
+
+  const audioButton = (root: HTMLElement): HTMLButtonElement =>
+    Array.from(root.querySelectorAll('.timeline__bar button')).find(
+      (button) => button.textContent === TEXT.timeline.removeAudioClip
+    ) as HTMLButtonElement
+
+  it('音频段渲染在独立车道：宽度按占比、名称在条上', () => {
+    seedAudio()
+    const root = renderTimeline(vi.fn())
+    const card = root.querySelector('.timeline__track--audio .audio-clip-card') as HTMLElement
+    expect(card).toBeTruthy()
+    expect(card.textContent).toContain('a.mp4')
+    // 2s→10s 共 8s，在 31s 的时间轴上占 8/31 ≈ 25.8%
+    expect(parseFloat(card.style.width) / 1000).toBeCloseTo(8 / 31, 2)
+  })
+
+  it('删除音频段按钮只在选中音频段时可用', () => {
+    seedAudio()
+    const root = renderTimeline(vi.fn())
+    expect(audioButton(root).disabled).toBe(true)
+
+    act(() => useProjectStore.getState().selectAudioClip('a1'))
+    expect(audioButton(root).disabled).toBe(false)
+
+    fireEvent.click(audioButton(root))
+    expect(useProjectStore.getState().project.audioClips).toBeUndefined()
+    expect(useProjectStore.getState().selectedAudioClipId).toBeNull()
+  })
+
+  it('音频素材拖到媒体轨被拒（提示去音频轨）', () => {
+    seedTools()
+    const project = useProjectStore.getState().project
+    useProjectStore.setState({
+      project: { ...project, media: project.media.map((item) => ({ ...item, kind: 'audio' as const })) }
+    })
+    const root = renderTimeline(vi.fn())
+    const mediaTrack = root.querySelector('.timeline__track--media') as HTMLElement
+
+    const transfer = {
+      types: ['application/x-focusnews-media'],
+      setData: () => undefined,
+      getData: () => 'media-1',
+      dropEffect: 'copy'
+    }
+    fireEvent.dragOver(mediaTrack, { dataTransfer: transfer, clientX: 0, clientY: 0 })
+    fireEvent.drop(mediaTrack, { dataTransfer: transfer, clientX: 0, clientY: 0 })
+
+    expect(useProjectStore.getState().project.mediaClips).toHaveLength(2) // 原有两段，没多出来
+    expect(useUiStore.getState().notice).toContain('音频轨')
+  })
+})
+
 /**
  * 时间轴工具栏（v6.2）：主轨对齐 / 自动吸附 / 预览轴。
  *
