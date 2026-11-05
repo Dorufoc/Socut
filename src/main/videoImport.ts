@@ -94,6 +94,35 @@ export async function pickAndProbeVideo(
   return { path: target, probe }
 }
 
+/**
+ * v2 素材库：多选批量导入。逐文件探测，单文件探测失败不阻断整批（跳过并继续）；
+ * 同一批内重复路径去重。
+ */
+export async function pickManyAndProbeVideos(
+  parent: BrowserWindow | null
+): Promise<{ path: string; probe: VideoProbeResult }[]> {
+  const options = {
+    title: '选择参考视频（可多选）',
+    properties: ['openFile', 'multiSelections'] as ['openFile', 'multiSelections'],
+    filters: [{ name: '视频文件', extensions: VIDEO_EXTENSIONS }, { name: '所有文件', extensions: ['*'] }]
+  }
+  const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
+  if (result.canceled) return []
+  const out: { path: string; probe: VideoProbeResult }[] = []
+  const seen = new Set<string>()
+  for (const filePath of result.filePaths) {
+    if (seen.has(filePath)) continue
+    seen.add(filePath)
+    try {
+      const probe = await probeVideo(filePath, 'pick-many')
+      out.push({ path: filePath, probe })
+    } catch (error) {
+      await log('warn', `批量导入跳过 ${path.basename(filePath)}：${String(error)}`)
+    }
+  }
+  return out
+}
+
 /** 叠加导出所需的跟随参数（规格 §2.3：强制跟随参考视频，UI 只读）。 */
 export interface OverlayFollowParams {
   resolution: { width: number; height: number }

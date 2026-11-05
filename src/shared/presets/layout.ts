@@ -7,16 +7,25 @@ import type { ColorTokenKey, LayoutNode, LayoutPatch, SizeToken } from '../types
  *   ① 副标题放在**主标题纯色矩形上方**，不融合进同一个框、也不放在主标题下面；
  *   ② 副标题是**独立、更小的纯色矩形**，其左边缘与下方主标题矩形严格对齐；
  *   ③ 主条宽度随文字自适应（不再满宽），长文案换行时只向上长高；
- *   ④ 所有预设共用 8vh 底部锚点，切换预设不上下跳。
+ *   ④ 所有预设共用 8vh 底部锚点，切换预设不上下跳；
+ *   ⑤ 两条矩形的宽度上限都是 root 内容宽（`BAR_MAX_WIDTH`）：长文案可以一直顶到
+ *      画面右缘，右侧剩下的空白与左边距相等（用户明确要求：不再被百分比提前截断）。
  *
  * 生成的树形：
  *   root(col, absolute, left=right=布局边距, bottom=8vh)
- *     ├─ secondaryBar（副标题矩形，alignSelf=flex-start，maxWidth ≤ 主条最小宽度）
+ *     ├─ secondaryBar（副标题矩形，alignSelf=flex-start，maxWidth = root 内容宽）
  *     │    └─ subtitle(text)
- *     └─ primaryBar（主标题矩形，alignSelf=flex-start，maxWidth 上限）
+ *     └─ primaryBar（主标题矩形，alignSelf=flex-start，maxWidth = root 内容宽）
  *          ├─ [titleBlock]（可选：左侧强调块/徽标，撑满整条高度）
  *          └─ title(text)
  */
+
+/**
+ * 条宽上限：root 已声明 `left = right = 布局边距`，所以它的 100% 就是
+ * 「画宽 − 左右各一份边距」（1080p：1728px，右缘落在 1824px = 1920 − 96）。
+ * 用百分比而不是 px 常量，是为了让 360p→4K 全档都自动跟随，不需要再配一套上限。
+ */
+export const BAR_MAX_WIDTH = '100%' as const
 
 export interface TextTier {
   size: SizeToken
@@ -46,12 +55,12 @@ export interface LeftBlockStyle {
 export interface SubtitleAboveSpec {
   leftInset: SizeToken
   bottomInset: SizeToken
-  /** 主条内容最大宽度 */
+  /** 主条内容最大宽度（默认 BAR_MAX_WIDTH：可一直延伸到画面右边距） */
   maxWidth: SizeToken
-  /** 主条最小宽度；副标题的 maxWidth 不应超过它，避免“副标题比主标题还宽” */
+  /** 主条最小宽度：短文案的视觉重量保底（与宽度上限无关，不再充当副标题上限） */
   minWidth: SizeToken
-  /** 副标题矩形最大宽度（建议 = 主条 minWidth） */
-  subMaxWidth: SizeToken
+  /** 副标题矩形最大宽度；缺省跟随主条上限（两者都能延伸到右边距） */
+  subMaxWidth?: SizeToken
   /** 副标题与主条之间的垂直间距 */
   gapY?: SizeToken
   title: TextTier
@@ -90,7 +99,8 @@ function subtitleBar(spec: SubtitleAboveSpec): LayoutNode {
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'flex-start',
-    maxWidth: spec.subMaxWidth,
+    // 副标题与主标题共用同一个宽度上限：长副标题也能一直铺到画面右边距
+    maxWidth: spec.subMaxWidth ?? spec.maxWidth,
     ...(spec.subtitlePlate.minWidth !== undefined ? { minWidth: spec.subtitlePlate.minWidth } : {}),
     padding: {
       // 预设把左侧内边距设成「主条左块宽 + 间距」，副标题文字就会与主标题文字共左线
@@ -165,8 +175,8 @@ function titleBar(spec: SubtitleAboveSpec): LayoutNode {
 }
 
 /**
- * 副标题条在上 + 主标题条在下：两块独立纯色矩形，左边缘对齐。
- * 副标题条更矮、更窄；主条宽度随标题自适应。
+ * 副标题条在上 + 主标题条在下：两块独立纯色矩形，左边缘对齐、宽度上限相同。
+ * 副标题条更矮；两块都随文字自适应，长文案一直延伸到画面右边距后才在条内换行。
  */
 export function buildSubtitleAbove(spec: SubtitleAboveSpec): LayoutNode {
   return {

@@ -64,8 +64,22 @@ async function peek(file, pick) {
   }
 }
 
-async function step(label, file, args, env, timeoutMs, pick) {
+/**
+ * 取证产物在本轮启动前先删掉。
+ * 不这么做会假绿：应用有单实例锁，用户开着 FocusNews 时冒烟实例会**秒退且退出码 0**，
+ * 于是上一轮留下的 report.json 被当成本轮结果读出来（实测读数：每步 frames=0 / 1.08s）。
+ */
+async function clearArtifacts(pickFile, extraFiles = []) {
+  const targets = [pickFile, ...extraFiles].filter(Boolean)
+  for (const target of targets) {
+    await fs.rm(path.join(root, target), { force: true }).catch(() => undefined)
+  }
+  return targets
+}
+
+async function step(label, file, args, env, timeoutMs, pick, extraArtifacts = []) {
   const started = Date.now()
+  const artifacts = await clearArtifacts(pick?.file, extraArtifacts)
   let result
   try {
     result = await run(file, args, env, timeoutMs)
@@ -74,17 +88,36 @@ async function step(label, file, args, env, timeoutMs, pick) {
     console.log(`FAIL ${label} — 执行异常 ${String(error)}`)
     return false
   }
-  const ok = result.code === 0
   const facts = pick ? await peek(pick.file, pick.select) : null
+  // 取证文件没写出来 = 本轮根本没跑成（典型：单实例锁导致秒退），不能算通过
+  let missing = null
+  if (result.code === 0) {
+    for (const target of artifacts) {
+      const exists = await fs.stat(path.join(root, target)).then(() => true, () => false)
+      if (!exists) {
+        missing = target
+        break
+      }
+    }
+  }
+  const ok = result.code === 0 && missing === null && (pick === undefined || facts !== null)
   results.push({
     label,
     code: result.code,
     ok,
     seconds: Number(((Date.now() - started) / 1000).toFixed(1)),
-    facts
+    facts,
+    ...(missing ? { note: `取证文件未产出：${missing}` } : {})
   })
   console.log(`${ok ? 'OK  ' : 'FAIL'} ${label} (exit ${result.code}, ${((Date.now() - started) / 1000).toFixed(1)}s)${facts ? ` ${JSON.stringify(facts)}` : ''}`)
   if (!ok) {
+    const reason =
+      missing !== null
+        ? `取证文件未产出（${missing}）——若本机正开着 FocusNews 窗口，请先关掉再跑，单实例锁会让冒烟秒退`
+        : facts === null && pick !== undefined
+          ? `取证文件无法解析（${pick.file}）`
+          : ''
+    if (reason) console.log(`    ${reason}`)
     const tail = (result.stderr || result.stdout).split(/\r?\n/).filter(Boolean).slice(-6).join('\n    ')
     console.log(`    ${tail}`)
   }
@@ -106,14 +139,17 @@ async function main() {
   for (const project of ['node', 'web', 'tests']) {
     await step(`typecheck:${project}`, node, [tsc, '--noEmit', '-p', `tsconfig.${project}.json`])
   }
-  await step('vitest（164 用例，node 148 + dom 16）', node, [vitest, 'run'])
+  await step('vitest（317 用例，node + dom 两套）', node, [vitest, 'run'])
 
   // --- CLI 集成冒烟（不依赖 Electron）---
   await step('CLI 冒烟：1080p30/10s 透明 MOV', node, ['scripts/smoke-export.mjs', '--width', '1920', '--height', '1080', '--fps', '30/1', '--seconds', '10'])
   await step('CLI 冒烟：720p 叠加合成（C3/C4 锁定）', node, ['scripts/smoke-export.mjs', '--overlay', '--width', '1280', '--height', '720', '--fps', '24000/1001', '--seconds', '5'])
 
   if (!QUICK) {
-    const base = { FOCUSNEWS_SMOKE: '1', FOCUSNEWS_SMOKE_GATE: '0', FOCUSNEWS_SMOKE_OVERLAY: '0', FOCUSNEWS_SMOKE_CANCEL: '0', FOCUSNEWS_SMOKE_KIND: 'transparentMov', FOCUSNEWS_SMOKE_DELIVERY: 'pipe', FOCUSNEWS_SMOKE_AUDIO: '', FOCUSNEWS_PIXELCHECK: '', FOCUSNEWS_SHOT: '', FOCUSNEWS_SHOT_ERROR: '', FOCUSNEWS_SHOT_REFMISSING: '', FOCUSNEWS_REVIEW_SHEET: '' }
+    // 隔离 profile：单实例锁会让冒烟实例秒退（退出码仍 0），上一轮报告会被当成本轮结果
+    const gateUserData = path.join(root, 'spikes', 'tmp-integration', 'gate-userdata')
+    await fs.mkdir(gateUserData, { recursive: true })
+    const base = { FOCUSNEWS_SMOKE: '1', FOCUSNEWS_USER_DATA: gateUserData, FOCUSNEWS_SMOKE_GATE: '0', FOCUSNEWS_SMOKE_OVERLAY: '0', FOCUSNEWS_SMOKE_CANCEL: '0', FOCUSNEWS_SMOKE_KIND: 'transparentMov', FOCUSNEWS_SMOKE_DELIVERY: 'pipe', FOCUSNEWS_SMOKE_AUDIO: '', FOCUSNEWS_PIXELCHECK: '', FOCUSNEWS_SHOT: '', FOCUSNEWS_SHOT_ERROR: '', FOCUSNEWS_SHOT_REFMISSING: '', FOCUSNEWS_REVIEW_SHEET: '' }
     const reportPick = {
       file: 'spikes/app-smoke/report.json',
       select: (json) => ({
@@ -148,9 +184,12 @@ async function main() {
     })
     await step('应用内：逐帧动画评审表出图（M4-7）', node, [vite, 'dev'], {
       ...base, FOCUSNEWS_SMOKE: '0', FOCUSNEWS_REVIEW_SHEET: path.join(artifacts, 'review-sheet-1080p.png'), FOCUSNEWS_REVIEW_BACKDROP: path.join(artifacts, 'review-backdrop.png')
-    }, 600_000)
+    }, 600_000, undefined, ['spikes/artifacts/review-sheet-1080p.png'])
     // 视觉检查：8 预设 × 短/常规/长文案，出图 + 指标，失败时非 0 退出码
-    await step('应用内：字幕条视觉检查（8 预设 × 3 文案）', node, ['scripts/visual-check.mjs'], {}, 600_000)
+    await step('应用内：字幕条视觉检查（8 预设 × 3 文案）', node, ['scripts/visual-check.mjs'], {}, 600_000, {
+      file: 'spikes/artifacts/visual-check/report.json',
+      select: (json) => ({ passed: json.passed, cases: json.cases?.length, failures: json.failures })
+    }, ['spikes/artifacts/visual-check/sheet.png'])
   }
 
   const failed = results.filter((item) => !item.ok)

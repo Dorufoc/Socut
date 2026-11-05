@@ -47,3 +47,25 @@ describe('视频扩展名白名单', () => {
     expect(normalizePreviewPath('')).toBeNull()
   })
 })
+
+describe('图片白名单（水印预览与视频同一条协议）', () => {
+  it('常见图片扩展名给出 image/* 的 Content-Type', () => {
+    expect(mimeTypeOf('D:/brand/logo.PNG')).toBe('image/png')
+    expect(mimeTypeOf('D:/brand/logo.jpg')).toBe('image/jpeg')
+    expect(mimeTypeOf('D:/brand/logo.jpeg')).toBe('image/jpeg')
+    expect(mimeTypeOf('D:/brand/logo.webp')).toBe('image/webp')
+    expect(mimeTypeOf('D:/brand/logo.tiff')).toBe('image/tiff')
+  })
+
+  it('图片也走「登记过才可读」的同一个入口；svg 不在内（FFmpeg 未必能读）', () => {
+    expect(normalizePreviewPath('D:/brand/logo.png')).toMatch(/logo\.png$/)
+    expect(normalizePreviewPath('D:/brand/mark.svg')).toBeNull()
+    expect(normalizePreviewPath('D:/Windows/win.ini')).toBeNull()
+  })
+
+  it('图片与视频的映射不互相覆盖（两套扩展名合并后仍保留视频条目）', () => {
+    expect(mimeTypeOf('D:/a.mp4')).toBe('video/mp4')
+    expect(mimeTypeOf('D:/a.png')).toBe('image/png')
+    expect(mimeTypeOf('D:/a.md')).toBeUndefined()
+  })
+})

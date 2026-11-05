@@ -1,6 +1,12 @@
 import fs from 'node:fs/promises'
-import { buildOverlayMp4, buildOverlayMp4DirectPipe } from '../../shared/ffmpegArgs'
-import type { TransparentCodec, VideoMeta } from '../../shared/types'
+import {
+  buildOverlayMp4,
+  buildOverlayMp4DirectPipe,
+  buildOverlayMp4MultiInput,
+  buildOverlayMp4MultiInputDirectPipe
+} from '../../shared/ffmpegArgs'
+import type { ConcatSegment, WatermarkInput } from '../../shared/ffmpegArgs'
+import type { OverlaySegment, TransparentCodec, VideoMeta } from '../../shared/types'
 import { spawnJob, terminateJob } from '../procRegistry'
 import type { FfmpegBinaries } from '../paths'
 import { ProgressParser } from '../progressParser'
@@ -22,6 +28,10 @@ export interface OverlayRunCtx {
   transparentCtx: TransparentRunCtx
   channel: FrameChannelHandle
   refVideoPath: string
+  /** v2：媒体时间轴（按 timelineStartSec 升序）；多段/有空隙/非零入点时走 trim+concat 基座 */
+  segments?: OverlaySegment[]
+  /** 目标分辨率（多输入路径的空隙补黑尺寸） */
+  frameSize: { width: number; height: number }
   refMeta: VideoMeta
   audioMode: 'copy' | 'aac'
   fpsMode: 'cfr' | 'vfr'
@@ -33,8 +43,9 @@ export interface OverlayRunCtx {
   codec: TransparentCodec
   /** 直接管道合成时的帧形式与尺寸 */
   frameFormat: 'raw' | 'png'
-  frameSize: { width: number; height: number }
   directPipe: boolean
+  /** 水印（可选）：同一张图作为最后一层 overlay，四条合成路径共用 */
+  watermark?: WatermarkInput
   isCancelled: () => boolean
   onTick: () => void
 }
@@ -45,34 +56,92 @@ interface CompositeRun {
   argv: string[]
 }
 
+/**
+ * v2：是否走多输入 trim+concat 基座（阶段 7）。
+ * 单段且时间轴/源都从头覆盖时回退旧单输入（argv 快照与旧行为零差异）；
+ * 否则逐段 trim 后 concat，段间空隙由滤镜链补黑+静音。
+ */
+function needsMultiInput(segments: OverlaySegment[] | undefined): boolean {
+  if (!segments || segments.length === 0) return false
+  if (segments.length > 1) return true
+  const only = segments[0]
+  if (!only) return false
+  // 单段但被剪裁/不在 0 起点：时长恒等式下 timelineEndSec - timelineStartSec === sourceOutSec - sourceInSec，
+  // 任何一个坐标偏离「整段从头覆盖」都必须走 trim 路径
+  return (
+    only.sourceInSec > 1e-6 ||
+    only.timelineStartSec > 1e-6 ||
+    only.timelineEndSec - only.timelineStartSec !== only.sourceOutSec - only.sourceInSec ||
+    only.timelineEndSec < only.sourceOutSec - 1e-6
+  )
+}
+
+/** 拼接路径的音频一律重编码（concat 后不能 -c:a copy）；只有旧单输入保持 copy 语义。 */
+function effectiveAudioMode(requested: 'copy' | 'aac', multi: boolean): 'copy' | 'aac' {
+  return multi ? 'aac' : requested
+}
+
+/** 本次 composite 用的参数组（单/多输入 × 两阶段/直管道 共 4 条路径）。 */
+function buildCompositeArgs(ctx: OverlayRunCtx, audioMode: 'copy' | 'aac'): string[] {
+  const multi = needsMultiInput(ctx.segments)
+  if (!multi) {
+    return ctx.directPipe
+      ? buildOverlayMp4DirectPipe({
+          refVideoPath: ctx.refVideoPath,
+          outputPath: ctx.outputPath,
+          fps: ctx.transparentCtx.fps,
+          frameFormat: ctx.frameFormat,
+          frameSize: ctx.frameSize,
+          spanStartSec: ctx.spanStartSec,
+          spanEndSec: ctx.spanEndSec,
+          audioMode,
+          fpsMode: ctx.fpsMode,
+          watermark: ctx.watermark
+        })
+      : buildOverlayMp4({
+          refVideoPath: ctx.refVideoPath,
+          overlayPath: ctx.overlayPath,
+          outputPath: ctx.outputPath,
+          fps: ctx.transparentCtx.fps,
+          // 水印几何按输出尺寸换算，永远拿 frameSize（与基座同源，不会与画面分叉）
+          frameSize: ctx.frameSize,
+          spanStartSec: ctx.spanStartSec,
+          spanEndSec: ctx.spanEndSec,
+          audioMode,
+          fpsMode: ctx.fpsMode,
+          watermark: ctx.watermark
+        })
+  }
+  const segments: ConcatSegment[] = (ctx.segments ?? []).map((seg) => ({
+    ...seg,
+    // 拼接路径里逐段音频是否存在的判定在渲染侧已完成（无音轨段不能进 copy）；
+    // 这里按元数据保守假设全部有音轨：trim 后重编码，无音轨的素材由渲染侧避开 copy 分支。
+    hasAudio: true
+  }))
+  const basis = {
+    segments,
+    spanStartSec: ctx.spanStartSec,
+    spanEndSec: ctx.spanEndSec,
+    overlayLabel: String(segments.length),
+    outputPath: ctx.outputPath,
+    fps: ctx.transparentCtx.fps,
+    frameSize: ctx.frameSize,
+    audioMode,
+    fpsMode: ctx.fpsMode,
+    watermark: ctx.watermark
+  }
+  return ctx.directPipe
+    ? buildOverlayMp4MultiInputDirectPipe({ ...basis, frameFormat: ctx.frameFormat })
+    : buildOverlayMp4MultiInput({ ...basis, overlayPath: ctx.overlayPath })
+}
+
 /** 阶段二：合成。返回退出码与 stderr 尾部，由上层决定音频回退重试。 */
 async function composite(
   ctx: OverlayRunCtx,
   audioMode: 'copy' | 'aac'
 ): Promise<CompositeRun> {
   const parser = new ProgressParser()
-  const args = ctx.directPipe
-    ? buildOverlayMp4DirectPipe({
-        refVideoPath: ctx.refVideoPath,
-        outputPath: ctx.outputPath,
-        fps: ctx.transparentCtx.fps,
-        frameFormat: ctx.frameFormat,
-        frameSize: ctx.frameSize,
-        spanStartSec: ctx.spanStartSec,
-        spanEndSec: ctx.spanEndSec,
-        audioMode,
-        fpsMode: ctx.fpsMode
-      })
-    : buildOverlayMp4({
-        refVideoPath: ctx.refVideoPath,
-        overlayPath: ctx.overlayPath,
-        outputPath: ctx.outputPath,
-        fps: ctx.transparentCtx.fps,
-        spanStartSec: ctx.spanStartSec,
-        spanEndSec: ctx.spanEndSec,
-        audioMode,
-        fpsMode: ctx.fpsMode
-      })
+  const args = buildCompositeArgs(ctx, audioMode)
 
   const job = spawnJob({
     jobId: ctx.state.id,
@@ -155,9 +224,15 @@ export async function runOverlayMp4(ctx: OverlayRunCtx): Promise<'done' | 'cance
   /**
    * 计划 C4：预检判定不可 copy 而直接走 AAC 时，**必须告知用户**（“并在 UI 提示已转码”）。
    * 没有这条提示，用户只会发现导出音频码率变了，却不知道是自己那条音轨不被容器接受。
-   * 无音轨（audioCodec === null）不算转码，不提示。
+   * 无音轨（audioCodec === null）不算转码，不提示；v2 拼接路径重编码同理。
    */
-  if (ctx.audioMode === 'aac' && ctx.refMeta.audioCodec !== null) {
+  const multi = needsMultiInput(ctx.segments)
+  const audio = effectiveAudioMode(ctx.audioMode, multi)
+  if (audio !== ctx.audioMode) {
+    ctx.state.notices.push('媒体轨含多段/剪裁：音频随基座一并重编码为 AAC 192k。')
+    ctx.onTick()
+  }
+  if (audio === 'aac' && ctx.refMeta.audioCodec !== null && multi === false) {
     ctx.state.notices.push(`音频已转码为 AAC 192k（原音轨 ${ctx.refMeta.audioCodec} 不能直接复制）。`)
     ctx.onTick()
   }
@@ -166,10 +241,10 @@ export async function runOverlayMp4(ctx: OverlayRunCtx): Promise<'done' | 'cance
   ctx.state.timeTotalSec = Math.max(0, ctx.spanEndSec - ctx.spanStartSec)
   ctx.onTick()
 
-  let run = await composite(ctx, ctx.audioMode)
+  let run = await composite(ctx, audio)
 
   // 计划 C4：copy 运行期失败（无音轨 / 不兼容编码）→ 单次 AAC 重试
-  if (ctx.audioMode === 'copy' && run.code !== null && run.code !== 0) {
+  if (audio === 'copy' && run.code !== null && run.code !== 0) {
     ctx.state.notices.push('音频直接复制失败，已改用 AAC 192k 重新合成。')
     await fs.rm(ctx.outputPath, { force: true }).catch(() => undefined)
     run = await composite(ctx, 'aac')

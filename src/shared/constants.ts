@@ -1,6 +1,6 @@
-import type { Fps, FontRecord, ResolutionPreset, FpsPreset } from './types'
+import type { Fps, FontRecord, Resolution, ResolutionPreset, FpsPreset } from './types'
 
-export const PROJECT_VERSION = 1
+export const PROJECT_VERSION = 2
 
 export const APP_NAME = 'FocusNews'
 export const WINDOW_TITLE = 'FocusNews 新闻字幕条'
@@ -10,7 +10,9 @@ export const TEMP_ROOT = 'focusnews'
 export const USER_DATA_DIRS = {
   fonts: 'fonts',
   projects: 'projects',
-  logs: 'logs'
+  logs: 'logs',
+  /** v2：素材卡片缩略图缓存（与 media 池 id 同名 jpg） */
+  thumbs: 'thumbs'
 } as const
 
 export const FONTS_MANIFEST_FILE = 'fonts.json'
@@ -133,6 +135,31 @@ export const ULTRAWIDE_RATIO_MIN = 2.0
 export const COMPACT_BAR_WIDTH_PERCENT = 88
 /** 超宽屏：主条最大宽度上限（70% 宽，并再受 px@1080p 钳制） */
 export const ULTRAWIDE_BAR_MAX_WIDTH_PERCENT = 70
+
+// ---------------------------------------------------------------------------
+// 水印（Watermark）
+// ---------------------------------------------------------------------------
+
+/**
+ * 坐标基准分辨率：水印的尺寸与边距都按 1080P 定义，
+ * 输出非 1080P 时按 `输出高 / 1080` 等比换算（与 `px@1080p` 尺寸令牌同一口径）。
+ */
+export const WATERMARK_BASE_RESOLUTION: Resolution = { width: 1920, height: 1080 }
+/** 显示尺寸 = 原图尺寸 × 该比例（基准 1080P 下） */
+export const WATERMARK_DISPLAY_SCALE = 0.32
+/** 基准 1080P 下距顶部与左侧的边距（像素，左上角定位） */
+export const WATERMARK_MARGIN_PX = 30
+/** 可选作水印的图片扩展名（主进程文件对话框与预览协议共用；不含 svg——FFmpeg 无 librsvg 时读不了） */
+export const WATERMARK_IMAGE_EXTENSIONS = [
+  'png',
+  'jpg',
+  'jpeg',
+  'webp',
+  'bmp',
+  'gif',
+  'tif',
+  'tiff'
+] as const
 
 // ---------------------------------------------------------------------------
 // 兼容性判定（规格 §6）
@@ -277,6 +304,8 @@ export const cssFamilyFor = (fontId: string): string => `${FONT_FAMILY_PREFIX}-$
 
 /** 时间轴最小片段时长（秒），防止零时长 */
 export const MIN_CLIP_DURATION_SEC = 0.2
+/** 媒体轨上单段 MediaClip 的最小时长（与字幕轨保持一致，避免拆后零长） */
+export const MIN_MEDIA_CLIP_SEC = 0.2
 /** 新建片段默认时长（秒） */
 export const DEFAULT_CLIP_DURATION_SEC = 5
 /** 时间轴可编辑最大时长（无参考视频时） */

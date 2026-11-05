@@ -2,19 +2,19 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { act } from 'react'
 import { cleanup, render, screen } from '@testing-library/react'
 import { TEXT } from '@shared/i18n'
-import type { CompatFlags } from '@shared/types'
+import type { MediaItem, VideoMeta } from '@shared/types'
 import { FontLoadingOverlay } from './FontLoadingOverlay'
 import { gateBlocked, useUiStore } from '../state/uiStore'
 
 /**
- * 大字体加载遮罩（计划 M2-5）与门禁判定（规格 §6）。
+ * 大字体加载遮罩（计划 M2-5）与门禁判定（规格 §6，v2 枚级）。
  * 两条都是「不满足就静默放行」的高风险点，所以按行为直接断言。
  */
 
 afterEach(() => {
   cleanup()
   act(() => {
-    useUiStore.setState({ fontLoadingCount: 0, dialogQueue: [], refVideoMissing: false })
+    useUiStore.setState({ fontLoadingCount: 0, dialogQueue: [], refVideoMissing: false, missingMediaIds: [] })
   })
 })
 
@@ -43,36 +43,66 @@ describe('FontLoadingOverlay', () => {
   })
 })
 
-describe('gateBlocked（未确认不得导入/导出）', () => {
-  const noFlags: CompatFlags = {
-    non169: false,
-    hdr: false,
-    vfr: false,
-    noAudio: false,
-    portrait: false,
-    ultraWide: false,
-    audioTranscodeNeeded: false
-  }
-
-  it('全部达标时放行', () => {
-    expect(gateBlocked(noFlags, { non169: false, hdr: false, vfrResolved: false })).toEqual({
-      blocked: false,
-      reason: null
-    })
+describe('gateBlocked（v2 枚级：未确认不得导入/导出）', () => {
+  /** 达标 16:9 SDR CFR 带 aac 的基准 meta，用例只改自己的那一项 */
+  const baseMeta = (over: Partial<VideoMeta> = {}): VideoMeta => ({
+    path: 'C:/media/a.mp4',
+    containerName: 'mov,mp4,m4a,3gp,2b2,gif,webm',
+    width: 1920,
+    height: 1080,
+    sar: null,
+    displayRatio: 1920 / 1080,
+    rFrameRate: { num: 30, den: 1 },
+    avgFrameRate: { num: 30, den: 1 },
+    pixFmt: 'yuv420p',
+    colorPrimaries: null,
+    colorSpace: null,
+    colorTransfer: null,
+    colorRange: null,
+    videoCodec: 'h264',
+    audioCodec: 'aac',
+    audioChannels: 2,
+    durationSec: 10,
+    nbFrames: null,
+    bitRateKbps: null,
+    ...over
   })
 
-  it('非 16:9 / HDR / VFR 各自阻塞，并给出可读原因', () => {
-    const ackNone = { non169: false, hdr: false, vfrResolved: false }
-    expect(gateBlocked({ ...noFlags, non169: true }, ackNone)).toEqual({
+  const item = (options: { id?: string; name?: string; non169Ack?: boolean; hdrAck?: boolean; vfrPolicy?: MediaItem['vfrPolicy']; meta?: Partial<VideoMeta> } = {}): MediaItem => ({
+    id: options.id ?? 'media-1',
+    path: 'C:/media/a.mp4',
+    name: options.name ?? 'a.mp4',
+    meta: baseMeta(options.meta ?? {}),
+    non169Ack: options.non169Ack ?? false,
+    hdrAck: options.hdrAck ?? false,
+    vfrPolicy: options.vfrPolicy ?? 'none',
+    compactMode: 'auto',
+    thumbnailUrl: '',
+    importedAt: '2026-01-01T00:00:00.000Z'
+  })
+
+  it('空池/全部达标时放行', () => {
+    expect(gateBlocked([])).toEqual({ blocked: false, reason: null })
+    expect(gateBlocked([item()])).toEqual({ blocked: false, reason: null })
+  })
+
+  it('非 16:9 / HDR / VFR 各自阻塞，原因带展示名', () => {
+    expect(gateBlocked([item({ meta: { displayRatio: 1080 / 1920 } })])).toEqual({
       blocked: true,
-      reason: '非 16:9 尚未确认'
+      reason: '《a.mp4》非 16:9 尚未确认'
     })
-    expect(gateBlocked({ ...noFlags, hdr: true }, ackNone)).toEqual({ blocked: true, reason: 'HDR 降级尚未确认' })
-    expect(gateBlocked({ ...noFlags, vfr: true }, ackNone)).toEqual({ blocked: true, reason: 'VFR 处理方式未选择' })
-    // 逐项确认后才放行（确认一个不代表全部放行）
-    expect(gateBlocked({ ...noFlags, non169: true, hdr: true }, { ...ackNone, non169: true }).blocked).toBe(true)
-    expect(gateBlocked({ ...noFlags, non169: true, hdr: true }, { non169: true, hdr: true, vfrResolved: false }).blocked).toBe(
-      false
-    )
+    expect(gateBlocked([item({ meta: { colorTransfer: 'smpte2084' } })])).toEqual({
+      blocked: true,
+      reason: '《a.mp4》HDR 降级尚未确认'
+    })
+    const vfr = item({ meta: { rFrameRate: { num: 30, den: 1 }, avgFrameRate: { num: 24, den: 1 } } })
+    expect(gateBlocked([vfr])).toEqual({ blocked: true, reason: '《a.mp4》VFR 处理方式未选择' })
+    // 枚级确认：确认了的那枚放行，另一枚仍阻塞
+    const acked = item({ id: 'media-1', non169Ack: true, name: 'ok.mp4' })
+    const gated = item({ id: 'media-2', name: 'bad.mp4', meta: { displayRatio: 1080 / 1920 } })
+    expect(gateBlocked([acked]).blocked).toBe(false)
+    expect(gateBlocked([acked, gated])).toEqual({ blocked: true, reason: '《bad.mp4》非 16:9 尚未确认' })
+    // VFR 选了「保留 raw」也算处理完毕（导出时另有二次确认）
+    expect(gateBlocked([item({ vfrPolicy: 'raw', meta: { rFrameRate: { num: 30, den: 1 }, avgFrameRate: { num: 24, den: 1 } } })]).blocked).toBe(false)
   })
 })

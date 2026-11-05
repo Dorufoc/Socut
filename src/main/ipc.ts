@@ -17,8 +17,10 @@ import {
   openProjectDialog,
   saveProjectAs
 } from './projectStore'
-import { pickAndProbeVideo, probeVideo } from './videoImport'
+import { pickAndProbeVideo, pickManyAndProbeVideos, probeVideo } from './videoImport'
+import { pickAndProbeWatermark } from './watermark'
 import { createPreviewUrl } from './media'
+import { ensureThumbRegistered, generateThumbnail, removeThumbnail, thumbUrlFor } from './thumbProtocol'
 import { cancelCfr, convertToCfr } from './cfrTranscode'
 import { smokeConfig, verifySmokeReport, writeSmokeReport } from './smoke'
 import { installFrameIpc } from './export/frameChannel'
@@ -230,6 +232,12 @@ export function registerIpc(engine: ExportEngine): void {
     return { path: picked.path, probe: picked.probe }
   })
 
+  /** v2 素材库：多选 + 逐文件探测（门禁确认在渲染侧逐枚完成）。 */
+  ipcMain.handle(CHANNELS.videoPickManyAndProbe, async (event) => {
+    const picked = await pickManyAndProbeVideos(senderWindow(event))
+    return picked.map((item) => ({ path: item.path, probe: item.probe }))
+  })
+
   ipcMain.handle(CHANNELS.videoProbe, async (_event, target: string) => {
     if (typeof target !== 'string' || !(await fileExists(target))) return null
     return probeVideo(target, 'manual-probe')
@@ -245,10 +253,33 @@ export function registerIpc(engine: ExportEngine): void {
     typeof target === 'string' && target.length > 0 ? createPreviewUrl(target) : null
   )
 
+  /** v2：主进程 ffmpeg 抽帧缩略图；失败返回 null，素材库显示占位符。 */
+  ipcMain.handle(CHANNELS.mediaGenerateThumb, async (_event, mediaId: string, videoPath: string, atSec?: number): Promise<string | null> => {
+    if (typeof mediaId !== 'string' || typeof videoPath !== 'string') return null
+    return generateThumbnail(mediaId, videoPath, typeof atSec === 'number' ? atSec : 1)
+  })
+
+  /** v2：工程里持久化的 focusnews-thumb:// 地址在主进程重启后需重新登记才可读。 */
+  ipcMain.handle(CHANNELS.mediaThumbUrl, async (_event, mediaId: string, url: string): Promise<string | null> => {
+    if (typeof mediaId !== 'string' || typeof url !== 'string') return null
+    const reregistered = await ensureThumbRegistered(mediaId, url)
+    return reregistered ?? thumbUrlFor(mediaId)
+  })
+
+  /** v2：素材移出池时回收缩略图文件（userData/thumbs）。 */
+  ipcMain.handle(CHANNELS.mediaThumbRemove, async (_event, mediaId: string): Promise<void> => {
+    if (typeof mediaId === 'string' && mediaId.length > 0) await removeThumbnail(mediaId)
+  })
+
   ipcMain.handle(CHANNELS.videoCfrConvert, async (event, target: string, fps: Fps, meta: VideoMeta) => {
     const job = await convertToCfr(String(target), fps, meta, senderWindow(event))
     return job
   })
+
+  // ---------------------------------------------------------------- 水印
+
+  /** 选一张本机图片作水印：主进程探测原图尺寸（几何换算的唯一输入）后交给渲染侧写入工程。 */
+  ipcMain.handle(CHANNELS.watermarkPick, async (event) => pickAndProbeWatermark(senderWindow(event)))
 
   ipcMain.handle(CHANNELS.exportCancel, async (_event, jobId: string) => {
     await engine.cancel(String(jobId))

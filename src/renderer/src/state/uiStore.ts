@@ -1,9 +1,13 @@
 import { create } from 'zustand'
-import type { CompatFlags } from '@shared/types'
+import type { MediaItem } from '@shared/types'
+import { detectCompat } from '@shared/probe'
 
 /** UI 状态：模态队列、面板开关、预览播放态。高频播放头不进 store（见 usePreviewLoop）。 */
 
 export type UiMode = 'basic' | 'advanced'
+
+/** 左侧栏 Tab（v2）：素材库 / 水印 / 导出 / 进度；写入 project.ui.leftTab 持久化。 */
+export type LeftTab = 'media' | 'watermark' | 'export' | 'progress'
 
 export type CompatDialogContent =
   | { kind: 'non169'; label: string }
@@ -33,6 +37,8 @@ export interface UiState {
   dialogQueue: DialogPrompt[]
   fontLoadingCount: number
   notice: string | null
+  /** v2：左侧栏当前 Tab（冷启动默认素材库；会话内切换会写回工程） */
+  leftTab: LeftTab
 
   setPlaying: (playing: boolean) => void
   setDisplayTime: (sec: number) => void
@@ -40,9 +46,13 @@ export interface UiState {
   toggleSafeArea: () => void
   setPreviewFit: (mode: 'fit' | 'actual') => void
   setExportScope: (scope: 'timeline' | 'selected') => void
-  /** 参考视频文件已不可用（被移动/删除）：禁用叠加导出并提示重新定位（规格 §8） */
+  /** v2：素材池中文件已不可用的 mediaId 集合（被移动/删除）：非空即禁用叠加导出（规格 §8） */
+  missingMediaIds: string[]
+  setMissingMediaIds: (ids: string[]) => void
+  /** @deprecated v1 单参考视频时代字段；保留读写口以免冒烟脚本改道，等价于 missingMediaIds 非空 */
   refVideoMissing: boolean
   setRefVideoMissing: (missing: boolean) => void
+  setLeftTab: (tab: LeftTab) => void
   pushPrompt: (prompt: DialogPrompt) => void
   shiftPrompt: () => void
   beginFontLoad: () => void
@@ -59,6 +69,8 @@ export const useUiStore = create<UiState>((set) => ({
   previewFit: 'fit',
   exportScope: 'timeline',
   refVideoMissing: false,
+  missingMediaIds: [],
+  leftTab: 'media',
   dialogQueue: [],
   fontLoadingCount: 0,
   notice: null,
@@ -69,7 +81,9 @@ export const useUiStore = create<UiState>((set) => ({
   toggleSafeArea: () => set((state) => ({ showSafeArea: !state.showSafeArea })),
   setPreviewFit: (mode) => set({ previewFit: mode }),
   setExportScope: (scope) => set({ exportScope: scope }),
+  setMissingMediaIds: (ids) => set({ missingMediaIds: ids, refVideoMissing: ids.length > 0 }),
   setRefVideoMissing: (missing) => set({ refVideoMissing: missing }),
+  setLeftTab: (tab) => set({ leftTab: tab }),
   pushPrompt: (prompt) => set((state) => ({ dialogQueue: [...state.dialogQueue, prompt] })),
   shiftPrompt: () => set((state) => ({ dialogQueue: state.dialogQueue.slice(1) })),
   beginFontLoad: () => set((state) => ({ fontLoadingCount: state.fontLoadingCount + 1 })),
@@ -77,13 +91,22 @@ export const useUiStore = create<UiState>((set) => ({
   setNotice: (notice) => set({ notice })
 }))
 
-/** 门禁是否仍阻塞（规格 §6：未确认不可继续）。 */
-export function gateBlocked(flags: CompatFlags, ack: { non169: boolean; hdr: boolean; vfrResolved: boolean }): {
-  blocked: boolean
-  reason: string | null
-} {
-  if (flags.non169 && !ack.non169) return { blocked: true, reason: '非 16:9 尚未确认' }
-  if (flags.hdr && !ack.hdr) return { blocked: true, reason: 'HDR 降级尚未确认' }
-  if (flags.vfr && !ack.vfrResolved) return { blocked: true, reason: 'VFR 处理方式未选择' }
+/**
+ * 门禁是否仍阻塞（规格 §6：未确认不可继续）。
+ * v2：确认位从工程级 refVideo 下放到素材池枚级——逐枚检查，第一枚未确认的即阻断，
+ * 原因里带上展示名，用户能在素材库里找到是哪一枚。
+ */
+export function gateBlocked(media: MediaItem[]): { blocked: boolean; reason: string | null } {
+  for (const item of media) {
+    const flags = detectCompat(item.meta)
+    if (flags.non169 && !item.non169Ack) return { blocked: true, reason: `《${item.name}》非 16:9 尚未确认` }
+    if (flags.hdr && !item.hdrAck) return { blocked: true, reason: `《${item.name}》HDR 降级尚未确认` }
+    if (flags.vfr && item.vfrPolicy === 'none') return { blocked: true, reason: `《${item.name}》VFR 处理方式未选择` }
+  }
   return { blocked: false, reason: null }
+}
+
+/** 单枚素材的门禁状态（素材库卡片角标用）。 */
+export function mediaGateState(item: MediaItem): { blocked: boolean; reason: string | null } {
+  return gateBlocked([item])
 }

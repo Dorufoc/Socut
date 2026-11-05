@@ -12,7 +12,7 @@ import type {
   Project,
   VideoMeta
 } from '../shared/types'
-import type { EstimateInput, SmokeReport } from '../shared/api'
+import type { EstimateInput, SmokeReport, WatermarkPickResult } from '../shared/api'
 
 /**
  * preload：把主进程能力以最小面暴露给渲染进程（contextIsolation，零 Node 泄露）。
@@ -51,11 +51,29 @@ const api = {
   },
   video: {
     pickAndProbe: () => ipcRenderer.invoke(CHANNELS.videoPickAndProbe),
+    pickManyAndProbe: () =>
+      ipcRenderer.invoke(CHANNELS.videoPickManyAndProbe) as Promise<
+        { path: string; probe: import('../shared/types').VideoProbeResult }[]
+      >,
     probe: (path: string) => ipcRenderer.invoke(CHANNELS.videoProbe, path),
     exists: (path: string) => ipcRenderer.invoke(CHANNELS.videoExists, path) as Promise<boolean>,
     previewUrl: (path: string) => ipcRenderer.invoke(CHANNELS.videoPreviewUrl, path) as Promise<string | null>,
     cfrConvert: (path: string, fps: Fps, meta: VideoMeta) =>
       ipcRenderer.invoke(CHANNELS.videoCfrConvert, path, fps, meta)
+  },
+  watermark: {
+    /** 选一张本机图片作水印，主进程探测原图尺寸（用户取消 null） */
+    pick: () => ipcRenderer.invoke(CHANNELS.watermarkPick) as Promise<WatermarkPickResult | null>
+  },
+  media: {
+    /** v2：主进程 ffmpeg 抽帧缩略图，返回 focusnews-thumb://<mediaId>（失败 null） */
+    generateThumb: (mediaId: string, videoPath: string, atSec?: number) =>
+      ipcRenderer.invoke(CHANNELS.mediaGenerateThumb, mediaId, videoPath, atSec) as Promise<string | null>,
+    /** v2：工程里持久化的 thumb 地址重新登记（主进程重启后 registry 为空） */
+    thumbUrl: (mediaId: string, url: string) =>
+      ipcRenderer.invoke(CHANNELS.mediaThumbUrl, mediaId, url) as Promise<string | null>,
+    /** v2：素材移出池时回收缩略图文件 */
+    removeThumb: (mediaId: string) => ipcRenderer.invoke(CHANNELS.mediaThumbRemove, mediaId) as Promise<void>
   },
   export: {
     estimate: (input: EstimateInput) => ipcRenderer.invoke(CHANNELS.exportEstimate, input),

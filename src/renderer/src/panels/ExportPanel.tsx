@@ -1,6 +1,5 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import { DEFAULT_FPS, RESOLUTION_PRESETS, fpsToString } from '@shared/constants'
-import { detectCompat } from '@shared/probe'
 import { TEXT } from '@shared/i18n'
 import { formatBytes } from '@shared/sizeEstimate'
 import type { ExportKind, RenderJobSpec, SizeEstimate, TransparentCodec } from '@shared/types'
@@ -40,8 +39,12 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
   const [directPipe, setDirectPipe] = useState(false)
 
   const frames = spec ? Math.max(0, spec.endFrame - spec.startFrame) : 0
+  const missingMediaIds = useUiStore((state) => state.missingMediaIds)
   const refVideoMissing = useUiStore((state) => state.refVideoMissing)
-  const overlayDisabled = !project.refVideo || frames === 0 || refVideoMissing
+  // v2：叠加可用性改看媒体轨/素材池（旧 refVideo 路径保留给 v1 兼容）
+  const hasBase = project.mediaClips.length > 0 || project.media.length > 0 || Boolean(project.refVideo)
+  const mediaMissing = missingMediaIds.length > 0 || refVideoMissing
+  const overlayDisabled = !hasBase || frames === 0 || mediaMissing
   const baseDisabled = fontLoading || !ffmpegAvailable || frames === 0 || outputDir.length === 0
 
   /** span 秒数（直管道合成的可选条件之一：中间 MOV 过大时避免落盘） */
@@ -81,14 +84,9 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
     if (!directPipeAllowed && directPipe) setDirectPipe(false)
   }, [directPipeAllowed, directPipe])
 
-  // 规格 §6：非 16:9 / HDR / VFR 未确认时不得导出（主进程 hook 里也有一道，这里提前阻断并说明原因）
-  const gate = project.refVideo
-    ? gateBlocked(detectCompat(project.refVideo.meta), {
-        non169: project.refVideo.non169Ack,
-        hdr: project.refVideo.hdrAck,
-        vfrResolved: project.refVideo.vfrPolicy !== 'none'
-      })
-    : { blocked: false, reason: null }
+  // 规格 §6：非 16:9 / HDR / VFR 未确认时不得导出（v2 枚级：逐枚检查素材池，
+  // 主进程 hook 里也有一道，这里提前阻断并说明原因）
+  const gate = gateBlocked(project.media)
 
   const run = async (kind: ExportKind): Promise<void> => {
     const base = `${project.name || 'focusnews'}-${kind}-${spec?.width ?? 0}x${spec?.height ?? 0}-${fpsToString(
@@ -159,17 +157,28 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
         <div className="kv__row">
           <span>{TEXT.export.resolution}</span>
           <span className="mono">
-            {project.refVideo ? TEXT.export.followRef : `${spec?.width ?? 0}×${spec?.height ?? 0}`}
+            {project.refVideo || project.media.length > 0 ? TEXT.export.followRef : `${spec?.width ?? 0}×${spec?.height ?? 0}`}
           </span>
         </div>
         <div className="kv__row">
           <span>{TEXT.export.fps}</span>
-          <span className="mono">{project.refVideo ? TEXT.export.followRef : fpsToString(spec?.fps ?? DEFAULT_FPS)}</span>
+          <span className="mono">
+            {project.refVideo || project.media.length > 0 ? TEXT.export.followRef : fpsToString(spec?.fps ?? DEFAULT_FPS)}
+          </span>
         </div>
         <div className="kv__row">
           <span>帧数</span>
           <span className="mono">{frames}</span>
         </div>
+        {/* 水印只在叠加出口烧进画面，透明字幕条出口不含台标 —— 在发起导出前说清 */}
+        {project.watermark?.enabled ? (
+          <div className="kv__row">
+            <span>水印</span>
+            <span className="mono" title={project.watermark.path}>
+              {project.watermark.name} · 左上角（仅叠加出口）
+            </span>
+          </div>
+        ) : null}
         {estimate ? (
           <div className="kv__row">
             <span>{TEXT.export.estimate}</span>
@@ -199,10 +208,10 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
           title={
             gate.blocked
               ? gate.reason ?? ''
-              : refVideoMissing
+              : mediaMissing
                 ? TEXT.refVideoMissing.notice
                 : overlayDisabled
-                  ? TEXT.export.followRef
+                  ? '叠加导出需要先把素材放入媒体轨'
                   : undefined
           }
           onClick={() => void run('overlayMp4')}
@@ -279,7 +288,7 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
       {gate.blocked ? (
         <InfoBar tone="warning" message={`门禁：${gate.reason}（规格 §6：未确认不可继续）`} />
       ) : null}
-      {refVideoMissing ? <InfoBar tone="error" message={TEXT.refVideoMissing.notice} /> : null}
+      {mediaMissing ? <InfoBar tone="error" message={TEXT.refVideoMissing.notice} /> : null}
       {!ffmpegAvailable ? <InfoBar tone="error" message="FFmpeg 不可用，导出已禁用" /> : null}
       {exportScope === 'selected' ? <p className="hint">请先在时间轴选中一个片段。</p> : null}
     </section>

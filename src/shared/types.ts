@@ -311,6 +311,10 @@ export interface SubtitleClip {
 
 export type VfrPolicy = 'none' | 'converted' | 'raw'
 
+/**
+ * @deprecated v2 开始工程不再持有单一参考视频，统一改走 `MediaItem` 池 + `MediaClip` 时间线。
+ * 保留类型只为旧工程读取时的迁移入口（`normalizeProject` 读取后写回 `media/mediaClips`）。
+ */
 export interface RefVideo {
   /** 编辑与导出实际使用的文件（VFR 转换后为 CFR 文件） */
   path: string
@@ -327,6 +331,61 @@ export interface RefVideo {
   importedAt: string
 }
 
+/**
+ * 素材池里的一枚参考视频（v2）。兼容门禁确认位下放到枚级，
+ * 时间轴上同一个 MediaItem 可被多个 MediaClip 以不同源入出点引用。
+ */
+export interface MediaItem {
+  id: string
+  /** 编辑与导出实际使用的文件（VFR 转换后为 CFR 文件） */
+  path: string
+  /** 原始导入路径（VFR 转 CFR 时保留） */
+  sourcePath?: string
+  /** 展示名（默认取 basename，可重命名） */
+  name: string
+  meta: VideoMeta
+  non169Ack: boolean
+  hdrAck: boolean
+  vfrPolicy: VfrPolicy
+  compactMode: 'auto' | 'compact' | 'ultrawide' | 'standard'
+  /** 主进程抽帧缩略图的自定义协议地址（focusnews-thumb://<mediaId>）；无图时为空字符串 */
+  thumbnailUrl: string
+  importedAt: string
+}
+
+/**
+ * 时间轴上行：一枚媒体片段。时间轴坐标与源坐标分别以 `timeline*Sec` 与 `source*Sec` 命名，
+ * 遵循旧约定写入前已 `snapTimeToFrame`，时长以秒为准。
+ */
+export interface MediaClip {
+  id: string
+  mediaId: string
+  /** 时间轴上的起始/结束秒 */
+  timelineStartSec: number
+  timelineEndSec: number
+  /** 对应源视频的入出点秒（与时长一致：timelineEndSec - timelineStartSec === sourceOutSec - sourceInSec） */
+  sourceInSec: number
+  sourceOutSec: number
+}
+
+/**
+ * 水印（Watermark）：一张本机图片作为台标叠加在合成画面的左上角（仅叠加出口）。
+ * 显示尺寸与偏移**不**存在这里——它们由 `computeWatermarkGeometry` 按
+ * 「1080P 基准 + 原图 32% + 30px 边距」随输出分辨率实时换算，避免工程里留下过期像素。
+ */
+export interface WatermarkSettings {
+  enabled: boolean
+  /** 图片绝对路径（导出时作为一路 `-i` 输入交给 FFmpeg） */
+  path: string
+  /** 展示名（默认取 basename，可重命名） */
+  name: string
+  /** 图片原始像素宽（几何换算的输入；导入时用 ffprobe 探测） */
+  sourceWidth: number
+  /** 图片原始像素高 */
+  sourceHeight: number
+  importedAt: string
+}
+
 export interface Project {
   version: number
   name: string
@@ -335,9 +394,19 @@ export interface Project {
   clips: SubtitleClip[]
   /** 字体库快照（内置 + 用户导入） */
   fonts: FontRecord[]
+  /** v2：多素材池（同枚素材可被多个 MediaClip 引用） */
+  media: MediaItem[]
+  /** v2：时间轴上行（媒体轨）；与 `clips` 下行共享尺规/播放头 */
+  mediaClips: MediaClip[]
+  /** 水印设置；缺省 = 未导入水印（合成链与旧工程逐字节一致） */
+  watermark?: WatermarkSettings
+  /** UI 状态（不参与渲染）；leftTab 不跨会话保持也能，写回后能 */
+  ui?: { leftTab?: 'media' | 'watermark' | 'export' | 'progress' } & Record<string, unknown>
+  /**
+   * @deprecated v1 遗留字段，`normalizeProject` 自动迁移到 `media/mediaClips`，写入时不再产出。
+   * 保留类型为 ftype 旧工程 JSON 能直接反序列化。
+   */
   refVideo?: RefVideo
-  /** UI 状态（不参与渲染） */
-  ui?: Record<string, unknown>
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +579,18 @@ export interface FrameSpec {
 
 export type TransparentCodec = 'prores4444' | 'qtrle'
 
+/** 叠加导出中一段媒体基座：源文件 + 源入出点 + 在时间轴上的目标位置。 */
+export interface OverlaySegment {
+  refVideoPath: string
+  /** 时间轴上本次输出的 [spanStartSec, spanEndSec] 内，本段占据的区间 */
+  timelineStartSec: number
+  timelineEndSec: number
+  /** 从源文件的这个入点开始取帧 */
+  sourceInSec: number
+  /** 到源文件的这个出点结束 */
+  sourceOutSec: number
+}
+
 export interface ExportRequest {
   jobId: string
   target: ExportTarget
@@ -521,9 +602,17 @@ export interface ExportRequest {
   pipeTransport?: 'raw' | 'png'
   /** 透明出口编码（默认 ProRes 4444；qtrle 为兼容模式回退） */
   codec?: TransparentCodec
-  /** 叠加合成 */
+  /** 叠加合成：多段 trim+concat 后作为基座，上留 overlay 字幕。 */
   overlay?: {
+    /**
+     * v2：多段媒体时间线，按 `timelineStartSec` 升序。
+     * 主进程将逐段 trim 后 concat 作为基座；`segments.length === 1` 且 `sourceInSec === 0` 时回退旧单输入。
+     * 阶段 7 前，导出管线仍从 `refVideoPath` 读取单输入，`segments` 作为新模型下的补充入口。
+     */
+    segments?: OverlaySegment[]
+    /** v1 遗留字段：主进程导出入口（新模型下 = `segments[0]?.refVideoPath`）；阶段 7 将删除。 */
     refVideoPath: string
+    /** 各段共享的参考元数据（首段为准；导出前已在渲染侧对 media 拉平） */
     refMeta: VideoMeta
     audioMode: 'copy' | 'aac'
     fpsMode: 'cfr' | 'vfr'
@@ -532,6 +621,11 @@ export interface ExportRequest {
     spanEndSec: number
     /** 直接管道合成后端（默认 false：临时透明 MOV 两阶段） */
     directPipe: boolean
+    /**
+     * 水印：合成在字幕条之上（最后一层 overlay）。
+     * 缺省即不追加输入与滤镜链，argv 与无水印路径逐字节一致。
+     */
+    watermark?: { path: string; sourceWidth: number; sourceHeight: number }
   }
 }
 

@@ -92,19 +92,29 @@ export interface PlanInput {
   forceCompact?: boolean
 }
 
-/** 时间轴覆盖时长（秒）：所有片段的最大出点。 */
+/** 时间轴覆盖时长（秒）：字幕轨与媒体轨取并集包络（v2）。 */
 export function projectDurationSec(project: Project): number {
-  if (project.clips.length === 0) return MIN_CLIP_DURATION_SEC
-  const maxEnd = project.clips.reduce((acc, clip) => Math.max(acc, clip.endTime), 0)
-  return Math.max(MIN_CLIP_DURATION_SEC, maxEnd)
+  const maxClipEnd = project.clips.reduce((acc, clip) => Math.max(acc, clip.endTime), 0)
+  const maxMediaEnd = project.mediaClips.reduce((acc, clip) => Math.max(acc, clip.timelineEndSec), 0)
+  const combined = Math.max(maxClipEnd, maxMediaEnd)
+  if (combined === 0) return MIN_CLIP_DURATION_SEC
+  return Math.max(MIN_CLIP_DURATION_SEC, combined)
 }
 
-/** 片段 span（首个入点 → 末个出点，规格 C7）。 */
+/** 片段 span（首个入点 → 末个出点，规格 C7）；v2 同时取两轨包络。 */
 export function projectSpanSec(project: Project): { startSec: number; endSec: number } {
-  if (project.clips.length === 0) return { startSec: 0, endSec: MIN_CLIP_DURATION_SEC }
-  const startSec = project.clips.reduce((acc, c) => Math.min(acc, c.startTime), Number.POSITIVE_INFINITY)
-  const endSec = project.clips.reduce((acc, c) => Math.max(acc, c.endTime), 0)
-  return { startSec: Math.max(0, Number.isFinite(startSec) ? startSec : 0), endSec }
+  let startSec = Number.POSITIVE_INFINITY
+  let endSec = 0
+  for (const clip of project.clips) {
+    startSec = Math.min(startSec, clip.startTime)
+    endSec = Math.max(endSec, clip.endTime)
+  }
+  for (const clip of project.mediaClips) {
+    startSec = Math.min(startSec, clip.timelineStartSec)
+    endSec = Math.max(endSec, clip.timelineEndSec)
+  }
+  if (!Number.isFinite(startSec)) return { startSec: 0, endSec: MIN_CLIP_DURATION_SEC }
+  return { startSec: Math.max(0, startSec), endSec }
 }
 
 function buildFontIndex(input: FontRecord[]): Map<string, FontRecord> {

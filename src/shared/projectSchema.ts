@@ -27,6 +27,8 @@ import type {
   FontRecord,
   Fps,
   GradientSpec,
+  MediaClip,
+  MediaItem,
   PresetId,
   Project,
   Rational,
@@ -35,7 +37,8 @@ import type {
   SizeToken,
   StyleOverrides,
   SubtitleClip,
-  VideoMeta
+  VideoMeta,
+  WatermarkSettings
 } from './types'
 
 /**
@@ -247,6 +250,84 @@ function normalizeRefVideo(value: unknown): RefVideo | undefined {
   }
 }
 
+/** v2：一枚参考视频的归一化。无 path/meta 时返回 null 以免向时间轴里注入坏卡。 */
+function normalizeMediaItem(value: unknown): MediaItem | null {
+  if (!isRecord(value)) return null
+  if (typeof value['path'] !== 'string' || value['path'].length === 0) return null
+  const meta = normalizeMeta(value['meta'])
+  if (!meta) return null
+  const id = typeof value['id'] === 'string' && value['id'].length > 0 ? value['id'] : createId('media')
+  const name = typeof value['name'] === 'string' && value['name'].length > 0
+    ? value['name']
+    : (value['path'] as string).split(/[\\/]/).pop() ?? (value['path'] as string)
+  const policy = value['vfrPolicy']
+  const compactMode = value['compactMode']
+  return {
+    id,
+    path: value['path'],
+    ...(typeof value['sourcePath'] === 'string' ? { sourcePath: value['sourcePath'] } : {}),
+    name,
+    meta,
+    non169Ack: value['non169Ack'] === true,
+    hdrAck: value['hdrAck'] === true,
+    vfrPolicy: policy === 'converted' || policy === 'raw' ? policy : 'none',
+    compactMode:
+      compactMode === 'compact' || compactMode === 'ultrawide' || compactMode === 'standard'
+        ? compactMode
+        : 'auto',
+    thumbnailUrl: typeof value['thumbnailUrl'] === 'string' ? value['thumbnailUrl'] : '',
+    importedAt: typeof value['importedAt'] === 'string' ? value['importedAt'] : new Date(0).toISOString()
+  }
+}
+
+/** v2：时间轴上一段媒体。入出点写入前吸附帧边界，时长不足最短时拒收。 */
+function normalizeMediaClip(value: unknown, fps: Fps, mediaIds: Set<string>): MediaClip | null {
+  if (!isRecord(value)) return null
+  if (typeof value['mediaId'] !== 'string' || !mediaIds.has(value['mediaId'])) return null
+  const id = typeof value['id'] === 'string' && value['id'].length > 0 ? value['id'] : createId('mclip')
+  const tStart = snapTimeToFrame(Math.max(0, numberOr(value['timelineStartSec'], 0)), fps)
+  const tEndRaw = numberOr(value['timelineEndSec'], tStart)
+  let tEnd = snapTimeToFrame(Math.max(tStart, tEndRaw), fps)
+  if (tEnd - tStart < MIN_CLIP_DURATION_SEC) tEnd = snapTimeToFrame(tStart + MIN_CLIP_DURATION_SEC, fps)
+  const duration = tEnd - tStart
+  const sIn = snapTimeToFrame(Math.max(0, numberOr(value['sourceInSec'], 0)), fps)
+  // 时长强制对齐：任何一份手工改写的 JSON 也要保证 `sourceOutSec - sourceInSec === timelineEndSec - timelineStartSec`
+  let sOut = snapTimeToFrame(sIn + duration, fps)
+  if (sOut <= sIn) sOut = snapTimeToFrame(sIn + duration, fps)
+  return {
+    id,
+    mediaId: value['mediaId'],
+    timelineStartSec: tStart,
+    timelineEndSec: tEnd,
+    sourceInSec: sIn,
+    sourceOutSec: sOut
+  }
+}
+
+/**
+ * 水印设置归一化：无 path / 尺寸不可用时返回 undefined（等于没导入），
+ * 不让一张已失效的图片把整个工程带坏。
+ */
+function normalizeWatermark(value: unknown): WatermarkSettings | undefined {
+  if (!isRecord(value)) return undefined
+  if (typeof value['path'] !== 'string' || value['path'].length === 0) return undefined
+  const sourceWidth = Math.round(numberOr(value['sourceWidth'], 0))
+  const sourceHeight = Math.round(numberOr(value['sourceHeight'], 0))
+  if (sourceWidth <= 0 || sourceHeight <= 0) return undefined
+  const name = typeof value['name'] === 'string' && value['name'].length > 0
+    ? value['name']
+    : (value['path'] as string).split(/[\\/]/).pop() ?? (value['path'] as string)
+  return {
+    // 缺省视为启用：用户导入了就是要用（旧工程无此字段时保持 undefined，行为不变）
+    enabled: value['enabled'] !== false,
+    path: value['path'],
+    name,
+    sourceWidth,
+    sourceHeight,
+    importedAt: typeof value['importedAt'] === 'string' ? value['importedAt'] : new Date(0).toISOString()
+  }
+}
+
 function normalizeFontRecord(value: unknown): FontRecord | null {
   if (!isRecord(value) || typeof value['fontId'] !== 'string' || typeof value['fileName'] !== 'string') return null
   return {
@@ -281,7 +362,19 @@ export function normalizeProject(raw: unknown): Project | null {
         .map((font) => normalizeFontRecord(font))
         .filter((font): font is FontRecord => font !== null)
     : []
-  const refVideo = normalizeRefVideo(migrated['refVideo'])
+  // 旧工程：migrate() 已将 refVideo 写入 media[0] + 覆盖整段的 mediaClip；新工程直接读 media/mediaClips
+  const mediaRaw = Array.isArray(migrated['media']) ? migrated['media'] : []
+  const media = mediaRaw
+    .map((item) => normalizeMediaItem(item))
+    .filter((item): item is MediaItem => item !== null)
+  const mediaIds = new Set(media.map((item) => item.id))
+  const mediaClipsRaw = Array.isArray(migrated['mediaClips']) ? migrated['mediaClips'] : []
+  const mediaClips = mediaClipsRaw
+    .map((item) => normalizeMediaClip(item, fps, mediaIds))
+    .filter((item): item is MediaClip => item !== null)
+    .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
+  const ui = isRecord(migrated['ui']) ? (migrated['ui'] as Project['ui']) : undefined
+  const watermark = normalizeWatermark(migrated['watermark'])
   return {
     version: PROJECT_VERSION,
     name: typeof migrated['name'] === 'string' && migrated['name'].length > 0 ? migrated['name'] : '未命名工程',
@@ -289,16 +382,63 @@ export function normalizeProject(raw: unknown): Project | null {
     fps,
     clips,
     fonts,
-    ...(refVideo ? { refVideo } : {}),
-    ...(isRecord(migrated['ui']) ? { ui: migrated['ui'] } : {})
+    media,
+    mediaClips,
+    ...(watermark ? { watermark } : {}),
+    ...(ui ? { ui } : {})
   }
 }
 
-/** 版本迁移钩子（当前仅 v0/v1）。 */
+/**
+ * 版本迁移钩子：
+ * - v0（无 version）：字段名与 v1 一致，直接补版本号；
+ * - v1 → v2：把 `refVideo` 拆为 `media[0] + mediaClip 覆盖整段`，无 refVideo 时 media/mediaClips 保持缺省。
+ */
 function migrate(raw: Record<string, unknown>, fromVersion: number): Record<string, unknown> {
   if (fromVersion >= PROJECT_VERSION) return raw
-  // v0（讨论稿）没有 version 字段：字段名与 v1 一致，直接补版本号
-  return { ...raw, version: PROJECT_VERSION }
+  const intermediate: Record<string, unknown> = { ...raw, version: PROJECT_VERSION }
+  if (fromVersion < 2) {
+    const legacyRef = normalizeRefVideo(raw['refVideo'])
+    if (legacyRef) {
+      const itemId = createId('media')
+      const clipId = createId('mclip')
+      const fps = normalizeFps(raw['fps'])
+      const duration = Math.max(0, legacyRef.meta.durationSec)
+      const timelineEnd = snapTimeToFrame(duration, fps)
+      const sourceOut = snapTimeToFrame(duration, fps)
+      intermediate['media'] = [
+        {
+          id: itemId,
+          path: legacyRef.path,
+          ...(legacyRef.sourcePath ? { sourcePath: legacyRef.sourcePath } : {}),
+          name: legacyRef.path.split(/[\\/]/).pop() ?? legacyRef.path,
+          meta: legacyRef.meta,
+          non169Ack: legacyRef.non169Ack,
+          hdrAck: legacyRef.hdrAck,
+          vfrPolicy: legacyRef.vfrPolicy,
+          compactMode: legacyRef.compactMode,
+          thumbnailUrl: '',
+          importedAt: legacyRef.importedAt
+        }
+      ]
+      intermediate['mediaClips'] = [
+        {
+          id: clipId,
+          mediaId: itemId,
+          timelineStartSec: 0,
+          timelineEndSec: timelineEnd,
+          sourceInSec: 0,
+          sourceOutSec: sourceOut
+        }
+      ]
+      // 旧字段删除：normalizeProject 不再读 refVideo，避免重复写入时旧新共存
+      delete intermediate['refVideo']
+    } else {
+      intermediate['media'] = []
+      intermediate['mediaClips'] = []
+    }
+  }
+  return intermediate
 }
 
 export function createDefaultProject(name = '未命名工程'): Project {
@@ -308,7 +448,9 @@ export function createDefaultProject(name = '未命名工程'): Project {
     resolution: { width: 1920, height: 1080 },
     fps: { ...DEFAULT_FPS },
     clips: [],
-    fonts: []
+    fonts: [],
+    media: [],
+    mediaClips: []
   }
 }
 

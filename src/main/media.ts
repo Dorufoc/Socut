@@ -9,8 +9,9 @@ import { mimeTypeOf, normalizePreviewPath, parseByteRange, type ByteRange } from
  *
  * 用途：把本机视频以带 Range 支持的流交给渲染进程的 <video>，让预览里能看到
  * 「字幕条叠在参考视频上」的合成效果（此前预览只有棋盘格，看不出叠加结果）。
+ * 水印图片也走这一条协议（<img> 不需要 Range，只需要同一套「登记过才可读」的纪律）。
  *
- * 安全边界：只有主进程显式登记过（video:previewUrl 校验文件存在 + 视频扩展名）的
+ * 安全边界：只有主进程显式登记过（video:previewUrl 校验文件存在 + 受支持的扩展名）的
  * 绝对路径可读；渲染进程无法借这个协议读取任意文件。
  */
 
@@ -33,7 +34,7 @@ export function registerMediaScheme(): void {
   ])
 }
 
-/** 校验文件存在并登记，返回可直接给 <video src> 用的 URL。 */
+/** 校验文件存在并登记，返回可直接给 <video src> / <img src> 用的 URL。 */
 export async function createPreviewUrl(candidate: string): Promise<string | null> {
   const resolved = normalizePreviewPath(candidate)
   if (!resolved) return null

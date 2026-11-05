@@ -6,6 +6,7 @@ import type { FontRecord, RenderJobSpec } from '@shared/types'
 import { buildRenderJob, renderJobToPngBlob } from '../render/jobBuilder'
 import { NativeStage, drawCheckerboard } from '../render/stage'
 import { motionAt } from '../render/animation'
+import { contentBoundsOf } from '../render/layers'
 import { ensureFontRegistered } from '../hooks/useFontLoader'
 
 /**
@@ -176,6 +177,8 @@ export interface WipeProbe {
   samples: WipeSample[]
   /** 主条实测宽 / root 实测宽（应相等）；左右边距实测值（应相等） */
   titleWidth: number
+  /** 长文案主条实测宽（自适应：应宽于短文案且不超 root 右缘） */
+  longTitleWidth: number
   rootWidth: number
   leftMargin: number
   rightMargin: number
@@ -217,8 +220,10 @@ interface ProbeJob {
   bar: { x: number; y: number; w: number; h: number }
   /** 副条盒：仍按文字自适应，用于对照主条的“满宽减等边距” */
   subBar: { x: number; y: number; w: number; h: number }
-  /** 片段 root 盒：擦除线按它算（与 renderer 同一口径） */
+  /** 片段 root 盒：左右布局边距与 8vh 底部锚点的参照（不再是擦除跨度） */
   root: { x: number; w: number }
+  /** 擦除跨度：与 renderFrame 同一口径，取实际绘制内容的横向包络 */
+  sweep: { x: number; w: number }
   titleLines: number
   inFrames: number
   outFrames: number
@@ -262,11 +267,13 @@ async function buildProbeJob(input: {
   const titleLines = titleBox?.text
     ? Math.max(1, Math.round(titleBox.h / titleBox.text.lineHeightPx))
     : 1
+  const sweep = contentBoundsOf(jobClip.boxes)
   return {
     spec,
     bar: { x: barBox.x, y: barBox.y, w: barBox.w, h: barBox.h },
     subBar: { x: subBarBox.x, y: subBarBox.y, w: subBarBox.w, h: subBarBox.h },
     root: { x: rootBox.x, w: rootBox.w },
+    sweep,
     titleLines,
     inFrames: Math.max(1, jobClip.animation.inFrames),
     outFrames: Math.max(1, jobClip.animation.outFrames),
@@ -324,20 +331,27 @@ async function probeWipeAndHug(input: {
   }
   const titleWidth = shortSteady.right - shortSteady.left + 1
   const longTitleWidth = longSteady.right - longSteady.left + 1
+  // 边距读数保留在报告里：leftMargin = 条左缘（应 == root.x）；
+  // rightMargin 在自适应宽度下不再是布局量，仅作现场参考
   const leftMargin = shortSteady.left
   const rightMargin = width - 1 - shortSteady.right
   const shortSubWidth = shortSub.right - shortSub.left + 1
   const longSubWidth = longSub.right - longSub.left + 1
 
-  // 标题区域：左右边距逐像素相等，且与文案长短无关
-  if (Math.abs(leftMargin - rightMargin) > 1) {
-    failures.push(`标题宽度：左右边距不等（左 ${leftMargin} / 右 ${rightMargin}）`)
+  // 标题宽度法则（自适应宽度版）：左缘钉在布局边距上，宽度随文案增长但不超 root；
+  // root 仍是「画宽减左右等边距」，布局边距相等性在 root 自身验（而不是条宽）
+  const rootRightMargin = width - shortJob.root.x - shortJob.root.w
+  if (Math.abs(shortJob.root.x - rootRightMargin) > 1) {
+    failures.push(`布局边距：root 左右不等（左 ${shortJob.root.x} / 右 ${rootRightMargin}）`)
   }
-  if (Math.abs(longTitleWidth - titleWidth) > 1) {
-    failures.push(`标题宽度：长文案 ${longTitleWidth} 与短文案 ${titleWidth} 宽度不一致（应恒为满宽减等边距）`)
+  if (shortSteady.left !== shortJob.root.x) {
+    failures.push(`标题宽度：主条左缘 ${shortSteady.left} 应钉在 root 左缘 ${shortJob.root.x}`)
   }
-  if (titleWidth !== shortJob.root.w) {
-    failures.push(`标题宽度：实测 ${titleWidth} 与 root ${shortJob.root.w} 不一致`)
+  if (!(longSteady.right > shortSteady.right)) {
+    failures.push(`标题宽度：长文案右边界 ${longSteady.right} 未比短文案 ${shortSteady.right} 更宽（应跟随文字自适应）`)
+  }
+  if (longSteady.right > shortJob.root.x + shortJob.root.w) {
+    failures.push(`标题宽度：长文案 ${longSteady.right} 超出 root 右缘 ${shortJob.root.x + shortJob.root.w}`)
   }
   // 副条：仍按文字自适应
   if (!(longSubWidth > shortSubWidth + 8)) {
@@ -356,9 +370,10 @@ async function probeWipeAndHug(input: {
     const box = measure(shortJob, localFrame)
     if (!box) return
     const motion = motionAt(anim, localFrame)
-    // 与 renderFrame 同一口径：一条绝对擦除线被主条盒裁切后的可见区间
-    const lineLeft = shortJob.root.x + shortJob.root.w * motion.wipeFrom
-    const lineRight = shortJob.root.x + shortJob.root.w * motion.wipeTo
+    // 与 renderFrame 同一口径：一条绝对擦除线被主条盒裁切后的可见区间；
+    // 跨度取内容包络（条宽随文字自适应），不是 root 盒
+    const lineLeft = shortJob.sweep.x + shortJob.sweep.w * motion.wipeFrom
+    const lineRight = shortJob.sweep.x + shortJob.sweep.w * motion.wipeTo
     const expLeft = Math.max(shortJob.bar.x, lineLeft)
     const expRight = Math.min(shortJob.bar.x + shortJob.bar.w, lineRight)
     if (Math.abs(box.left - expLeft) > 1) {
@@ -423,6 +438,7 @@ async function probeWipeAndHug(input: {
     outFrames: shortJob.outFrames,
     samples,
     titleWidth,
+    longTitleWidth,
     rootWidth: shortJob.root.w,
     leftMargin,
     rightMargin,

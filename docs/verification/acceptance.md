@@ -10,11 +10,11 @@
 | 2 | 1080p30、10 秒字幕条透明 MOV 导出耗时 ≤ 30 秒 | `FOCUSNEWS_SMOKE=1 …SMOKE_W=1920 H=1080 SEC=10`；`node scripts/smoke-export.mjs --width 1920 --height 1080 --fps 30/1 --seconds 10` | **通过**：应用内 6.67s（300 帧，吞吐 45 fps）；CLI 侧（合成帧，非真实绘制）约 3.5–4s |
 | 3 | ProRes 4444 MOV 在 Premiere、DaVinci Resolve 中透明通道正确，无黑边、无预乘问题 | FFmpeg 侧：`smoke-export` 断言 `pix_fmt=yuva*`/`fourcc=ap4h`/alpha 均值 14.77（非全 255）；`tests/ffmpegPipeline.test.ts` 的 alpha 枚举表 + 期望像素 192/64/64；计划 C2 修正 | **待外部条件**：DCC 里的终评必须人工完成（清单第 3 节） |
 | 4 | 同一工程导出 1080p30 透明 MOV 与叠加到 **720p 23.976** 参考视频，入出点时间误差 < 1 帧 | `FOCUSNEWS_SMOKE_OVERLAY=1 FOCUSNEWS_SMOKE_REF=<ref-720p23976.mp4>`（主进程逐帧 PSNR 从产物像素量区间）+ `tests/presets.test.ts` M3-7（帧算法逐段 <1 帧） | **通过**：产物 144 帧=参考、`yuv420p`、24000/1001；实测可见区间帧 13..130 vs 声明 12..132（入点 1 帧、出点 2 帧，均在淡入 6/淡出 3 帧窗口内，无泄漏）；算法层面逐段误差 <1 帧 |
-| 5 | 非 16:9、HDR 视频导入均触发模态提示，未确认不可继续 | `FOCUSNEWS_SMOKE_GATE=1`（走生产 `importRefVideoWith` + CompatModal 同一应答动作） | **通过**：portrait.mp4→`non169`、hdr.mp4→`hdr`；未确认时 `gateBlocked` 为真（三个导出按钮禁用并显示原因）；选「取消」工程不写入 |
-| 6 | VFR 视频转换 CFR 后 ffprobe 确认帧率一致；直接导入 VFR 时二次提醒生效 | 同上 gate 场景（选「转换并导入」）+ `tests/ffmpegPipeline.test.ts` VFR→CFR PTS 偏差 | **通过**（前半）：CFR 产物主进程独立 ffprobe 得 `r=30/1 == avg=30/1`，重探不再判 VFR，`vfrPolicy=converted` 且保留 `sourcePath`。（后半）二次提醒为 UI 模态，代码路径 `askVfrSecondConfirm` 在 `vfrPolicy==='raw'` 时必经；真机手机素材需人工（清单 C11） |
+| 5 | 非 16:9、HDR 视频导入均触发模态提示，未确认不可继续 | `FOCUSNEWS_SMOKE_GATE=1`（走生产 `importMediaWith` + CompatModal 同一应答动作） | **通过**（v2 枚级）：portrait.mp4→`non169`、hdr.mp4→`hdr`；未确认时 `gateBlocked` 逐枚检查素材池为真（导出按钮禁用并在原因里带展示名）；选「取消」素材池不写入（poolSize=0 断言） |
+| 6 | VFR 视频转换 CFR 后 ffprobe 确认帧率一致；直接导入 VFR 时二次提醒生效 | 同上 gate 场景（选「转换并导入」）+ `tests/ffmpegPipeline.test.ts` VFR→CFR PTS 偏差 | **通过**（前半）：CFR 产物主进程独立 ffprobe 得 `r=30/1 == avg=30/1`，重探不再判 VFR，枚级 `vfrPolicy=converted` 且保留 `sourcePath`。（后半）二次提醒为 UI 模态，代码路径 `askVfrSecondConfirm` 在任一段 `vfrPolicy==='raw'` 时必经；真机手机素材需人工（清单 C11） |
 | 7 | 音频 `-c:a copy` 成功；不可复制时回退 AAC 并提示 | overlay 冒烟（aac 参考 → copy 成功）+ overlay 冒烟（pcm_s16le 参考 → 预检转 AAC 且带 notice）+ `tests/overlayAudioFallback.test.ts`（注入退出码，5 例） | **通过**：copy 路径产物音轨 `aac` 与参考一致；`pcm_s16le → aac` 且 notices = ["音频已转码为 AAC 192k（原音轨 pcm_s16le 不能直接复制）。"]；运行期 copy 失败只重试一次、不无限重试 |
 | 8 | 导出取消后无孤儿 FFmpeg 进程，临时文件被清理 | `FOCUSNEWS_SMOKE_CANCEL=1`（**两种出口各跑一次**：透明 MOV 与 PNG 序列） | **通过**：MOV 中途 15/600 帧、PNG 序列中途 41/600 帧取消；`errorCode=CANCELLED`、`activeJobs=[]`、`artifactExists=false`（PNG 是**目录**型半成品，走 `kind==='dir'` 递归删除分支）、`staleTempDirs=[]`。注：清理发生在结果事件之后的 `finally`，校验用有界轮询（实测 200ms 内完成）而不是单时间点采样 |
-| 9 | Yoga 布局在 360p 至 4K、竖屏、超宽屏下字号与条高可读且不失控 | `tests/presets.test.ts` 8 预设 × 8 档（含 9:16 与 21:9）+ 分支覆盖计数 + **标题宽度法则专项**（主条 = 画宽 − 左右等边距，逐档断言 `bar.w=root.w` 且左右边距相等，并验证与文案长短无关）；`FOCUSNEWS_REVIEW_SHEET` 出图 | **通过**（机器可判部分）：整数像素网格、字号硬上限、compact 副标题单行省略；4K 条高 ≈ 360p 的 6 倍；**标题宽度**：1080p 下 x=96 / w=1728（边距 96/96，= 安全区 × 0.5），四字/中/长文案宽度逐像素相同。「观感是否廉价」仍需人看 |
+| 9 | Yoga 布局在 360p 至 4K、竖屏、超宽屏下字号与条高可读且不失控 | `tests/presets.test.ts` 8 预设 × 8 档（含 9:16 与 21:9）+ 分支覆盖计数 + **标题宽度法则专项**（结构断言两条矩形 `maxWidth === BAR_MAX_WIDTH` 且 root `left === right`；几何断言长文案右缘落在「画宽 − 左边距」上、短文案仍 hug）；`FOCUSNEWS_REVIEW_SHEET` 出图 | **通过**（机器可判部分）：整数像素网格、字号硬上限、compact 副标题单行省略；4K 条高 ≈ 360p 的 6 倍；**标题宽度**：1080p 下短/长文案条宽 440→1717（上限 = root 内容宽 1728，右缘落在 1824 = 1920 − 96；左缘均 x=96）。「观感是否廉价」仍需人看 |
 | 10 | 预设样式在真实 1080p 画面上逐帧评审，动画无网页式弹跳与轻浮感 | `FOCUSNEWS_REVIEW_SHEET=…`（8 预设 × 7 关键帧 + 末行「长文案换行」共 9 行，画面由生产同一套 `renderFrame` 产出）；曲线表从源头禁 overshoot（`validatePreset` + `tests/projectSchema.test.ts`）；擦除进度逐帧与 `motionAt` 对照（`FOCUSNEWS_PIXELCHECK` 的 `wipe` 段） | **部分**：评审表可一键产出且每帧都是真实导出像素；动画已是「整体左→右擦除」（无位移、无淡入，仍无 overshoot）；背景为 FFmpeg `testsrc2` 合成画面，**实拍素材观感判定必须人工**（清单第 3 节） |
 
 ## 关键纪律（规格 §11）的机器化程度
@@ -25,7 +25,7 @@
 | 叠加必须按参考视频参数重新渲染，禁止复用透明 MOV 缩放 | `runOverlayMp4` 阶段一按参考分辨率/帧率重渲染（`restrictToActiveSpan` 限定 span）；`tests/pixelParity.test.ts` 静态禁读显示度量 | 通过 |
 | FFmpeg 二进制必须在 asar 外 | `electron-builder.yml` `files` 白名单 + `extraResources`；`check-env` 硬校验；asar 内 172 项不含 ffmpeg | 通过 |
 | 时间轴存秒、帧率存分数、全程整数运算 | `src/shared/fps.ts`（含 BigInt 片段区间）+ `tests/fps.test.ts` 互逆 | 通过 |
-| 非 16:9 与 HDR 模态阻断，未确认不得导入或导出 | `CompatModal` + `gateBlocked`（UI 禁用三按钮）+ `useExportJob.assertGate`（主路径二次拦截） | 通过 |
+| 非 16:9 与 HDR 模态阻断，未确认不得导入或导出 | `CompatModal` + `gateBlocked`（v2 枚级：逐枚检查素材池，UI 禁用导出按钮）+ `useExportJob.assertGate`（主路径二次拦截） | 通过 |
 | 渲染以帧序号驱动，预览 Canvas 不参与坐标计算 | `renderFrame(ctx, job, globalFrame)` 单一像素生产者 + `FOCUSNEWS_PIXELCHECK` 逐像素比对（导出字节 = 预览原生层，DPR=1.5 下仍成立） | 通过 |
 
 ## 三个出口的覆盖情况（规格 §2.3）
@@ -60,16 +60,21 @@
 判据不靠「看截图」，而是写进 `FOCUSNEWS_PIXELCHECK` 的 `wipe` 段（`spikes/pixel-parity.json`）：
 在主条 / 副条高度中段扫描不透明像素包围盒，逐帧与 `motionAt` 对照（容差 2%）。
 
+> **2026-11-05 更正（双轨重构随修）**：自「字幕条自适应宽度 + 整体擦除」重设计后，
+> 擦除跨度是**实际绘制内容的横向包络**（`layers.contentBoundsOf`）而不是 root 盒，条宽随文案在
+> minWidth/maxWidth 之间自适应。`runPixelParityCheck` 的 D 段判据当时没跟着改，一直在拿旧版式
+> （满宽条 + root 跨度）的期望比对新渲染结果；本次拉回与 `renderFrame` 同一口径，下表读数为修复后实测。
+
 | 需求 | 实现 | 实测读数 |
 |---|---|---|
-| 标题区域长度 = 预览宽度 − 左右相等边距 | root 同时声明 `left`/`right` 为同一**布局边距**令牌（= 安全区 × 0.5），主条 `width:100%`；不设任何 `maxWidth` | 1080p：主条 **x=96、w=1728**；像素探针 **titleWidth=1728=rootWidth**，边距 **96 / 96** |
+| 主条左缘钉在布局边距上，宽度随文案自适应 | 条宽 hug 文字：`min(440px@1080p, 29%)` 一类保底，上限统一为 `BAR_MAX_WIDTH`（= root 内容宽）；root 仍同时声明 `left`/`right` 为同一**布局边距**令牌（= 安全区 × 0.5） | 1080p：短文案条宽 **440**、长文案 **1717**（上限 1728，最长行余量 11px；左缘均 x=96）；root 左右边距 **96 / 96**（在 root 自身验） |
 | 边距为原安全区的一半 | `LAYOUT_INSET_SCALE = 0.5`（`layout-*` 令牌），`safe-*` 与辅助线不变 | 左/右边距 96（原 192）；底部边距 54（原 108） |
 | 副标题在主标题上面 | 子节点顺序「副条 → 主条」，`-overlapY` 移到主条上边距 | **subBarTop=860 < barTop=922** |
-| 副条仍按文字自适应 | 副条 `maxWidth = subBarWidth`（hug） | 副条实测 127px → 1037px（短 → 长） |
+| 副条仍按文字自适应 | 副条 `maxWidth` = 与主条同一个上限（hug） | 副条实测 150px → 759px（短 → 长） |
 | 文字逐字渐隐渐现 | `layers.charStagger()`：每个字按索引错峰，入场用 `wipeTo`、出场用 `wipeFrom`（与条块同源） | 入场早期已有字出现且均在擦除线以内；同帧各字 alpha 不全相同（`tests/pixelParity.test.ts`） |
 | 超过条宽自动换行 | 标题 3 行 / 副标题 2 行，共用一个 `TextMeasurer.wrap()`；条高随行数长高 | 44 字标题 1 行 → 2 行 |
-| 所有矩形左→右擦除 | 整条字幕**一条**绝对擦除线：入场右边界右推、出场左边界右推 | 入场 L 恒 96、R 长到 1823（=96+1728-1）；出场 L 1451→1713→1810、R 恒 1823 |
-| 擦除进度与帧号一致 | `motionAt` 的 `wipeTo/wipeFrom` | 可见比 0.2159/0.0642/0.0081 vs 预期 0.216/0.064/0.008（偏差 ≤ 0.002） |
+| 所有矩形左→右擦除 | 整条字幕**一条**绝对擦除线（跨度 = 内容包络）：入场右边界右推、出场左边界右推 | 入场 L 恒 96、R 240→535（=96+440-1）；出场 L 441→508→532、R 恒 535 |
+| 擦除进度与帧号一致 | `motionAt` 的 `wipeTo/wipeFrom`（stackedNews 预设 8/5 帧短擦除） | 可见比 0.2159/0.0636/0.0091 vs 预期 0.216/0.064/0.009（偏差 ≤ 0.002） |
 | 动画不改布局 | 几何只在布局层算一次，动画只落 clip | 落地几何（x/y/w/h）入场帧与稳态帧逐项相等；稳态帧无 clip |
 
 评审表同步加了第 9 行「长文案换行」：`npm run verify:all` 的最后一步会重生成 `spikes/artifacts/review-sheet-1080p.png`（3692×3048）。
@@ -81,6 +86,31 @@
 窗口虽在 `GetWindowRect` 返回的坐标上却被遮盖。因此屏幕截图不能当作应用 UI 的证据；
 可靠路径仍是应用自身的 `webContents.capturePage()`（`FOCUSNEWS_SHOT=<png>`），
 它拿的是 Chromium 内容区的真实绘制结果（已证：`ui-shot-1080p.png`、`ui-shot-directpipe.png`、`ui-shot-refmissing.png`）。
+
+## 双轨时间轴与素材库（v2，阶段 2–9）的机器化验收
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 主进程批量导入 + 枚级缩略图协议 | `video:pickManyAndProbe`（多选逐文件探测，单文件失败不阻断整批）；`thumbProtocol.ts`：ffmpeg 抽帧落 `userData/thumbs/<mediaId>.jpg`，`focusnews-thumb://<mediaId>` 仅读已登记项；移出池回收文件 | `tests/ffmpegArgs.test.ts`（缩略图 argv 快照）；应用内启动路径随 `npm run verify:all` 门禁通过 |
+| 素材池/媒体轨 store 动作 | `projectStore`：addMedia/removeMedia/relocateMedia/ack 枚级、insert/move/trim/remove/splitAtFrame；时长恒等式 `timelineEnd-timelineStart === sourceOut-sourceIn` 唯一写入口 | `src/renderer/src/state/projectStore.test.ts`（13 例）+ `tests/mediaClips.test.ts`（纯函数：拆分/仅重叠右移/时间↔源换算） |
+| 旧工程迁移 | `normalizeProject` v1→v2：`refVideo` 折叠为 `media[0]` + 覆盖整段的 mediaClip，旧字段不回流 | `tests/projectSchema.test.ts`（迁移两组） |
+| 左侧 Tab 壳 + 素材库 | `App.tsx` rail__tabs（素材库/水印/导出/进度，同一时刻只展开一个）；卡片拖拽携带 `application/x-focusnews-media` | `Timeline.test.tsx` v2 媒体轨 4 例 + `FOCUSNEWS_SHOT` 可出图 |
+| 水印（Watermark）模块 | 左侧新增「水印」Tab + `WatermarkPanel`：导入本机图片（`watermark:pick` 用 ffprobe 取原图宽高）、启用/停用/移除；`ffmpegArgs.computeWatermarkGeometry` 以 1080P 为基准（显示尺寸 = 原图 32%，距顶/左各 30px）按输出高度等比换算，四条合成路径统一作为**最后一层** overlay 叠在字幕条之上；预览用同一函数定位 `<img>`（不进 Canvas，透明出口永不烧录台标） | `tests/watermark.test.ts`（几何/argv/图片解析/持久化 20 例）+ `WatermarkPanel.test.tsx`（导入/开关/移除/读数 9 例）+ `tests/ffmpegPipeline.test.ts`（真机 FFmpeg 取像素判定：两阶段单输入 / trim+concat 拼接 / 直管道 3 例） |
+| 双轨时间轴 + 落点高亮 | 媒体轨/字幕轨共享尺规与播放头；拖拽悬停显示吸附落点竖线；拆分按钮 + `canSplitMediaClipAt` 纯谓词 | `Timeline.test.tsx`（拆分启用/禁用/选中/尺规跟随） |
+| 预览按 mediaClip 切源 | `PreviewStage`：播放头落在哪段，`<video>` 就换那枚源文件，`currentTime` 按 `sourceTimeOf` 换算；段间空隙回棋盘格；无 mediaClips 时保留 v1 兼容 | 逐像素一致性（M1-7）仍走同一 `renderFrame`，本次重跑通过 |
+| Ctrl+B 剪切 | `App.tsx` keydown：输入控件内不拦；先暂停再 `splitAtFrame(displayTimeSec)`；Delete 删选中媒体段 | UI 快捷键（可人工验证）；拆分本体由 store 单测覆盖 |
+| 多输入 trim+concat 导出 | `ExportRequest.overlay.segments`（主进程按段 trim 后 concat，空隙补黑+静音；单段整段覆盖时回退旧单输入 argv 不变）；拼接路径音频强制 AAC 并提示 | `tests/ffmpegArgs.test.ts` v2 新增 5 例（滤镜链/两阶段/直管道 argv）；叠加冒烟（单段回退）仍通过 |
+| 素材完整性枚级看护 | `useMediaIntegrity` 遍历 MediaItem 池查存在性 → `missingMediaIds` 驱动卡片角标与叠加禁用；重新定位走生产导入路径 | 代码路径与 v1 同构（旧 `useRefVideoIntegrity` 删除）；`FOCUSNEWS_SHOT_REFMISSING` 取证保留 v1 兼容分支 |
+| leftTab 持久化 | `uiStore.leftTab` 为真值，`App.tsx` 分叉时补写 `project.ui.leftTab`，自动保存落盘、启动恢复 | `normalizeProject` 保留 `ui` 字段（往返单测覆盖） |
+
+## 主界面伸缩布局（v3）的机器化验收
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 三栏 + 下方轨道的可拖拽分区 | `.shell`（CSS 变量宿主 + 测量目标）→ `.body` 五列 Grid（`--pane-left` / 分隔线 / `minmax(0,1fr)` / 分隔线 / `--pane-right`）+ 横分隔线 + `--pane-timeline`；`Splitter` 为 `role=separator` 的独立网格项，面板各自 `min-width/height:0` + `overflow` 裁切，层级不互叠 | `tests/paneLayout.test.ts`（总宽/总高恒等容器、极窄容器让位、保底不越界）；`FOCUSNEWS_SHOT=spikes/artifacts/ui-pane-layout.png` 已出图 |
+| 拖拽实时反馈与双向拖拽 | 指针捕获 + 命令式写 CSS 变量（拖拽中**不重渲染**外层界面），HUD 气泡显示「被治理区域 + 邻居」的 px 与百分比；同一条线同时改两区（时间轴 +40 ↔ 预览 −40） | `Splitter.test.tsx`（按下/跟随/抬起、钳制、方向系数、键盘、双击复位、ARIA 读数）+ `usePaneLayout.test.tsx`（拖拽期间渲染次数不变、变量已生效） |
+| 布局偏好持久化 | `shared/paneLayout` 存比例（与分辨率无关）+ `layout/panePrefs` 落 `localStorage` 键 `focusnews.layout.panes.v1`（带版本）；脏数据/隐私模式/配额异常一律回落默认，不阻断渲染 | `tests/paneLayout.test.ts`（像素↔比例往返、脏数据丢弃）+ `panePrefs.test.ts`（读写/删除/异常存储 5 例）+ `usePaneLayout.test.tsx`（冷启动默认、按比例恢复、窗口缩放保持比例、恢复默认清存档） |
+| 预览叠加层绑定画面框 | 伸缩布局会把预览区拖成任意宽高比，而目标分辨率比例不变：`containFrameRect`（`render/hitTest.ts`，内缩 `STAGE_INSET_PX`）算出**与目标分辨率同比例**的画面框，Canvas / 参考视频 / 水印 / 角标 / 提示语全部装进同一个 `.stage__frame`；`usePreviewLoop` 另监听 Canvas 盒子，尺寸一变就置脏重画（否则暂停态下浏览器只能把旧位图非等比拉伸到新盒子 → 画面被压扁）；点选 `displayToNative` 改用画面框为 rect（拿容器盒子算会把黑边算进画面） | `tests/hitTest.test.ts`「画面框」6 例（比例只由目标分辨率决定、容器内不越界、扁/高容器居中装入、比边距还小时不为负、水印相对画面占比不变、点选不再有黑边偏差）；逐像素一致性（M1-7）在 `verify:all` 重跑仍通过（dpr 1.5 / blitSize 1440x810）；`FOCUSNEWS_SHOT=spikes/artifacts/ui-stage-frame.png` 可见棋盘格即为 16:9 画面矩形 |
 
 ## 重跑取证的最短路径
 

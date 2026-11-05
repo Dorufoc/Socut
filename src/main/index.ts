@@ -9,6 +9,7 @@ import { sweepStaleWorkspaces } from './tempWorkspace'
 import { resolveFfmpegBinaries, tempRoot } from './paths'
 import { initSmoke, smokeConfig } from './smoke'
 import { installMediaProtocol, registerMediaScheme } from './media'
+import { installThumbProtocol, registerThumbScheme } from './thumbProtocol'
 import { log } from './log'
 
 /**
@@ -21,8 +22,27 @@ import { log } from './log'
 
 const engine = new ExportEngine()
 
-// 自定义媒体协议必须在 app ready 之前声明（参考视频预览用）
+// 自定义媒体协议必须在 app ready 之前声明（参考视频预览 + 素材库缩略图）
 registerMediaScheme()
+registerThumbScheme()
+
+/**
+ * 自动化取证专用（仅开发）：把 userData 换到隔离目录。
+ * 单实例锁的锁文件就住在 userData 里——用户正开着 FocusNews 时，冒烟/取证实例
+ * 抢不到锁会**秒退且退出码仍为 0**，取证脚本于是把上一轮的旧报告当成本轮结果（假绿）。
+ * 隔离 profile 后门禁与人工使用互不干扰；打包版一律忽略，不影响交付。
+ */
+function applyDevUserDataOverride(): void {
+  if (app.isPackaged) return
+  const target = process.env.FOCUSNEWS_USER_DATA
+  if (!target) return
+  try {
+    app.setPath('userData', target)
+  } catch (error) {
+    console.error(`✗ 隔离 userData 设置失败（${target}）：${String(error)}`)
+  }
+}
+applyDevUserDataOverride()
 
 // 单实例：多开会让临时目录与子进程失控
 const gotLock = app.requestSingleInstanceLock()
@@ -45,6 +65,7 @@ async function bootstrap(): Promise<void> {
   app.setAppUserModelId('com.focusnews.app')
 
   installMediaProtocol()
+  installThumbProtocol()
 
   // 冒烟模式（开发）：先读环境，再在渲染侧主动上报时校验并退出
   initSmoke()

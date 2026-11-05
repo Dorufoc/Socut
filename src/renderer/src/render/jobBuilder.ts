@@ -34,9 +34,12 @@ export interface BuildJobInput {
 
 export function resolveAspectMode(project: Project, width: number, height: number, override?: AspectMode): AspectMode {
   if (override) return override
+  // v2：枚级布局分支——首枚显式指定了 compactMode 的素材说了算（全 auto 时仍按目标分辨率判定）
+  const declared = project.media.find((item) => item.compactMode !== 'auto')
+  if (declared) return declared.compactMode === 'compact' ? 'compact' : declared.compactMode === 'ultrawide' ? 'ultrawide' : 'standard'
   const ref = project.refVideo
   if (ref) {
-    // 有参考视频时以其显示宽高比为准（规格 §6.1）
+    // 有参考视频时以其显示宽高比为准（规格 §6.1；v1 兼容）
     if (ref.compactMode === 'auto') return classifyAspect(ref.meta.displayRatio)
     return ref.compactMode
   }

@@ -1,5 +1,6 @@
 import type { Preset } from '../types'
 import {
+  BAR_MAX_WIDTH,
   INSET,
   buildSubtitleAbove,
   makeCompactPatches,
@@ -9,10 +10,10 @@ import {
 
 /**
  * 突发新闻：红色主条 + 上方深红副标题小条，左侧整高黄色徽标块。
- * 副标题条更矮更窄且左缘对齐主条，形成“红色标题牌 + 暗红信息条”的突发版式。
+ * 副标题条更矮且左缘对齐主条，两块共用同一个宽度上限，形成“红色标题牌 + 暗红信息条”的突发版式。
  */
 
-const maxWidth = 'min(1220px@1080p, 66%)' as const
+const maxWidth = BAR_MAX_WIDTH
 const minWidth = 'min(440px@1080p, 29%)' as const
 const title: TextTier = { size: 'clamp(44px@1080p, 5.6vh, 82px@1080p)', maxLines: 2, tracking: '1.4px@1080p' }
 const subtitle: TextTier = { size: 'clamp(23px@1080p, 2.7vh, 40px@1080p)', maxLines: 2, tracking: '0.3px@1080p' }
@@ -46,7 +47,6 @@ export const breakingRed: Preset = {
     bottomInset: INSET.bottom,
     maxWidth,
     minWidth,
-    subMaxWidth: minWidth,
     gapY: '6px@1080p',
     title,
     subtitle,

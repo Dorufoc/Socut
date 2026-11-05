@@ -9,7 +9,7 @@
 ```
 root（position:absolute，left=right=布局边距，bottom=8vh，flex-direction:column，gap=6px）
   ├─ secondaryBar  副标题矩形（副标题专用，纯色填充）
-  │    ├─ maxWidth = 主条 minWidth（不会比主条宽）
+  │    ├─ maxWidth = BAR_MAX_WIDTH（= root 内容宽，与主条同一上限）
   │    ├─ padding = 主条左块宽 + 间距（文字与主标题共左线）
   │    └─ subtitle(text)  字号更小（约主标题 0.4–0.48），可两行
   └─ primaryBar    主标题矩形（宽度随标题自适应）
@@ -19,7 +19,8 @@ root（position:absolute，left=right=布局边距，bottom=8vh，flex-direction
 
 - **副标题必须在上**：两块独立纯色矩形，不融合、不放在主标题下方。
 - **左缘严格对齐**：`secondaryBar.x === primaryBar.x`（回归测试逐例断言）。
-- **副标题更小**：`secondaryBar.h < primaryBar.h`，且副标题矩形不得超过主条宽度。
+- **副标题更小**：指高度 `secondaryBar.h < primaryBar.h`；宽度不再跟主条实际值挂钩——
+  两条矩形共用同一个上限（可铺到画面右边距），短姓名 + 长职务时副条本就应该更宽。
 - 绘制顺序 = 树的**前序遍历**顺序（`layoutTree.ts` 收集 → `renderer.ts` 落笔）。
 
 ## 动画纪律（全部预设共同满足，测试逐条断言）
@@ -54,20 +55,23 @@ root（position:absolute，left=right=布局边距，bottom=8vh，flex-direction
 
 ## 宽度 / 边距 / 换行
 
-- **条宽随文字自适应**：主条 / 副标题条都 hug 内容；极短文案用 `minWidth` 保底视觉重量，
-  长文案达到 `maxWidth`（`min(1180px@1080p, 64%)` 一档）后不再变宽，只在条内换行。
+- **条宽随文字自适应**：主条 / 副标题条都 hug 内容；极短文案用 `minWidth` 保底视觉重量。
+- **上限 = `BAR_MAX_WIDTH`（root 内容宽的 100%）**：root 已声明 `left = right = 布局边距`，
+  所以这个上限就是「画宽 − 两份等边距」——1080p 下 1728px，右缘落在 1824 = 1920 − 96。
+  长文案可以一直延伸到画面最右侧（只剩与左边距等宽的那份空白），到顶后才在条内换行。
+  用百分比而不是 px 常量，是为了让 360p→4K 全档自动跟随，不再需要逐套预设配上限。
 - **左缘 = 标题安全区内缩（10%）× `LAYOUT_INSET_SCALE`（0.5）= 画宽 5%**：1080p 下 96px；
   副标题矩形与主条矩形共用同一个左缘。
 - **底部锚点 = 8vh**（1080p 下 86px）：所有预设一致，切换预设不上下跳，也不越过 overscan。
-- 副标题条 `maxWidth` 与主条 `minWidth` 取同一令牌，保证「副标题矩形不比主条宽」；
-  两行副标题时条高按行数增长，但仍低于主条。
+- 条宽是 hug（能塞进 maxLines 行的最长行），所以实测会比上限窄上「一个字的换行余量」
+  （1080p 长文案实测 1717 / 上限 1728）；上限本身由结构断言钉住，不靠像素实测。
 - 标题最多 2 行（`financial/person` 为 1 行），副标题最多 2 行；超出以「…」收尾，不静默丢字。
 - 布局测量与绘制共用 `TextMeasurer.wrap()`，不存在「布局按 2 行、绘制按 3 行」的错位。
 
 ## 分支
 
 - **竖屏紧凑（displayRatio < 1.2）**：主条/副条 maxWidth 92%，标题与副标题单行省略，字号按 0.78 收缩。
-- **超宽（displayRatio > 2.0）**：主条 maxWidth ≤ 56%，副条 ≤ 34%，避免横向被拉成一条横贯全屏的色带。
+- **超宽（displayRatio > 2.0）**：主条 `min(BAR_MAX_WIDTH, 56%)`、副条 ≤ 34%，避免横向被拉成一条横贯全屏的色带。
 - 字号还受**按显示宽度的硬上限**约束（标准 6.2%、紧凑 7.5%），保证 360p→4K→9:16→21:9 全程可读（验收第 9 条）。
 
 ## 逐套参数
@@ -93,7 +97,7 @@ root（position:absolute，left=right=布局边距，bottom=8vh，flex-direction
 - `spikes/artifacts/visual-check/report.json`：逐例指标与失败项。
 
 自动断言：文字占条宽比、右侧空白、条高/字号/行数、上下内边距、底边距、左右安全区、
-标题/副标题对比度，以及「副标题在上、左缘对齐、更矮更窄、不宽于主条、文字共左线」。
+标题/副标题对比度，以及「副标题在上、左缘对齐、更矮、两块都不越过右边距、文字共左线」。
 任一不达标时进程以退出码 1 结束。
 
 ## 与用户覆盖的关系（规格 §7：自定义作用于令牌层）

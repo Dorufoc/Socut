@@ -76,6 +76,10 @@ export const TEXT = {
   timeline: {
     addClip: '新建片段',
     removeClip: '删除片段',
+    /** v2 媒体轨 */
+    splitClip: '拆分媒体段',
+    removeMediaClip: '删除媒体段',
+    emptyMedia: '媒体轨为空：从素材库把卡片拖上来，或导入时自动铺满全段。',
     inPoint: '入点',
     outPoint: '出点',
     duration: '时长',
@@ -165,6 +169,22 @@ export const TEXT = {
     ultrawideMode: '超宽上限',
     safeArea: '显示安全区',
     pickHint: '点预览里的字幕条即可选中并编辑'
+  },
+
+  /** 主界面伸缩布局：区域名同时用于分隔线实时读数与无障碍 valuetext */
+  layout: {
+    labels: {
+      left: '素材栏',
+      center: '预览',
+      right: '字幕编辑',
+      stage: '预览区',
+      timeline: '时间轴'
+    },
+    splitterLeft: '拖动调整素材栏与预览的宽度（双击恢复默认，方向键微调）',
+    splitterRight: '拖动调整预览与字幕编辑的宽度（双击恢复默认，方向键微调）',
+    splitterTimeline: '拖动调整预览区与时间轴的高度（双击恢复默认，方向键微调）',
+    reset: '恢复默认布局',
+    resetHint: '布局比例记住在本机，下次启动自动恢复'
   }
 } as const
 

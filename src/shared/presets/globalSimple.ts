@@ -1,5 +1,6 @@
 import type { Preset } from '../types'
 import {
+  BAR_MAX_WIDTH,
   INSET,
   buildSubtitleAbove,
   makeCompactPatches,
@@ -12,7 +13,7 @@ import {
  * 红色小条同时承担“边界锚点”，浅色主条在浅背景上也不会整体消失。
  */
 
-const maxWidth = 'min(1180px@1080p, 64%)' as const
+const maxWidth = BAR_MAX_WIDTH
 const minWidth = 'min(460px@1080p, 30%)' as const
 const title: TextTier = { size: 'clamp(42px@1080p, 5.4vh, 78px@1080p)', maxLines: 2, tracking: '0.3px@1080p' }
 const subtitle: TextTier = { size: 'clamp(22px@1080p, 2.6vh, 38px@1080p)', maxLines: 2, tracking: '0.2px@1080p' }
@@ -46,7 +47,6 @@ export const globalSimple: Preset = {
     bottomInset: INSET.bottom,
     maxWidth,
     minWidth,
-    subMaxWidth: minWidth,
     gapY: '6px@1080p',
     title,
     subtitle,

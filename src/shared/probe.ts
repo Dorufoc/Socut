@@ -98,6 +98,29 @@ export function parseProbeJson(payload: unknown, path: string): VideoMeta | null
   return meta
 }
 
+/**
+ * 图片尺寸解析（水印导入用）：ffprobe 对 PNG/JPG 给的是同一路图片流，
+ * 这里只取 width/height，不要求帧率/色彩标签等视频字段。
+ * 任何一项不可用就返回 null（调用方按“探测失败”提示用户换图）。
+ */
+export function parseImageSize(payload: unknown): { width: number; height: number } | null {
+  const root = asObject(payload)
+  const streams = Array.isArray(root?.['streams']) ? (root?.['streams'] as unknown[]) : []
+  for (const item of streams) {
+    const stream = asObject(item)
+    if (!stream) continue
+    const codecType = asString(stream['codec_type'])
+    // 纯图片探测只有一路流；写了 codec_type 的必须就是 video
+    if (codecType !== null && codecType !== 'video') continue
+    const width = asNumber(stream['width'])
+    const height = asNumber(stream['height'])
+    if (width === null || height === null) continue
+    if (width <= 0 || height <= 0 || !Number.isInteger(width) || !Number.isInteger(height)) continue
+    return { width, height }
+  }
+  return null
+}
+
 /** 分析前若干 packet 的 pts_time，判定是否变帧率（规格 §6.3）。 */
 export function analyzeVfrSample(
   packets: unknown,

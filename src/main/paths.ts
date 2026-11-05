@@ -47,6 +47,12 @@ export function logsDir(): string {
   return path.join(app.getPath('userData'), USER_DATA_DIRS.logs)
 }
 
+/** v2：素材卡片缩略图落盘路径（userData/thumbs/<mediaId>.jpg）。mediaId 只允许安全字符，防目录穿越。 */
+export function userThumbPath(mediaId: string): string {
+  const safe = mediaId.replace(/[^\w-]/g, '_').slice(0, 96) || 'thumb'
+  return path.join(app.getPath('userData'), USER_DATA_DIRS.thumbs, `${safe}.jpg`)
+}
+
 /** 任务临时根目录（app.getPath('temp') 下，规格 §5.3 要求统一清理）。 */
 export function tempRoot(): string {
   return path.join(app.getPath('temp'), TEMP_ROOT)

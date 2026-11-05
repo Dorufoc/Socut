@@ -4,6 +4,8 @@ import { buildProjectPlan } from '@shared/presetResolver'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import { IN_DURATION_RANGE_SEC, OUT_RATIO_RANGE } from '@shared/presetSchema'
 import { durationSecToFrames } from '@shared/fps'
+import { BAR_MAX_WIDTH } from '@shared/presets/layout'
+import type { LayoutNode } from '@shared/types'
 import { BUILTIN_FONTS, DEFAULT_FONT_ID, FPS_23_976, FPS_30, RESOLUTION_PRESETS } from '@shared/constants'
 import { motionAt } from '../src/renderer/src/render/animation'
 import { computeClipBoxes, layoutCacheKey } from '../src/renderer/src/render/layoutTree'
@@ -235,13 +237,14 @@ describe('跨分辨率布局快照（验收第 9 条）', () => {
         expect(bar.x).toBe(Math.round(target.width * 0.05))
         // 条宽自适应：不超过 root，也不超过当前分支的宽度上限
         expect(bar.w, `${preset.id} @ ${target.name} 主条宽于 root`).toBeLessThanOrEqual(root!.w + 1)
-        const capRatio = plan.mode === 'compact' ? 0.83 : plan.mode === 'ultrawide' ? 0.56 : 0.66
+        // 标准分支上限 = root 内容宽 = 画宽 − 左右各 5% 布局边距 = 90%（长文案可一直顶到右边距）
+        const capRatio = plan.mode === 'compact' ? 0.83 : plan.mode === 'ultrawide' ? 0.56 : 0.9
         expect(bar.w, `${preset.id} @ ${target.name} 主条超出宽度上限`).toBeLessThanOrEqual(target.width * capRatio + 1)
-        // 副标题矩形契约：在上、左缘对齐、更矮、不比主条宽
+        // 副标题矩形契约：在上、左缘对齐、更矮，宽度上限与主条相同（都到画面右边距为止）
         expect(subBar!.x, `${preset.id} @ ${target.name} 副标题左缘未对齐`).toBe(bar.x)
         expect(subBar!.y + subBar!.h, `${preset.id} @ ${target.name} 副标题不在主条上方`).toBeLessThanOrEqual(bar.y + 1)
         expect(subBar!.h, `${preset.id} @ ${target.name} 副标题矩形不够小`).toBeLessThan(bar.h)
-        expect(subBar!.w, `${preset.id} @ ${target.name} 副标题比主条宽`).toBeLessThanOrEqual(bar.w + 1)
+        expect(subBar!.w, `${preset.id} @ ${target.name} 副标题越过右边距`).toBeLessThanOrEqual(root!.w + 1)
         // 超宽分支：主条/副条都收窄
         if (plan.mode === 'ultrawide') {
           ultrawideChecks += 1
@@ -336,6 +339,87 @@ describe('字幕条自适应宽度 + 副标题独立矩形', () => {
     expect(lines).toBeLessThanOrEqual(2)
   })
 
+  /**
+   * 用户明确要求：主标题与副标题都应当**最长延伸到画面右缘**（右侧只留与左边距等宽的那份空白），
+   * 而不是被某个百分比提前截断。1080p 下左边距 96 → 右缘必须落在 1824 = 1920 − 96。
+   * 注：条宽是 hug（能塞进 maxLines 行的最长行），因此几何上会差上「一个字的换行余量」；
+   * 上限本身由下面的结构断言（maxWidth = BAR_MAX_WIDTH）钉住，这里验的是实测铺到了右缘附近且不越界。
+   */
+  const HUG_SLACK_PX = 32
+
+  it('长文案顶到右边距：主条与副标题条右缘都落在「画宽 − 左边距」上', async () => {
+    const longTitle = '长三角一体化发展新规今日正式对外发布并即日起施行'.repeat(4)
+    const hugeSubtitle = '省发展改革委负责人表示新规将覆盖交通能源数据要素与公共服务多个领域'.repeat(8)
+    const rightEdge = 1920 - 96
+    for (const preset of PRESETS) {
+      const layout = await layoutOf(longTitle, hugeSubtitle, preset.id)
+      expect(layout.bar.x, `${preset.id} 左边距应为画宽 5%`).toBe(96)
+      expect(layout.bar.x + layout.bar.w, `${preset.id} 主条越过右边距`).toBeLessThanOrEqual(rightEdge)
+      expect(layout.bar.x + layout.bar.w, `${preset.id} 主条未铺到右边距`).toBeGreaterThanOrEqual(rightEdge - HUG_SLACK_PX)
+      expect(layout.subBar.x, `${preset.id} 副标题左缘未对齐`).toBe(96)
+      expect(layout.subBar.x + layout.subBar.w, `${preset.id} 副标题越过右边距`).toBeLessThanOrEqual(rightEdge)
+      expect(layout.subBar.x + layout.subBar.w, `${preset.id} 副标题未铺到右边距`).toBeGreaterThanOrEqual(rightEdge - HUG_SLACK_PX)
+      // 顶到上限后靠换行/省略而不是继续变宽
+      const titleLines = Math.round(layout.title.h / layout.title.text!.lineHeightPx)
+      expect(titleLines, `${preset.id} 超上限后必须换行而不超行数`).toBeLessThanOrEqual(layout.title.text!.maxLines)
+    }
+  })
+
+  /** 结构层直接钉住上限口径：不再依赖某个像素实测，换预设/改文案也不会假通过。 */
+  it('8 预设的条宽上限 = root 内容宽，且 root 左右声明同一份布局边距', () => {
+    const findByRole = (node: LayoutNode, role: string): LayoutNode | null => {
+      if (node.role === role) return node
+      for (const child of node.children ?? []) {
+        const hit = findByRole(child, role)
+        if (hit) return hit
+      }
+      return null
+    }
+    for (const preset of PRESETS) {
+      const root = preset.layout
+      expect(root.position, `${preset.id} root 应为绝对定位`).toBe('absolute')
+      // 左右边距同一个令牌 → root 内容宽就是「画宽减两份等边距」
+      expect(root.right, `${preset.id} root 右边距应与左边距同一令牌`).toBe(root.left)
+      for (const role of ['primaryBar', 'secondaryBar'] as const) {
+        const bar = findByRole(root, role)
+        expect(bar, `${preset.id} 缺少 ${role}`).toBeTruthy()
+        expect(bar!.maxWidth, `${preset.id} ${role} 宽度上限不是可用内容宽`).toBe(BAR_MAX_WIDTH)
+      }
+    }
+  })
+
+  it('短文案仍然 hug：宽度跟随文字，不会为了铺满而拖出一条空板', async () => {
+    const layout = await layoutOf('新规发布', '本台记者')
+    expect(layout.bar.w).toBeLessThan(layout.root.w)
+    expect(layout.subBar.w).toBeLessThan(layout.root.w)
+    expect(layout.bar.x + layout.bar.w).toBeLessThan(1920 - 96)
+  })
+
+  it('上限随分辨率等比跟随：720p 下右缘 = 1280 − 64', async () => {
+    const project = projectWith(1, [DEFAULT_PRESET_ID])
+    project.clips[0]!.content = {
+      title: '长三角一体化发展新规今日正式对外发布并即日起施行'.repeat(4),
+      subtitle: '省发展改革委负责人表示新规将覆盖交通能源与数据要素三大领域'.repeat(12)
+    }
+    const plan = buildProjectPlan({
+      project,
+      resolution: { width: 1280, height: 720 },
+      fps: FPS_30,
+      scope: { kind: 'timeline' },
+      fontIndex: FONT_INDEX
+    })
+    const boxes = await computeClipBoxes(plan.clips[0]!)
+    const bar = boxes.find((box) => box.role === 'primaryBar')!
+    const subBar = boxes.find((box) => box.role === 'secondaryBar')!
+    const root = boxes.find((box) => box.role === 'root')!
+    expect(bar.x).toBe(64)
+    expect(root.w).toBe(1280 - 128)
+    expect(bar.x + bar.w).toBeLessThanOrEqual(1280 - 64)
+    expect(bar.x + bar.w).toBeGreaterThanOrEqual(1280 - 64 - HUG_SLACK_PX)
+    expect(subBar.x + subBar.w).toBeLessThanOrEqual(1280 - 64)
+    expect(subBar.x + subBar.w).toBeGreaterThanOrEqual(1280 - 64 - HUG_SLACK_PX)
+  })
+
   it('8 套预设：长文案在条内换行，条高随行数长高（单行预设改为省略）', async () => {
     const longTitle = '长三角一体化发展新规今日正式对外发布并即日起施行'.repeat(4)
     const longSubtitle = '省发展改革委负责人表示新规将覆盖交通能源与数据要素三大领域'.repeat(2)
@@ -352,7 +436,7 @@ describe('字幕条自适应宽度 + 副标题独立矩形', () => {
       expect(long.subBar.x, `${preset.id} 副标题左缘未对齐`).toBe(long.bar.x)
       expect(long.subBar.y + long.subBar.h, `${preset.id} 副标题不在主条上方`).toBeLessThanOrEqual(long.bar.y + 1)
       expect(long.subBar.h, `${preset.id} 副标题矩形不够小`).toBeLessThan(long.bar.h)
-      expect(long.subBar.w, `${preset.id} 副标题比主条宽`).toBeLessThanOrEqual(long.bar.w + 1)
+      expect(long.subBar.w, `${preset.id} 副标题越过右边距`).toBeLessThanOrEqual(long.root.w + 1)
       if (maxLines >= 2) {
         expect(lines, `${preset.id} 长文案必须换行`).toBe(2)
         expect(long.bar.h, `${preset.id} 条高应随行数长高`).toBeGreaterThan(short.bar.h)
@@ -372,7 +456,7 @@ describe('字幕条自适应宽度 + 副标题独立矩形', () => {
       expect(layout.subBar.y + layout.subBar.h, `${preset.id} 副标题不在主条上方`).toBeLessThanOrEqual(layout.bar.y + 1)
       expect(layout.subBar.x, `${preset.id} 副标题矩形左缘未对齐`).toBe(layout.bar.x)
       expect(layout.subBar.h, `${preset.id} 副标题矩形不够小`).toBeLessThan(layout.bar.h)
-      expect(layout.subBar.w, `${preset.id} 副标题矩形比主条宽`).toBeLessThanOrEqual(layout.bar.w + 1)
+      expect(layout.subBar.w, `${preset.id} 副标题越过右边距`).toBeLessThanOrEqual(layout.root.w + 1)
       expect(layout.subBar.fill, `${preset.id} 副标题缺少纯色背景`).toBeDefined()
       expect(layout.subtitle.x, `${preset.id} 副标题文字未与主标题共左线`).toBe(layout.title.x)
       checked += 1

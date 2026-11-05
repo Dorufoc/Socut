@@ -1,5 +1,6 @@
 import type { Preset } from '../types'
 import {
+  BAR_MAX_WIDTH,
   INSET,
   buildSubtitleAbove,
   makeCompactPatches,
@@ -12,7 +13,7 @@ import {
  * 职务不再压到姓名上方，姓名也不会被一条满宽空板淹没。
  */
 
-const maxWidth = 'min(980px@1080p, 55%)' as const
+const maxWidth = BAR_MAX_WIDTH
 const minWidth = 'min(440px@1080p, 29%)' as const
 const title: TextTier = { size: 'clamp(48px@1080p, 6.2vh, 88px@1080p)', maxLines: 1, tracking: '1.6px@1080p' }
 const subtitle: TextTier = { size: 'clamp(20px@1080p, 2.4vh, 36px@1080p)', maxLines: 2, tracking: '0.2px@1080p' }
@@ -46,7 +47,6 @@ export const personProfile: Preset = {
     bottomInset: INSET.bottom,
     maxWidth,
     minWidth,
-    subMaxWidth: 'min(400px@1080p, 26%)',
     gapY: '6px@1080p',
     title,
     subtitle,

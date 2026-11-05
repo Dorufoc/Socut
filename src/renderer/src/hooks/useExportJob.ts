@@ -5,9 +5,20 @@ import { frameTimeSec, rationalToNumber } from '@shared/fps'
 import { nearestFps } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { formatBytes } from '@shared/sizeEstimate'
-import type { ExportKind, ExportRequest, FrameSpec, Fps, TransparentCodec } from '@shared/types'
+import type {
+  ExportKind,
+  ExportRequest,
+  FrameSpec,
+  Fps,
+  MediaItem,
+  OverlaySegment,
+  Project,
+  TransparentCodec,
+  VideoMeta
+} from '@shared/types'
 import { askHugeExport, askVfrSecondConfirm } from '../dialog/ask'
 import type { DialogAnswer } from '../state/uiStore'
+import { gateBlocked } from '../state/uiStore'
 import { buildRenderJob } from '../render/jobBuilder'
 import { frameSpecOf, registerExportJob } from '../render/frameSource'
 import { useProjectStore } from '../state/projectStore'
@@ -29,16 +40,119 @@ export interface StartExportInput {
 
 export class GateError extends Error {}
 
-/** 门禁校验（规格 §6：未确认不得导入或导出）。 */
+/**
+ * 门禁校验（规格 §6：未确认不得导入或导出）。
+ * v2：确认位在枚级——逐枚检查素材池，任一未确认即阻断（gateBlocked 同一实现）。
+ */
 function assertGate(): void {
   const project = useProjectStore.getState().project
-  const ref = project.refVideo
-  if (!ref) return
-  const flags = detectCompat(ref.meta)
-  if (flags.non169 && !ref.non169Ack) throw new GateError(TEXT.modalNon169.body)
-  if (flags.hdr && !ref.hdrAck) throw new GateError(TEXT.modalHdr.body)
-  if (flags.vfr && ref.vfrPolicy === 'none') throw new GateError(TEXT.modalVfr.body)
+  if (project.media.length === 0 && project.refVideo) {
+    // v1 兼容：冒烟取证直接写 refVideo，没有素材池时沿用旧口径
+    const legacy = gateBlocked([
+      {
+        id: 'legacy-ref',
+        path: project.refVideo.path,
+        name: project.refVideo.path.split(/[\\/]/).pop() ?? project.refVideo.path,
+        meta: project.refVideo.meta,
+        non169Ack: project.refVideo.non169Ack,
+        hdrAck: project.refVideo.hdrAck,
+        vfrPolicy: project.refVideo.vfrPolicy,
+        compactMode: project.refVideo.compactMode,
+        thumbnailUrl: '',
+        importedAt: project.refVideo.importedAt
+      }
+    ])
+    if (legacy.blocked) throw new GateError(legacy.reason ?? '门禁未通过')
+    return
+  }
+  const gate = gateBlocked(project.media)
+  if (gate.blocked) throw new GateError(gate.reason ?? '门禁未通过')
 }
+
+/** 导出基座的媒体时间轴（v2）：mediaClips → 按时间轴升序的 trim 段列表。 */
+export interface OverlayBase {
+  segments: OverlaySegment[]
+  /** 段数 > 1 或存在空隙/非零源入点时，主进程改走多输入 trim+concat */
+  multi: boolean
+  /** 首段元数据（分辨率/帧率跟随基准，规格 §2.3） */
+  primaryMeta: VideoMeta
+  /** 参与拼接的源里是否存在无音轨段（有则不能逐段 copy） */
+  anyNoAudio: boolean
+  /** 任一段的源仍是未转换 VFR */
+  anyVfrRaw: boolean
+  audioTranscodeNeeded: boolean
+}
+
+function buildOverlayBase(project: Project): OverlayBase | null {
+  const pool = new Map<string, MediaItem>(project.media.map((item) => [item.id, item]))
+  let clips = project.mediaClips.map((clip) => {
+    const item = pool.get(clip.mediaId)
+    return {
+      refVideoPath: item?.path ?? '',
+      timelineStartSec: clip.timelineStartSec,
+      timelineEndSec: clip.timelineEndSec,
+      sourceInSec: clip.sourceInSec,
+      sourceOutSec: clip.sourceOutSec,
+      meta: item?.meta ?? null,
+      vfrRaw: item?.vfrPolicy === 'raw'
+    }
+  })
+  if (project.mediaClips.length === 0 && project.media[0]) {
+    // v2 过渡：有素材但尚未排轨 → 按旧习惯把第一枚素材整段作为基座
+    const item = project.media[0]
+    clips = [
+      {
+        refVideoPath: item.path,
+        timelineStartSec: 0,
+        timelineEndSec: item.meta.durationSec,
+        sourceInSec: 0,
+        sourceOutSec: item.meta.durationSec,
+        meta: item.meta,
+        vfrRaw: item.vfrPolicy === 'raw'
+      }
+    ]
+  } else if (project.mediaClips.length === 0 && project.refVideo) {
+    // v1 兼容路径
+    const ref = project.refVideo
+    clips = [
+      {
+        refVideoPath: ref.path,
+        timelineStartSec: 0,
+        timelineEndSec: ref.meta.durationSec,
+        sourceInSec: 0,
+        sourceOutSec: ref.meta.durationSec,
+        meta: ref.meta,
+        vfrRaw: ref.vfrPolicy === 'raw'
+      }
+    ]
+  }
+  if (clips.length === 0) return null
+  clips.sort((a, b) => a.timelineStartSec - b.timelineStartSec)
+  const first = clips[0]
+  const primaryMeta = first?.meta ?? null
+  if (!primaryMeta) return null
+  let cursor = first?.timelineStartSec ?? 0
+  let hasGap = false
+  for (const clip of clips) {
+    if (clip.timelineStartSec > cursor + 1e-6) hasGap = true
+    cursor = Math.max(cursor, clip.timelineEndSec)
+  }
+  const multi = clips.length > 1 || hasGap || (first?.sourceInSec ?? 0) > 1e-6 || (first?.timelineStartSec ?? 0) > 1e-6
+  return {
+    segments: clips.map(({ meta, vfrRaw, ...seg }) => {
+      void meta
+      void vfrRaw
+      return seg
+    }),
+    multi,
+    primaryMeta,
+    anyNoAudio: clips.some((clip) => clip.meta?.audioCodec == null),
+    anyVfrRaw: clips.some((clip) => clip.vfrRaw),
+    audioTranscodeNeeded: clips.some((clip) => (clip.meta ? detectCompat(clip.meta).audioTranscodeNeeded : false))
+  }
+}
+
+/** v1 兼容：旧取证脚本写的 refVideo 拉平成一枚虚拟素材，门禁口径与新模型共用（见 assertGate）。*/
 
 async function confirmHugeExport(
   width: number,
@@ -79,15 +193,31 @@ export function useExportJob() {
     const selectedClipId = useProjectStore.getState().selectedClipId
     const exportScope = useUiStore.getState().exportScope
 
-    const ref = project.refVideo
+    /**
+     * 水印走同一条「文件不可用就提前说」纪律（规格 §8 的素材完整性口径）：
+     * 否则要到 FFmpeg 打开输入时才失败，用户只能看到一串 stderr。
+     * 透明字幕条出口不烧录水印，所以只在叠加出口前检查。
+     */
+    const watermark = project.watermark
+    if (input.kind === 'overlayMp4' && watermark?.enabled) {
+      const alive = await window.focusnews.video.exists(watermark.path)
+      if (!alive) throw new GateError(`水印图片已不可用：${watermark.name}（请在水印页重新导入，或先关掉开关）`)
+    }
+
     const isOverlay = input.kind === 'overlayMp4'
-    if (isOverlay && !ref) throw new GateError('叠加导出需要先在时间轴导入参考视频')
+    const base = isOverlay ? buildOverlayBase(project) : null
+    if (isOverlay && !base) throw new GateError('叠加导出需要先把素材放入媒体轨（或至少导入一枚素材）')
+
+    /** 跟随基准（规格 §2.3）：v2 取媒体轨首段的源元数据；无媒体轨时退回首枚素材/旧 refVideo（buildOverlayBase 已拉平） */
+    const primaryMeta = base?.primaryMeta ?? null
 
     // 叠加合成强制跟随参考视频参数（规格 §2.3 / §11）
-    const resolution = isOverlay && ref ? { width: ref.meta.width, height: ref.meta.height } : project.resolution
+    const resolution = isOverlay && primaryMeta ? { width: primaryMeta.width, height: primaryMeta.height } : project.resolution
     const fps =
-      isOverlay && ref
-        ? nearestFps(rationalToNumber(ref.meta.avgFrameRate) ?? ref.meta.rFrameRate.num / ref.meta.rFrameRate.den)
+      isOverlay && primaryMeta
+        ? nearestFps(
+            rationalToNumber(primaryMeta.avgFrameRate) ?? primaryMeta.rFrameRate.num / primaryMeta.rFrameRate.den
+          )
         : project.fps
 
     const scope: Parameters<typeof buildRenderJob>[0]['scope'] =
@@ -130,7 +260,7 @@ export function useExportJob() {
     }
 
     let fpsMode: 'cfr' | 'vfr' = 'cfr'
-    if (isOverlay && ref && ref.vfrPolicy === 'raw') {
+    if (isOverlay && base?.anyVfrRaw) {
       const ok = await confirmVfrRaw()
       if (!ok) throw new GateError('已取消导出')
       fpsMode = 'vfr'
@@ -139,22 +269,41 @@ export function useExportJob() {
     const jobId = createId('job')
     registerExportJob(jobId, spec)
 
+    /**
+     * 音频策略（v2 枚级）：单段且首段从 0s 起才允许直接 copy（与旧单输入一致）；
+     * 多段/trim 路径的音频要重编码时间轴，或者任一段无音轨/编码不可 copy → 统一 AAC。
+     */
+    const audioMode: 'copy' | 'aac' =
+      !base || base.multi || base.anyNoAudio || base.audioTranscodeNeeded ? 'aac' : 'copy'
+
     const request: ExportRequest = {
       jobId,
       target: { kind, outputDir: input.outputDir, fileName: input.fileName },
       frameSpec,
       frameDelivery,
       codec: input.codec ?? 'prores4444',
-      ...(isOverlay && ref
+      ...(isOverlay && base && primaryMeta
         ? {
             overlay: {
-              refVideoPath: ref.path,
-              refMeta: ref.meta,
-              audioMode: ref.meta.audioCodec === null ? 'aac' : detectCompat(ref.meta).audioTranscodeNeeded ? 'aac' : 'copy',
+              segments: base.segments,
+              /** v1 兼容字段：首段即旧单输入路径的参考视频 */
+              refVideoPath: base.segments[0]?.refVideoPath ?? '',
+              refMeta: primaryMeta,
+              audioMode,
               fpsMode,
               spanStartSec: frameTimeSec(spec.startFrame, fps),
               spanEndSec: frameTimeSec(spec.endFrame, fps),
-              directPipe
+              directPipe,
+              // 水印：主进程按本次输出尺寸等比换算后作为最后一层 overlay
+              ...(watermark?.enabled
+                ? {
+                    watermark: {
+                      path: watermark.path,
+                      sourceWidth: watermark.sourceWidth,
+                      sourceHeight: watermark.sourceHeight
+                    }
+                  }
+                : {})
             }
           }
         : {})

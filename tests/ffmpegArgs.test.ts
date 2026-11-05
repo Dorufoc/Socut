@@ -5,9 +5,13 @@ import {
   PRORES_PROFILE_4444,
   PRORES_PIX_FMT,
   buildCfrArgs,
+  buildMediaBasisFilterComplex,
   buildOverlayMp4,
   buildOverlayMp4DirectPipe,
+  buildOverlayMp4MultiInput,
+  buildOverlayMp4MultiInputDirectPipe,
   buildProbeArgs,
+  buildThumbnailArgs,
   buildTransparentMovFromPipe,
   buildTransparentMovFromSeq,
   buildTransparentMovQtrle,
@@ -15,6 +19,7 @@ import {
   buildVfrSampleArgs,
   proresArgs
 } from '@shared/ffmpegArgs'
+import type { ConcatSegment } from '@shared/ffmpegArgs'
 import { FPS_23_976, FPS_29_97, FPS_30 } from '@shared/constants'
 
 /**
@@ -160,5 +165,89 @@ describe('探测与转码 argv', () => {
     expect(args[args.indexOf('-fps_mode') + 1]).toBe('cfr')
     expect(args).toContain('+faststart')
     expect(args).toContain('copy')
+  })
+})
+
+describe('v2 缩略图与多输入 trim+concat argv', () => {
+  it('缩略图：-ss 在 -i 前做关键帧快定位，单帧 jpg，固定宽度偶数高', () => {
+    const args = buildThumbnailArgs('D:/media/a.mp4', 'D:/thumbs/m1.jpg', 1.25, 320)
+    expect(args.indexOf('-ss')).toBeLessThan(args.indexOf('-i'))
+    expect(args).toContain('-frames:v')
+    expect(args).toContain('scale=320:-2,setsar=1')
+    expect(args.at(-1)).toBe('D:/thumbs/m1.jpg')
+    expect(args).not.toContain('-progress')
+  })
+
+  const seg = (over: Partial<ConcatSegment> = {}): ConcatSegment => ({
+    refVideoPath: 'D:/media/a.mp4',
+    timelineStartSec: 0,
+    timelineEndSec: 4,
+    sourceInSec: 2,
+    sourceOutSec: 6,
+    hasAudio: true,
+    ...over
+  })
+  const basis = (segments: ConcatSegment[], withOverlayLabel = '2') => ({
+    segments,
+    spanStartSec: 0,
+    spanEndSec: 10,
+    overlayLabel: withOverlayLabel,
+    outputPath: 'D:/out/comp.mp4',
+    fps: FPS_30,
+    frameSize: { width: 1920, height: 1080 },
+    audioMode: 'aac' as const,
+    fpsMode: 'cfr' as const
+  })
+
+  it('两段拼接：逐段 trim + 平移，concat=n=2，透明层取最后一路输入', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis([seg(), seg({ refVideoPath: 'D:/media/b.mp4', timelineStartSec: 4, timelineEndSec: 8, sourceInSec: 0, sourceOutSec: 4 })])
+    )
+    expect(fc).toContain('[0:v]trim=start=2.000000:end=6.000000')
+    expect(fc).toContain('[1:v]trim=start=0.000000:end=4.000000')
+    expect(fc).toContain('[pres0]setpts=PTS+0.000000/TB[vs0]')
+    expect(fc).toContain('[pres1]setpts=PTS+4.000000/TB[vs1]')
+    // 两段覆盖 0–8，span 到 10：尾部空隙自动补一段黑场+静音
+    expect(fc).toContain('concat=n=3:v=1:a=1[vb][ab]')
+    expect(fc).toContain('[2:v]setpts=PTS+0.000000/TB[ov]')
+    expect(fc).toContain('overlay=0:0:alpha=straight')
+    expect(fc.endsWith('format=yuv420p[v]')).toBe(true)
+  })
+
+  it('段间空隙与无音轨段：黑场 + anullsrc 补齐，concat 两侧流结构一致', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis([seg({ timelineEndSec: 2 }), seg({ timelineStartSec: 5, timelineEndSec: 7, sourceInSec: 0, sourceOutSec: 2, hasAudio: false })])
+    )
+    expect(fc).toContain('color=c=black:s=1920x1080')
+    expect(fc).toContain('anullsrc=channel_layout=stereo:sample_rate=48000')
+    // 中段无音轨 → 自己的静音补位；尾部空隙再补一段
+    expect(fc).toContain('[ns1]atrim=duration=2.000000')
+    expect(fc).toContain('concat=n=4:v=1:a=1[vb][ab]')
+  })
+
+  it('多输入两阶段：N 路 -i + 仅用 -t 限长的透明 MOV，map [v]/[ab]', () => {
+    const args = buildOverlayMp4MultiInput({ ...basis([seg()]), overlayPath: 'D:/tmp/overlay.mov' })
+    expect(args.filter((a) => a === '-i')).toHaveLength(2)
+    // 本机 FFmpeg 8.1.1 实证：`-loop` / `-framerate` 是 image2 解封装器选项，
+    // 给 mov 输入会 `Option loop not found.` 并直接退出 —— 这两项不得出现在拼接路径里
+    expect(args).not.toContain('-loop')
+    expect(args).not.toContain('-framerate')
+    const overlayIndex = args.indexOf('D:/tmp/overlay.mov')
+    expect(args[overlayIndex - 1]).toBe('-i')
+    expect(args[overlayIndex - 3]).toBe('-t')
+    expect(args).toContain('D:/tmp/overlay.mov')
+    expect(args).toContain('D:/media/a.mp4')
+    expect(args[args.indexOf('-map') + 1]).toBe('[v]')
+    expect(args).toContain('[ab]')
+    expect(args.at(-1)).toBe('D:/out/comp.mp4')
+  })
+
+  it('多输入直管道：stdin rawvideo，不引用透明 MOV', () => {
+    const args = buildOverlayMp4MultiInputDirectPipe({ ...basis([seg()]), frameFormat: 'raw' })
+    expect(args).toContain('rawvideo')
+    expect(args).toContain('pipe:0')
+    expect(args).not.toContain('D:/tmp/overlay.mov')
+    const pngArgs = buildOverlayMp4MultiInputDirectPipe({ ...basis([seg()]), frameFormat: 'png' })
+    expect(pngArgs).toContain('image2pipe')
   })
 })

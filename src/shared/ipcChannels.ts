@@ -22,11 +22,21 @@ export const CHANNELS = {
   fontRemove: 'fonts:remove',
 
   videoPickAndProbe: 'video:pickAndProbe',
+  /** v2：多文件选择 + 逐文件探测（素材库批量导入） */
+  videoPickManyAndProbe: 'video:pickManyAndProbe',
   videoProbe: 'video:probe',
   /** 参考视频文件是否仍存在（规格 §8：文件被移动时要提示重新定位） */
   videoExists: 'video:exists',
   /** 参考视频预览地址：主进程校验后返回 focusnews-media:// 流地址（找不到返回 null） */
   videoPreviewUrl: 'video:previewUrl',
+  /** 水印：选择一张本机图片并探测原图尺寸（用户取消返回 null） */
+  watermarkPick: 'watermark:pick',
+  /** v2：主进程 ffmpeg 抽帧缩略图，返回 focusnews-thumb://<mediaId>（失败返回 null） */
+  mediaGenerateThumb: 'media:generateThumb',
+  /** v2：将已登记的 thumb 绝对路径交回自定义协议可读 */
+  mediaThumbUrl: 'media:thumbUrl',
+  /** v2：素材移出池时回收 userData/thumbs 里的 jpg */
+  mediaThumbRemove: 'media:thumbRemove',
   videoCfrConvert: 'video:cfrConvert',
 
   exportEstimate: 'export:estimate',

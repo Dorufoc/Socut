@@ -25,6 +25,7 @@ import { runTransparentMov } from './transparentMov'
 import type { TransparentRunCtx } from './transparentMov'
 import { encodePngToMov, writePngSequence } from './pngSequence'
 import { runOverlayMp4 } from './overlayMp4'
+import { watermarkInputOf } from '../../shared/ffmpegArgs'
 import { verifyOverlayMp4, verifyTransparentMov } from './verify'
 
 /** 导出任务编排（规格 §4.2 主进程职责：任务队列、取消、临时目录清理、进度回传）。 */
@@ -304,6 +305,9 @@ export class ExportEngine {
         transparentCtx,
         channel,
         refVideoPath: overlay.refVideoPath,
+        // v2：媒体时间轴；单段整段覆盖时主进程仍走旧单输入（argv 不变）
+        segments: overlay.segments,
+        frameSize: { width: spec.width, height: spec.height },
         refMeta: overlay.refMeta,
         audioMode: overlay.audioMode,
         fpsMode: overlay.fpsMode,
@@ -313,8 +317,9 @@ export class ExportEngine {
         overlayPath: transparentOutput,
         codec,
         frameFormat: spec.frameFormat,
-        frameSize: { width: spec.width, height: spec.height },
         directPipe: overlay.directPipe,
+        // 水印：尺寸不可用/路径缺失时归一为 undefined，合成链退回无水印的旧参数
+        watermark: watermarkInputOf(overlay.watermark),
         isCancelled: () => state.cancelRequested,
         onTick: emit
       })

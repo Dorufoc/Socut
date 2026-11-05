@@ -1,7 +1,7 @@
 import path from 'node:path'
 
 /**
- * 参考视频预览的纯逻辑（不依赖 electron，便于单测）：
+ * 预览协议的纯逻辑（不依赖 electron，便于单测）：
  * 扩展名白名单与 HTTP Range 解析。协议注册与文件流在 media.ts。
  */
 
@@ -14,21 +14,41 @@ const VIDEO_MIME_BY_EXTENSION: Record<string, string> = {
   '.avi': 'video/x-msvideo'
 }
 
+/**
+ * 图片扩展名：水印预览走同一条协议（主进程登记后 <img> 才可读），
+ * 与视频共用白名单，避开再开一条 custom scheme。
+ */
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.gif': 'image/gif',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff'
+}
+
+const PREVIEW_MIME_BY_EXTENSION: Record<string, string> = {
+  ...VIDEO_MIME_BY_EXTENSION,
+  ...IMAGE_MIME_BY_EXTENSION
+}
+
 export interface ByteRange {
   start: number
   end: number
 }
 
-/** 扩展名白名单 + 绝对路径规范化；返回 null 表示不是可预览的视频。 */
+/** 扩展名白名单（视频 + 图片）+ 绝对路径规范化；返回 null 表示不是可预览的文件。 */
 export function normalizePreviewPath(candidate: string): string | null {
   if (typeof candidate !== 'string' || candidate.length === 0) return null
   const resolved = path.resolve(candidate)
-  return path.extname(resolved).toLowerCase() in VIDEO_MIME_BY_EXTENSION ? resolved : null
+  return path.extname(resolved).toLowerCase() in PREVIEW_MIME_BY_EXTENSION ? resolved : null
 }
 
 /** 扩展名 → Content-Type；未知扩展名交给调用方兜底。 */
 export function mimeTypeOf(filePath: string): string | undefined {
-  return VIDEO_MIME_BY_EXTENSION[path.extname(filePath).toLowerCase()]
+  return PREVIEW_MIME_BY_EXTENSION[path.extname(filePath).toLowerCase()]
 }
 
 /**

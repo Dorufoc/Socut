@@ -99,6 +99,22 @@ export function usePreviewLoop(args: PreviewArgs): PreviewHandle {
     return () => cancelAnimationFrame(raf)
   }, [args.canvasRef])
 
+  /**
+   * 显示层盒子一变就补画一帧。`blitTo` 只在绘制时按 clientWidth×DPR 重设后备缓冲，
+   * 暂停态下不重画的话，浏览器会把旧尺寸的位图**非等比拉伸**到新盒子上——
+   * 拖分隔线 / 缩窗口时画面被压扁、字幕条跟着变形就是这个原因。
+   * （ResizeObserver 只看 CSS 盒子，blitTo 改 width/height 属性不会触发它，不构成回环。）
+   */
+  useEffect(() => {
+    const canvas = args.canvasRef.current
+    if (!canvas) return
+    const observer = new ResizeObserver(() => {
+      dirtyRef.current = true
+    })
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [args.canvasRef])
+
   const currentFrame = useCallback((): number => {
     const spec = specRef.current
     if (!spec) return 0

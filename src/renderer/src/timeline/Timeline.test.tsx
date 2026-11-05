@@ -4,16 +4,17 @@ import { cleanup, fireEvent, render } from '@testing-library/react'
 import { FPS_30 } from '@shared/constants'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import { frameTimeSec } from '@shared/fps'
-import type { Project } from '@shared/types'
+import type { MediaItem, Project, VideoMeta } from '@shared/types'
 import { Timeline } from './Timeline'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 
 /**
- * 时间轴刮擦（拖拽定位）契约：
+ * 时间轴交互契约（v2 双轨）：
  * 1) 在尺规/轨道空白上按下即定位，持续拖动逐帧跟随，抬起结束；
  * 2) 刮擦接管播放头：若正在播放必须先暂停；
- * 3) 片段卡片上的指针按下归卡片自己的入出点拖拽，不触发定位。
+ * 3) 片段卡片上的指针按下归卡片自己的入出点拖拽，不触发定位；
+ * 4) 媒体轨：卡片渲染、拆分按钮按播放头态启用。
  */
 
 const TRACK_WIDTH = 1000
@@ -68,6 +69,45 @@ afterEach(() => {
 
 function pointerInit(clientX: number, button = 0): PointerEventInit {
   return { clientX, button, pointerId: 1, bubbles: true, cancelable: true }
+}
+
+/** v2 媒体轨用例的夹具素材：10s 1080p30，导入即自动铺满全段。 */
+function seedMedia(): MediaItem {
+  const meta: VideoMeta = {
+    path: 'C:/media/a.mp4',
+    containerName: 'mov,mp4,m4a,3gp,2b2,gif,webm',
+    width: 1920,
+    height: 1080,
+    sar: null,
+    displayRatio: 1920 / 1080,
+    rFrameRate: { num: 30, den: 1 },
+    avgFrameRate: { num: 30, den: 1 },
+    pixFmt: 'yuv420p',
+    colorPrimaries: null,
+    colorSpace: null,
+    colorTransfer: null,
+    colorRange: null,
+    videoCodec: 'h264',
+    audioCodec: 'aac',
+    audioChannels: 2,
+    durationSec: 10,
+    nbFrames: null,
+    bitRateKbps: null
+  }
+  const store = useProjectStore.getState()
+  const id = store.addMedia({
+    path: meta.path,
+    name: 'a.mp4',
+    meta,
+    non169Ack: true,
+    hdrAck: true,
+    vfrPolicy: 'none',
+    compactMode: 'auto',
+    thumbnailUrl: '',
+    importedAt: '2026-01-01T00:00:00.000Z'
+  })
+  store.insertMediaClip({ mediaId: id, timelineStartSec: 0 })
+  return useProjectStore.getState().project.media.find((m) => m.id === id)!
 }
 
 function renderTimeline(seekTo: (sec: number) => void): HTMLElement {
@@ -143,5 +183,57 @@ describe('Timeline 拖拽刮擦定位', () => {
     expect(findTrack(root).className).not.toContain('timeline__track--scrubbing')
     // 卡片按下会选中自己（沿放入出点拖拽的开始逻辑）
     expect(useProjectStore.getState().selectedClipId).toBe(useProjectStore.getState().project.clips[0]!.id)
+  })
+})
+
+describe('Timeline v2 媒体轨', () => {
+  it('媒体轨渲染卡片，尺规时长跟随媒体覆盖（不再看旧 refVideo）', () => {
+    seed()
+    seedMedia()
+    const root = renderTimeline(vi.fn())
+    const lane = root.querySelector('.timeline__track--media') as HTMLElement
+    expect(lane).toBeTruthy()
+    const card = lane.querySelector('.media-clip-card') as HTMLElement
+    expect(card.textContent).toContain('a.mp4')
+    // 媒体 10s：总时长至少 11s（覆盖 + 1s 余量）
+    expect(root.textContent).toMatch(/总时长 1[1-9]\.\d\ds/)
+  })
+
+  it('拆分按钮：播放头在段内且两半够长时启用，点击拆出右段并选中', () => {
+    seed()
+    const media = seedMedia()
+    const clip = useProjectStore.getState().project.mediaClips.find((c) => c.mediaId === media.id)!
+    act(() => useUiStore.setState({ displayTimeSec: clip.timelineStartSec + 2 }))
+    const root = renderTimeline(vi.fn())
+    const splitBtn = [...root.querySelectorAll('button')].find((b) => b.textContent === '拆分媒体段') as HTMLButtonElement
+    expect(splitBtn.disabled).toBe(false)
+
+    fireEvent.click(splitBtn)
+    const after = useProjectStore.getState()
+    expect(after.project.mediaClips.filter((c) => c.mediaId === media.id)).toHaveLength(2)
+    expect(after.selectedMediaClipId).not.toBe(clip.id)
+  })
+
+  it('播放头落在段外（空隙）时拆分按钮禁用', () => {
+    seed()
+    const media = seedMedia()
+    // 重新铺一段 4s 的：段尾 4s，播放头 6s 落在空隙里
+    const clip = useProjectStore.getState().project.mediaClips.find((c) => c.mediaId === media.id)!
+    act(() => useProjectStore.getState().trimMediaClip(clip.id, { timelineEndSec: 4 }))
+    act(() => useUiStore.setState({ displayTimeSec: 6 }))
+    const root = renderTimeline(vi.fn())
+    const splitBtn = [...root.querySelectorAll('button')].find((b) => b.textContent === '拆分媒体段') as HTMLButtonElement
+    expect(splitBtn.disabled).toBe(true)
+  })
+
+  it('媒体卡片按下选中媒体段而不是字幕段', () => {
+    seed()
+    const media = seedMedia()
+    const root = renderTimeline(vi.fn())
+    const card = root.querySelector('.media-clip-card') as HTMLElement
+    fireEvent.pointerDown(card, pointerInit(300))
+    expect(useProjectStore.getState().selectedMediaClipId).toBe(
+      useProjectStore.getState().project.mediaClips.find((c) => c.mediaId === media.id)!.id
+    )
   })
 })

@@ -305,11 +305,18 @@ export async function runVisualCheck(input: VisualCheckInput): Promise<VisualChe
         if (Math.abs(subBar.x - bar.x) > 1) {
           failures.push(`${prefix}副标题矩形左侧未与主条对齐（Δ${Math.round(subBar.x - bar.x)}px）`)
         }
-        if (subBar.w > bar.w + 1) {
-          failures.push(`${prefix}副标题矩形比主条宽（${Math.round(subBar.w)} > ${Math.round(bar.w)}）`)
-        }
         if (subBar.h >= bar.h) {
           failures.push(`${prefix}副标题矩形不够小（高 ${Math.round(subBar.h)} ≥ 主条 ${Math.round(bar.h)}）`)
+        }
+        // 宽度法则（2026-11 更新）：两条矩形共用同一个上限 = 可用内容宽（画宽减左右等边距），
+        // 长文案可以一直铺到画面右边距。旧判据「副标题不得比主条宽」与此冲突（短姓名 + 长职务
+        // 本来就应该是副条更宽），已换成「谁都不许越过右边距」。
+        const rightMargin = width - bar.x
+        if (bar.x + bar.w > rightMargin + 1) {
+          failures.push(`${prefix}主条越过右边距（右缘 ${Math.round(bar.x + bar.w)} > ${rightMargin}）`)
+        }
+        if (subBar.x + subBar.w > rightMargin + 1) {
+          failures.push(`${prefix}副标题越过右边距（右缘 ${Math.round(subBar.x + subBar.w)} > ${rightMargin}）`)
         }
         if (!subBar.fill) failures.push(`${prefix}副标题缺少纯色背景`)
       } else {

@@ -7,11 +7,16 @@ import {
   ALPHA_DROPPED_MARKER,
   buildCfrArgs,
   buildOverlayMp4,
+  buildOverlayMp4DirectPipe,
+  buildOverlayMp4MultiInput,
   buildProbeArgs,
   buildTransparentMovFromPipe,
   buildVerifyArgs,
-  buildVfrSampleArgs
+  buildVfrSampleArgs,
+  computeWatermarkGeometry,
+  formatSec
 } from '@shared/ffmpegArgs'
+import type { ConcatSegment } from '@shared/ffmpegArgs'
 import {
   analyzeVfrSample,
   detectCompat,
@@ -353,6 +358,230 @@ describe('MP4 叠加合成（规格 §5.2 / 计划 C2–C4、C7）', () => {
     )
     expect(result.stderr).not.toContain('does not contain any stream')
     expect(result.code).toBe(0)
+  }, 300_000)
+})
+
+describe('水印叠加合成（1080P 基准 → 原图 32% → 左上角 30px）', () => {
+  const refPath = path.join(WORK_DIR, 'wm-ref.mp4')
+  const layerPath = path.join(WORK_DIR, 'wm-layer.mov')
+  const logoPath = path.join(WORK_DIR, 'wm-logo.png')
+  const OUT_W = 320
+  const OUT_H = 240
+  const LOGO_W = 200
+  const LOGO_H = 100
+
+  /**
+   * 基座用纯绿底 + aac 音轨，字幕层全透明，水印用纯红 PNG：
+   * 于是「画面里出现红色」只能来自水印本身，不会与其他层串扰。
+   */
+  beforeAll(async () => {
+    const gen = await run(
+      ffmpeg,
+      [
+        '-hide_banner',
+        '-y',
+        '-loglevel',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        `color=c=green:s=${OUT_W}x${OUT_H}:r=30:d=1`,
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=440:duration=1',
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-shortest',
+        refPath
+      ],
+      undefined
+    )
+    expect(gen.code).toBe(0)
+    const transparent = Array.from({ length: 30 }, () =>
+      encodeRgbaPng(OUT_W, OUT_H, rgbaFrame(OUT_W, OUT_H, () => null))
+    )
+    const layer = await runWithFrames(
+      buildTransparentMovFromPipe(FPS_30, layerPath, 'png', { width: OUT_W, height: OUT_H }),
+      transparent
+    )
+    expect(layer.code).toBe(0)
+    await singlePng(logoPath, LOGO_W, LOGO_H, [255, 0, 0, 255])
+  }, 240_000)
+
+  /** 取输出某一时刻的一帧原始 RGB（输出寻址，不用输入寻址，否则只能回到关键帧） */
+  async function frameAt(target: string, atSec: number): Promise<Buffer> {
+    const result = await run(ffmpeg, [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      target,
+      '-ss',
+      formatSec(atSec),
+      '-frames:v',
+      '1',
+      '-f',
+      'rawvideo',
+      '-pix_fmt',
+      'rgb24',
+      'pipe:1'
+    ])
+    expect(result.code, result.stderr.slice(-400)).toBe(0)
+    expect(result.stdout.length).toBeGreaterThanOrEqual(OUT_W * OUT_H * 3)
+    return result.stdout
+  }
+
+  function pixelAt(frame: Buffer, x: number, y: number): [number, number, number] {
+    const offset = (y * OUT_W + x) * 3
+    return [frame[offset] ?? 0, frame[offset + 1] ?? 0, frame[offset + 2] ?? 0]
+  }
+
+  const isRed = (p: [number, number, number]): boolean => p[0] > 120 && p[1] < 60 && p[2] < 60
+  const isGreen = (p: [number, number, number]): boolean => p[1] > 100 && p[0] < 60
+
+  it('两阶段单输入：水印按换算矩形出现在左上角，并保持到最后一帧', async () => {
+    // 320x240 相对 1080P 的因子 = 240/1080；200x100 的红图 → 14x7 @ (7,7)
+    const box = computeWatermarkGeometry(
+      { path: logoPath, sourceWidth: LOGO_W, sourceHeight: LOGO_H },
+      { width: OUT_W, height: OUT_H }
+    )
+    expect(box).toEqual({ width: 14, height: 7, x: 7, y: 7 })
+
+    const output = path.join(WORK_DIR, 'wm-single.mp4')
+    const result = await run(
+      ffmpeg,
+      buildOverlayMp4({
+        refVideoPath: refPath,
+        overlayPath: layerPath,
+        outputPath: output,
+        fps: FPS_30,
+        frameSize: { width: OUT_W, height: OUT_H },
+        spanStartSec: 0,
+        spanEndSec: 1,
+        audioMode: 'copy',
+        fpsMode: 'cfr',
+        watermark: { path: logoPath, sourceWidth: LOGO_W, sourceHeight: LOGO_H }
+      })
+    )
+    expect(result.stderr).not.toContain(ALPHA_DROPPED_MARKER)
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+
+    const first = await frameAt(output, 0)
+    expect(isRed(pixelAt(first, box.x + 3, box.y + 3)), `水印中心像素 ${pixelAt(first, box.x + 3, box.y + 3)}`).toBe(true)
+    // 左上角边距之外（30px@1080p 换算后 = 7px）仍是绿底
+    expect(isGreen(pixelAt(first, 1, 1))).toBe(true)
+    expect(isGreen(pixelAt(first, box.x + box.width + 6, box.y + 3))).toBe(true)
+    expect(isGreen(pixelAt(first, OUT_W - 20, OUT_H - 20))).toBe(true)
+
+    // 循环输入要盖住整段：最后一帧仍在（只出现一瞬的写法会在这里报错）
+    const tail = await frameAt(output, 0.9)
+    expect(isRed(pixelAt(tail, box.x + 3, box.y + 3)), `末帧水印像素 ${pixelAt(tail, box.x + 3, box.y + 3)}`).toBe(true)
+
+    const verified = await verifyJson(output)
+    expect(verified).not.toBeNull()
+    if (verified) {
+      expect(verified.width).toBe(OUT_W)
+      expect(verified.height).toBe(OUT_H)
+      // 水印加了一层 overlay，链尾仍必须回到 8-bit 4:2:0（计划 C3 不回退）
+      expect(isDeliveryYuv420p(verified)).toBe(true)
+    }
+
+    // 对照组：同一条命令不带水印，同一位置就是绿底（证明红色只能来自水印输入）
+    const plainOut = path.join(WORK_DIR, 'wm-single-plain.mp4')
+    const plain = await run(
+      ffmpeg,
+      buildOverlayMp4({
+        refVideoPath: refPath,
+        overlayPath: layerPath,
+        outputPath: plainOut,
+        fps: FPS_30,
+        frameSize: { width: OUT_W, height: OUT_H },
+        spanStartSec: 0,
+        spanEndSec: 1,
+        audioMode: 'copy',
+        fpsMode: 'cfr'
+      })
+    )
+    expect(plain.code).toBe(0)
+    const plainFrame = await frameAt(plainOut, 0)
+    expect(isGreen(pixelAt(plainFrame, box.x + 3, box.y + 3))).toBe(true)
+  }, 300_000)
+
+  it('多输入 trim+concat 基座：水印序号接在透明层之后，真实 FFmpeg 可解', async () => {
+    const seg = (timelineStartSec: number, sourceInSec: number): ConcatSegment => ({
+      refVideoPath: refPath,
+      timelineStartSec,
+      timelineEndSec: timelineStartSec + 0.5,
+      sourceInSec,
+      sourceOutSec: sourceInSec + 0.5,
+      hasAudio: true
+    })
+    const output = path.join(WORK_DIR, 'wm-multi.mp4')
+    const result = await run(
+      ffmpeg,
+      buildOverlayMp4MultiInput({
+        segments: [seg(0, 0), seg(0.5, 0.5)],
+        spanStartSec: 0,
+        spanEndSec: 1,
+        overlayLabel: '2',
+        overlayPath: layerPath,
+        outputPath: output,
+        fps: FPS_30,
+        frameSize: { width: OUT_W, height: OUT_H },
+        audioMode: 'aac',
+        fpsMode: 'cfr',
+        watermark: { path: logoPath, sourceWidth: LOGO_W, sourceHeight: LOGO_H }
+      })
+    )
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+
+    const box = computeWatermarkGeometry(
+      { path: logoPath, sourceWidth: LOGO_W, sourceHeight: LOGO_H },
+      { width: OUT_W, height: OUT_H }
+    )
+    const frame = await frameAt(output, 0.25)
+    expect(isRed(pixelAt(frame, box.x + 3, box.y + 3)), `拼接路径水印像素 ${pixelAt(frame, box.x + 3, box.y + 3)}`).toBe(true)
+    expect(isGreen(pixelAt(frame, OUT_W - 20, OUT_H - 20))).toBe(true)
+    const meta = parseProbeJson(await probeJson(output), output)
+    expect(meta ? `${meta.width}x${meta.height}` : null).toBe(`${OUT_W}x${OUT_H}`)
+  }, 300_000)
+
+  it('直接管道合成 + 水印：stdin 帧流与图片输入并存，输出仍完整落尾帧', async () => {
+    const output = path.join(WORK_DIR, 'wm-direct.mp4')
+    // 全透明的未压缩 RGBA 帧流（与 framePump 主路径同一形式）
+    const frames = Array.from({ length: 30 }, () => rgbaFrame(OUT_W, OUT_H, () => null))
+    const result = await runWithFrames(
+      buildOverlayMp4DirectPipe({
+        refVideoPath: refPath,
+        outputPath: output,
+        fps: FPS_30,
+        frameFormat: 'raw',
+        frameSize: { width: OUT_W, height: OUT_H },
+        spanStartSec: 0,
+        spanEndSec: 1,
+        audioMode: 'copy',
+        fpsMode: 'cfr',
+        watermark: { path: logoPath, sourceWidth: LOGO_W, sourceHeight: LOGO_H }
+      }),
+      frames
+    )
+    expect(result.stderr).not.toContain('Option not found')
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+
+    const box = computeWatermarkGeometry(
+      { path: logoPath, sourceWidth: LOGO_W, sourceHeight: LOGO_H },
+      { width: OUT_W, height: OUT_H }
+    )
+    const first = await frameAt(output, 0)
+    expect(isRed(pixelAt(first, box.x + 3, box.y + 3)), `直管道水印像素 ${pixelAt(first, box.x + 3, box.y + 3)}`).toBe(true)
+    const tail = await frameAt(output, 0.9)
+    expect(isRed(pixelAt(tail, box.x + 3, box.y + 3))).toBe(true)
+    expect(isGreen(pixelAt(tail, OUT_W - 20, OUT_H - 20))).toBe(true)
   }, 300_000)
 })
 

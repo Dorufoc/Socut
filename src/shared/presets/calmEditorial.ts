@@ -1,5 +1,6 @@
 import type { Preset } from '../types'
 import {
+  BAR_MAX_WIDTH,
   INSET,
   buildSubtitleAbove,
   makeCompactPatches,
@@ -12,7 +13,7 @@ import {
  * 副标题条左缘与主条对齐，文字与主标题共左线；长段落副标题允许两行。
  */
 
-const maxWidth = 'min(1100px@1080p, 60%)' as const
+const maxWidth = BAR_MAX_WIDTH
 const minWidth = 'min(420px@1080p, 28%)' as const
 const title: TextTier = { size: 'clamp(40px@1080p, 5.2vh, 74px@1080p)', maxLines: 2, tracking: '0.5px@1080p' }
 const subtitle: TextTier = { size: 'clamp(21px@1080p, 2.5vh, 36px@1080p)', maxLines: 2, tracking: '0.2px@1080p' }
@@ -46,7 +47,6 @@ export const calmEditorial: Preset = {
     bottomInset: INSET.bottom,
     maxWidth,
     minWidth,
-    subMaxWidth: minWidth,
     gapY: '6px@1080p',
     title,
     subtitle,

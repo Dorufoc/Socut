@@ -158,6 +158,17 @@ export interface PickVideoResult {
   probe: VideoProbeResult
 }
 
+/** v2 素材库批量导入：多选后逐文件探测；探测失败的文件不在列表里。 */
+export type PickManyVideoResult = PickVideoResult[]
+
+/** 水印图片导入结果：主进程用 ffprobe 拿到原图宽高后返回（几何换算的唯一输入）。 */
+export interface WatermarkPickResult {
+  path: string
+  name: string
+  sourceWidth: number
+  sourceHeight: number
+}
+
 export interface EstimateInput {
   width: number
   height: number
@@ -200,16 +211,30 @@ export interface FocusNewsApi {
   }
   video: {
     pickAndProbe(): Promise<PickVideoResult | null>
+    /** v2：多文件选择 + 逐文件探测（素材库批量导入） */
+    pickManyAndProbe(): Promise<PickManyVideoResult>
     probe(path: string): Promise<VideoProbeResult | null>
     /** 参考视频是否仍在原路径（规格 §8） */
     exists(path: string): Promise<boolean>
     /**
-     * 参考视频预览地址（focusnews-media://，带 Range 流）：
-     * 主进程校验文件存在且是视频扩展名后登记；文件不可用或扩展名不支持时返回 null。
+     * 参考视频 / 水印图片预览地址（focusnews-media://，带 Range 流）：
+     * 主进程校验文件存在且是受支持的扩展名后登记；不可用或不支持时返回 null。
      */
     previewUrl(path: string): Promise<string | null>
     /** VFR → CFR，返回 jobId，进度经由 onProgress 上报 */
     cfrConvert(path: string, fps: Fps, meta: VideoMeta): Promise<{ jobId: string; outputPath: string }>
+  }
+  watermark: {
+    /** 选一张本机图片作水印并探测原图尺寸；用户取消 null，尺寸不可读时报错 */
+    pick(): Promise<WatermarkPickResult | null>
+  }
+  media: {
+    /** v2：主进程 ffmpeg 抽帧生成素材卡片缩略图，返回 focusnews-thumb://<mediaId>（失败 null） */
+    generateThumb(mediaId: string, videoPath: string, atSec?: number): Promise<string | null>
+    /** v2：把工程里持久化的 thumb 地址重新登记回协议（主进程重启后 registry 为空） */
+    thumbUrl(mediaId: string, url: string): Promise<string | null>
+    /** v2：素材移出池时回收缩略图文件 */
+    removeThumb(mediaId: string): Promise<void>
   }
   export: {
     estimate(input: EstimateInput): Promise<SizeEstimate>

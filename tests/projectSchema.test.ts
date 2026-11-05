@@ -97,6 +97,67 @@ describe('normalizeProject', () => {
     const parsed = normalizeProject({ resolution: { width: 640, height: 360 }, fps: FPS, clips: [], fonts: [] })
     expect(parsed?.version).toBe(PROJECT_VERSION)
   })
+
+  it('v1 旧工程：refVideo 自动迁移为 media[0] + 一条覆盖整段的 mediaClip', () => {
+    const legacy = {
+      version: 1,
+      name: '旧工程',
+      resolution: { width: 1920, height: 1080 },
+      fps: FPS,
+      clips: [],
+      fonts: [],
+      refVideo: {
+        path: 'C:/media/legacy.mp4',
+        meta: {
+          path: 'C:/media/legacy.mp4',
+          containerName: 'mov,mp4,m4a,3gp,2b2,gif,webm',
+          width: 1920,
+          height: 1080,
+          sar: null,
+          displayRatio: 1920 / 1080,
+          rFrameRate: { num: 30, den: 1 },
+          avgFrameRate: { num: 30, den: 1 },
+          pixFmt: 'yuv420p',
+          colorPrimaries: null,
+          colorSpace: null,
+          colorTransfer: null,
+          colorRange: null,
+          videoCodec: 'h264',
+          audioCodec: 'aac',
+          audioChannels: 2,
+          durationSec: 12,
+          nbFrames: null,
+          bitRateKbps: null
+        },
+        non169Ack: true,
+        hdrAck: false,
+        vfrPolicy: 'none',
+        compactMode: 'auto',
+        importedAt: '2026-01-01T00:00:00.000Z'
+      }
+    }
+    const parsed = normalizeProject(legacy)!
+    expect(parsed.version).toBe(PROJECT_VERSION)
+    expect(parsed.media).toHaveLength(1)
+    expect(parsed.media[0]?.path).toBe('C:/media/legacy.mp4')
+    expect(parsed.media[0]?.name).toBe('legacy.mp4')
+    expect(parsed.media[0]?.hdrAck).toBe(false)
+    expect(parsed.mediaClips).toHaveLength(1)
+    const clip = parsed.mediaClips[0]!
+    expect(clip.mediaId).toBe(parsed.media[0]!.id)
+    expect(clip.timelineStartSec).toBe(0)
+    expect(clip.timelineEndSec).toBeCloseTo(12, 6)
+    expect(clip.sourceInSec).toBe(0)
+    expect(clip.sourceOutSec).toBeCloseTo(12, 6)
+    // refVideo 旧字段不应回流到归一化后的工程
+    expect((parsed as unknown as { refVideo?: unknown }).refVideo).toBeUndefined()
+  })
+
+  it('v1 旧工程无 refVideo：media/mediaClips 缺省为空数组', () => {
+    const parsed = normalizeProject({ version: 1, fps: FPS, clips: [], fonts: [] })!
+    expect(parsed.media).toEqual([])
+    expect(parsed.mediaClips).toEqual([])
+  })
 })
 
 describe('片段工具', () => {

@@ -26,18 +26,23 @@ import { ensureFontRegistered } from './hooks/useFontLoader'
 import { askConfirm } from './dialog/ask'
 import { PreviewStage } from './components/PreviewStage'
 import { InfoBar } from './components/ui/InfoBar'
+import { Splitter } from './components/ui/Splitter'
+import { usePaneLayout } from './layout/usePaneLayout'
 import { ClipInspector } from './panels/ClipInspector'
-import { RefVideoPanel } from './panels/RefVideoPanel'
 import { ExportPanel } from './panels/ExportPanel'
 import { LastResultPanel, ProgressPanel } from './panels/ProgressPanel'
 import { Timeline } from './timeline/Timeline'
-import { useRefVideoIntegrity } from './hooks/useRefVideoIntegrity'
+import { useMediaIntegrity } from './hooks/useMediaIntegrity'
 import { FontLoadingOverlay } from './dialog/FontLoadingOverlay'
 import { CompatModal } from './dialog/CompatModal'
+import { MediaLibraryPanel } from './panels/MediaLibraryPanel'
+import { WatermarkPanel } from './panels/WatermarkPanel'
 
 /**
- * 主界面（WinUI 3 / Fluent）：标题栏 + 命令栏 + 左侧素材/导出 + 中央预览 + 右侧字幕条检查器 + 时间轴。
+ * 主界面（WinUI 3 / Fluent）：标题栏 + 命令栏 + 左侧 Tab 壳（素材库/水印/导出/进度） + 中央预览 + 右侧字幕条检查器 + 双轨时间轴。
  * 默认基础模式，只暴露高频入口；配色、字体、动画、编码与工程分辨率等低频项收进高级模式。
+ * v2：左侧不再堆叠三块面板，同一时刻只展开当前 Tab；选中项写回 project.ui.leftTab 持久化。
+ * v3：四条区域之间的三条分隔线可拖拽（usePaneLayout + Splitter），比例存本机 localStorage，冷启动恢复。
  */
 
 export function App(): ReactElement {
@@ -57,15 +62,20 @@ export function App(): ReactElement {
   const fontLoading = useUiStore((state) => state.fontLoadingCount) > 0
   const notice = useUiStore((state) => state.notice)
   const setNotice = useUiStore((state) => state.setNotice)
+  const leftTab = useUiStore((state) => state.leftTab)
+  const setLeftTab = useUiStore((state) => state.setLeftTab)
 
   const busy = useExportStore((state) => state.busy)
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
   const [bootError, setBootError] = useState<string | null>(null)
 
+  // 伸缩布局：三条分隔线各自治理一个区域（左栏宽 / 右栏宽 / 时间轴高）
+  const layout = usePaneLayout()
+
   const { spec, error } = usePreviewSpec()
   useProjectAutosave()
-  // 规格 §8：参考视频被移动/删除时提示重新定位（而不是等到导出才报错）
-  useRefVideoIntegrity()
+  // 规格 §8（v2 枚级）：素材池里的文件被移动/删除时提示重新定位（而不是等到导出才报错）
+  useMediaIntegrity()
 
   const seekRef = useRef<((sec: number) => void) | null>(null)
   const setDisplayTime = useUiStore((state) => state.setDisplayTime)
@@ -81,6 +91,48 @@ export function App(): ReactElement {
   const registerHandle = useCallback((handle: { seekTime: (sec: number) => void; seekFrame: (f: number) => void }) => {
     seekRef.current = handle.seekTime
   }, [])
+
+  /**
+   * 快捷键（阶段 6）：
+   * - Ctrl/Cmd+B：在播放头处拆分媒体段；
+   * - Delete：选中媒体段且焦点不在输入控件时删除该段。
+   * 输入控件里不拦：文本框内的 Ctrl+B（如浏览器式加粗）不得被抢走。
+   */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null
+      const tag = target?.tagName
+      const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable === true
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b' && !inField) {
+        event.preventDefault()
+        const ui = useUiStore.getState()
+        if (ui.playing) ui.setPlaying(false)
+        const rightId = useProjectStore.getState().splitAtFrame(ui.displayTimeSec)
+        if (!rightId) ui.setNotice('播放头不在可拆分的媒体片段内，或拆出的半段不足最短时长')
+        return
+      }
+      if (event.key === 'Delete' && !inField) {
+        const mediaClipId = useProjectStore.getState().selectedMediaClipId
+        if (!mediaClipId) return
+        event.preventDefault()
+        useProjectStore.getState().removeMediaClip(mediaClipId)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  /**
+   * leftTab 持久化（阶段 9）：uiStore 是真值，工程里的快照只在分叉时补写；
+   * 自动保存因此能记住上次离开左侧栏的位置（冷启动仍默认素材库，见 uiStore 初始态）。
+   */
+  useEffect(() => {
+    if (project.ui?.leftTab === leftTab) return
+    useProjectStore.setState((state) => ({
+      project: { ...state.project, ui: { ...(state.project.ui ?? {}), leftTab } },
+      revision: state.revision + 1
+    }))
+  }, [leftTab, project.ui?.leftTab])
 
   // 帧通道与任务事件：一次订阅
   useEffect(() => {
@@ -204,13 +256,20 @@ export function App(): ReactElement {
               importedAt: new Date().toISOString()
             }
             setProject(demoProject)
+            // 取证目标是「完整性检查弹出重新定位模态 + 导出面板禁用」，直接落在导出 Tab
+            useUiStore.getState().setLeftTab('export')
           }
           return
         }
         const saved = await window.focusnews.project.autosaveRead()
         if (saved && saved.clips.length > 0) {
           const ok = await askConfirm(TEXT.project.newProject, TEXT.project.restoreAutosave, '恢复')
-          if (ok) setProject(normalizeProject(saved) ?? saved)
+          if (ok) {
+            const restored = normalizeProject(saved) ?? saved
+            setProject(restored)
+            // 工程里存过的左侧栏 Tab 恢复现场（无则保持冷启动默认素材库）
+            if (restored.ui?.leftTab) useUiStore.getState().setLeftTab(restored.ui.leftTab)
+          }
         }
       } catch (bootFailure) {
         setBootError(String(bootFailure))
@@ -364,59 +423,118 @@ export function App(): ReactElement {
         </div>
       ) : null}
 
-      <div className="body">
-        {/* 左侧：素材与导出（与「当前字幕条」无关的全局操作） */}
-        <aside className="rail">
-          <RefVideoPanel />
-          <ExportPanel spec={spec} fontLoading={fontLoading} ffmpegAvailable={appInfo?.ffmpegAvailable ?? false} />
-          <ProgressPanel />
-          <LastResultPanel />
-        </aside>
-
-        <main className="stage">
-          <PreviewStage spec={spec} onHandle={registerHandle} />
-          <div className="transport">
-            <div className="transport__group">
+      <div className="shell" ref={layout.shellRef} style={layout.shellStyle}>
+        <div className="body">
+          {/* 左侧：Tab 壳（素材库 / 导出 / 进度）——与「当前字幕条」无关的全局操作 */}
+          <aside className="rail">
+            <div className="rail__tabs" role="tablist" aria-label="左侧面板">
               <button
                 type="button"
-                className="iconbtn iconbtn--accent"
-                aria-label={playing ? TEXT.preview.pause : TEXT.preview.play}
-                title={playing ? TEXT.preview.pause : TEXT.preview.play}
-                onClick={() => setPlaying(!playing)}
+                role="tab"
+                aria-selected={leftTab === 'media'}
+                className={`rail__tab${leftTab === 'media' ? ' rail__tab--active' : ''}`}
+                onClick={() => setLeftTab('media')}
               >
-                {playing ? '❚❚' : '▶'}
-              </button>
-              <button type="button" className="iconbtn" aria-label="回到起点" title="回到起点" onClick={() => seekTo(0)}>
-                ⏮
+                素材库
+                <span className="rail__tab-badge">{project.media.length > 0 ? project.media.length : ''}</span>
               </button>
               <button
                 type="button"
-                className="iconbtn"
-                aria-label="跳到末尾"
-                title="跳到末尾"
-                onClick={() => seekTo(Math.max(0, lastClipEnd - DEFAULT_CLIP_DURATION_SEC / 2))}
+                role="tab"
+                aria-selected={leftTab === 'watermark'}
+                className={`rail__tab${leftTab === 'watermark' ? ' rail__tab--active' : ''}`}
+                onClick={() => setLeftTab('watermark')}
               >
-                ⏭
+                水印
+                {project.watermark?.enabled ? <span className="rail__tab-badge">●</span> : null}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={leftTab === 'export'}
+                className={`rail__tab${leftTab === 'export' ? ' rail__tab--active' : ''}`}
+                onClick={() => setLeftTab('export')}
+              >
+                导出
+                {busy ? <span className="rail__tab-badge rail__tab-badge--busy">●</span> : null}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={leftTab === 'progress'}
+                className={`rail__tab${leftTab === 'progress' ? ' rail__tab--active' : ''}`}
+                onClick={() => setLeftTab('progress')}
+              >
+                进度
               </button>
             </div>
-            <span className="timecode mono">{secondsToTimecode(displayTime, project.fps)}</span>
-            <span className="transport__spacer" />
-            <label className="switch">
-              <input type="checkbox" checked={showSafeArea} onChange={toggleSafeArea} />
-              <span>{TEXT.preview.safeArea}</span>
-            </label>
-          </div>
-        </main>
+            <div className="rail__panels">
+              {leftTab === 'media' ? <MediaLibraryPanel /> : null}
+              {leftTab === 'watermark' ? <WatermarkPanel /> : null}
+              {leftTab === 'export' ? (
+                <ExportPanel spec={spec} fontLoading={fontLoading} ffmpegAvailable={appInfo?.ffmpegAvailable ?? false} />
+              ) : null}
+              {leftTab === 'progress' ? (
+                <>
+                  <ProgressPanel />
+                  <LastResultPanel />
+                </>
+              ) : null}
+            </div>
+          </aside>
 
-        {/* 右侧：当前字幕条的检查器（时间轴点选 / 预览点字幕条都会落到这里） */}
-        <aside className="inspector-dock">
-          <ClipInspector />
-        </aside>
+          <Splitter {...layout.splitterProps('left')} />
+
+          <main className="stage">
+            <PreviewStage spec={spec} onHandle={registerHandle} />
+            <div className="transport">
+              <div className="transport__group">
+                <button
+                  type="button"
+                  className="iconbtn iconbtn--accent"
+                  aria-label={playing ? TEXT.preview.pause : TEXT.preview.play}
+                  title={playing ? TEXT.preview.pause : TEXT.preview.play}
+                  onClick={() => setPlaying(!playing)}
+                >
+                  {playing ? '❚❚' : '▶'}
+                </button>
+                <button type="button" className="iconbtn" aria-label="回到起点" title="回到起点" onClick={() => seekTo(0)}>
+                  ⏮
+                </button>
+                <button
+                  type="button"
+                  className="iconbtn"
+                  aria-label="跳到末尾"
+                  title="跳到末尾"
+                  onClick={() => seekTo(Math.max(0, lastClipEnd - DEFAULT_CLIP_DURATION_SEC / 2))}
+                >
+                  ⏭
+                </button>
+              </div>
+              <span className="timecode mono">{secondsToTimecode(displayTime, project.fps)}</span>
+              <span className="transport__spacer" />
+              <label className="switch">
+                <input type="checkbox" checked={showSafeArea} onChange={toggleSafeArea} />
+                <span>{TEXT.preview.safeArea}</span>
+              </label>
+            </div>
+          </main>
+
+          <Splitter {...layout.splitterProps('right')} />
+
+          {/* 右侧：当前字幕条的检查器（时间轴点选 / 预览点字幕条都会落到这里） */}
+          <aside className="inspector-dock">
+            <ClipInspector />
+          </aside>
+        </div>
+
+        {/* 上边缘：同一条线同时改预览区高与时间轴高（两区共享总高，此消彼长） */}
+        <Splitter {...layout.splitterProps('timeline')} />
+
+        <footer className="timeline-dock">
+          <Timeline seekTo={seekTo} />
+        </footer>
       </div>
-
-      <footer className="timeline-dock">
-        <Timeline seekTo={seekTo} />
-      </footer>
 
       <div className="statusbar">
         <span className="mono">FocusNews {appInfo?.version ?? ''}</span>
@@ -426,6 +544,23 @@ export function App(): ReactElement {
           {fpsToRatio(project.fps).toFixed(3)}
         </span>
         <span className="statusbar__spacer" />
+        {layout.ready ? (
+          <span
+            className="muted mono"
+            title={`${TEXT.layout.labels.left} ${layout.sizes.left} / ${TEXT.layout.labels.center} ${layout.sizes.center} / ${TEXT.layout.labels.right} ${layout.sizes.right} / ${TEXT.layout.labels.stage} ${layout.sizes.stage} / ${TEXT.layout.labels.timeline} ${layout.sizes.timeline}`}
+          >
+            {TEXT.layout.labels.left} {layout.sizes.left} · {TEXT.layout.labels.right} {layout.sizes.right} ·{' '}
+            {TEXT.layout.labels.timeline} {layout.sizes.timeline}
+          </span>
+        ) : null}
+        <button
+          type="button"
+          className="btn btn--sm btn--subtle"
+          title={`${TEXT.layout.resetHint}（任一分隔线双击即恢复）`}
+          onClick={layout.resetLayout}
+        >
+          {TEXT.layout.reset}
+        </button>
         <span className="chip chip--accent">{uiMode === 'advanced' ? '高级模式' : '基础模式'}</span>
         {busy ? <span className="chip chip--warn">导出中…</span> : null}
         {appInfo && !appInfo.ffmpegAvailable ? <span className="chip chip--danger">FFmpeg 缺失</span> : null}
