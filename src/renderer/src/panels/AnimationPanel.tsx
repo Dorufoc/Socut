@@ -1,4 +1,5 @@
 import type { ReactElement } from 'react'
+import { MAX_ANIMATION_SEC } from '@shared/constants'
 import { EASING_KEYS, EASING_LABELS } from '@shared/easing'
 import { durationSecToFrames, framesToDurationSec } from '@shared/fps'
 import { TEXT } from '@shared/i18n'
@@ -7,7 +8,9 @@ import { selectedClip, useProjectStore } from '../state/projectStore'
 
 /**
  * 动画节奏面板（规格 §7）。
- * 时长以秒存储（跨帧率观感稳定），UI 以「帧 @ 当前 fps」编辑并吸附（规格 §4.6 / §11）。
+ * 时长以秒为准存储与编辑，跨帧率观感稳定；面板写入时吸附到当前帧率的帧边界，
+ * 因此 1s 默认值在 24/30/60fps 自动展开为 24/30/60 帧，23.976 也能落在 24 帧。
+ * 上限不再固定为 30 帧，而是按 MAX_ANIMATION_SEC（秒）随帧率伸缩。
  */
 
 export function AnimationPanel(): ReactElement {
@@ -18,15 +21,22 @@ export function AnimationPanel(): ReactElement {
     return <p className="hint">未选择片段。</p>
   }
 
+  // 1 帧对应的秒数：既作为 <input step>，也作为最小值，避免写入不足一帧的时长
+  const frameSec = framesToDurationSec(1, fps)
   const inFrames = durationSecToFrames(clip.animation.inDuration, fps)
   const outFrames = durationSecToFrames(clip.animation.outDuration, fps)
   const ratio = outFrames / Math.max(1, inFrames)
 
-  const setFrames = (key: 'inDuration' | 'outDuration', frames: number): void => {
-    updateClip(clip.id, {
-      animation: { ...clip.animation, [key]: framesToDurationSec(Math.max(1, frames), fps) }
-    })
+  const setSeconds = (key: 'inDuration' | 'outDuration', sec: number): void => {
+    if (!Number.isFinite(sec)) return
+    const clamped = Math.max(frameSec, Math.min(MAX_ANIMATION_SEC, sec))
+    // 吸附到当前帧率的整帧：秒→帧→秒，UI 与工程文件都保持帧边界一致
+    const snapped = framesToDurationSec(durationSecToFrames(clamped, fps), fps)
+    updateClip(clip.id, { animation: { ...clip.animation, [key]: snapped } })
   }
+
+  const inValue = Number(clip.animation.inDuration.toFixed(4))
+  const outValue = Number(clip.animation.outDuration.toFixed(4))
 
   return (
     <div className="stack">
@@ -36,10 +46,11 @@ export function AnimationPanel(): ReactElement {
           <input
             className="input mono"
             type="number"
-            min={1}
-            max={30}
-            value={inFrames}
-            onChange={(event) => setFrames('inDuration', Number(event.target.value))}
+            min={Number(frameSec.toFixed(4))}
+            max={MAX_ANIMATION_SEC}
+            step={Number(frameSec.toFixed(4))}
+            value={inValue}
+            onChange={(event) => setSeconds('inDuration', Number(event.target.value))}
           />
         </label>
         <label className="field">
@@ -47,10 +58,11 @@ export function AnimationPanel(): ReactElement {
           <input
             className="input mono"
             type="number"
-            min={1}
-            max={30}
-            value={outFrames}
-            onChange={(event) => setFrames('outDuration', Number(event.target.value))}
+            min={Number(frameSec.toFixed(4))}
+            max={MAX_ANIMATION_SEC}
+            step={Number(frameSec.toFixed(4))}
+            value={outValue}
+            onChange={(event) => setSeconds('outDuration', Number(event.target.value))}
           />
         </label>
       </div>
@@ -61,8 +73,8 @@ export function AnimationPanel(): ReactElement {
         <span className="anim-meter__out" style={{ flexGrow: outFrames }} />
       </div>
       <p className="hint mono">
-        入场 {inFrames} 帧（{clip.animation.inDuration.toFixed(3)}s）· 出场 {outFrames} 帧（
-        {clip.animation.outDuration.toFixed(3)}s）· 比 {ratio.toFixed(2)}
+        按当前帧率折算：入场 {inFrames} 帧 · 出场 {outFrames} 帧 · 比 {ratio.toFixed(2)}
+        <span className="muted">（上限 {MAX_ANIMATION_SEC}s，最短 1 帧）</span>
       </p>
 
       <label className="field">

@@ -1,5 +1,7 @@
 import {
   AUTOSAVE_FILE,
+  DEFAULT_ANIMATION_IN_SEC,
+  DEFAULT_ANIMATION_OUT_SEC,
   DEFAULT_CLIP_DURATION_SEC,
   DEFAULT_FPS,
   DEFAULT_FONT_ID,
@@ -11,7 +13,13 @@ import {
 import { DEFAULT_PRESET_ID, PRESET_IDS } from './presets'
 import { EASING_KEYS } from './easing'
 import { COLOR_TOKEN_KEYS, isValidColor } from './colors'
-import { clipEndFrame, clipStartFrame, snapTimeToFrame } from './fps'
+import {
+  clipEndFrame,
+  clipStartFrame,
+  durationSecToFrames,
+  framesToDurationSec,
+  snapTimeToFrame
+} from './fps'
 import type {
   AnimationSpec,
   ColorTokens,
@@ -103,8 +111,8 @@ function normalizeClip(value: unknown, fps: Fps): SubtitleClip | null {
       subtitle: typeof content['subtitle'] === 'string' ? content['subtitle'] : ''
     },
     animation: {
-      inDuration: numberOr(animation['inDuration'], 0.27),
-      outDuration: numberOr(animation['outDuration'], 0.17),
+      inDuration: numberOr(animation['inDuration'], DEFAULT_ANIMATION_IN_SEC),
+      outDuration: numberOr(animation['outDuration'], DEFAULT_ANIMATION_OUT_SEC),
       easing: isEasingKey(animation['easing']) ? animation['easing'] : 'outCubic',
       textRevealFrames: Math.max(1, Math.round(numberOr(animation['textRevealFrames'], 3))),
       displacement: normalizeDisplacement(animation['displacement']),
@@ -323,6 +331,10 @@ export interface NewClipInput {
 export function createClip(input: NewClipInput): SubtitleClip {
   const start = snapTimeToFrame(Math.max(0, input.startTime ?? 0), input.fps)
   const end = snapTimeToFrame(start + DEFAULT_CLIP_DURATION_SEC, input.fps)
+  // 默认入场/出场各 1 秒：先按当前帧率取整帧再回写秒，保证非标准帧率（23.976/29.97/59.94）
+  // 也能落在帧边界上，面板显示的帧数与时长保持同一口径。
+  const inDuration = framesToDurationSec(durationSecToFrames(DEFAULT_ANIMATION_IN_SEC, input.fps), input.fps)
+  const outDuration = framesToDurationSec(durationSecToFrames(DEFAULT_ANIMATION_OUT_SEC, input.fps), input.fps)
   return {
     id: createId('clip'),
     startTime: start,
@@ -331,8 +343,8 @@ export function createClip(input: NewClipInput): SubtitleClip {
     styleOverrides: {},
     content: { title: input.title ?? '', subtitle: input.subtitle ?? '' },
     animation: {
-      inDuration: 0.27,
-      outDuration: 0.17,
+      inDuration,
+      outDuration,
       easing: 'outCubic',
       textRevealFrames: 3,
       displacement: { x: '-30px@1080p', y: '0' }

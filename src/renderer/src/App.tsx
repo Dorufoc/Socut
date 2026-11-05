@@ -68,9 +68,15 @@ export function App(): ReactElement {
   useRefVideoIntegrity()
 
   const seekRef = useRef<((sec: number) => void) | null>(null)
-  const seekTo = useCallback((sec: number): void => {
-    seekRef.current?.(sec)
-  }, [])
+  const setDisplayTime = useUiStore((state) => state.setDisplayTime)
+  const seekTo = useCallback(
+    (sec: number): void => {
+      seekRef.current?.(sec)
+      // 拖拽刮擦时同步 UI 时间文本：预览循环是节流的，不等它才能让时间码/播放头即刻跟随
+      setDisplayTime(sec)
+    },
+    [setDisplayTime]
+  )
 
   const registerHandle = useCallback((handle: { seekTime: (sec: number) => void; seekFrame: (f: number) => void }) => {
     seekRef.current = handle.seekTime

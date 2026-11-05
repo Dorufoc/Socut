@@ -1653,6 +1653,14 @@ input[type='color']:disabled {
   font-size: 10px;
   user-select: none;
   cursor: pointer;
+  touch-action: none;
+}
+
+/* 刮擦进行中：锁定光标为抓取态，避免拖拽期间反复切换指针样式 */
+.timeline__ruler--scrubbing,
+.timeline__track--scrubbing {
+  cursor: grabbing;
+  user-select: none;
 }
 
 .timeline__tick {
@@ -1682,6 +1690,12 @@ input[type='color']:disabled {
     transparent 1px 48px
   );
   cursor: pointer;
+  touch-action: none;
+}
+
+.timeline__track .clip-card {
+  /* 卡片自身接管指针拖拽，不参与轨道刮擦 */
+  touch-action: none;
 }
 
 .timeline__empty {
@@ -1712,6 +1726,17 @@ input[type='color']:disabled {
   height: 9px;
   background: var(--accent);
   clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+/* 刮擦中：播放头加宽提亮，明确表示正在被拖拽定位 */
+.timeline__playhead--scrubbing {
+  width: 3px;
+  background: #9ecbff;
+  box-shadow: 0 0 14px rgba(76, 194, 255, 0.85);
+}
+
+.timeline__playhead--scrubbing::before {
+  background: #9ecbff;
 }
 
 .clip-card {

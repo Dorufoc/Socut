@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react'
 import { MAX_TIMELINE_SEC } from '@shared/constants'
 import { snapTimeToFrame } from '@shared/fps'
 import { secondsToTimecode } from '@shared/timecode'
@@ -8,7 +8,13 @@ import { useUiStore } from '../state/uiStore'
 import { ClipCard } from './ClipCard'
 import { buildTicks, pickStep, pxToSec, secToPx } from './ruler'
 
-/** 时间轴：多入出点管理（规格 §3.1），刻度按当前帧率生成，点击定位播放头。 */
+/**
+ * 时间轴：多入出点管理（规格 §3.1），刻度按当前帧率生成。
+ * 尺规与轨道空白处支持按住拖拽刮擦（pointer capture）：按下即定位当前帧，
+ * 持续拖动时预览跟随鼠标位置逐帧变化；片段卡片自身的拖拽不受影响。
+ */
+
+type ScrubElement = HTMLDivElement
 
 export interface TimelineProps {
   seekTo: (sec: number) => void
@@ -22,16 +28,24 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const removeClip = useProjectStore((state) => state.removeClip)
   const setClipTimes = useProjectStore((state) => state.setClipTimes)
   const displayTime = useUiStore((state) => state.displayTimeSec)
+  const playing = useUiStore((state) => state.playing)
+  const setPlaying = useUiStore((state) => state.setPlaying)
 
   const trackRef = useRef<HTMLDivElement | null>(null)
   const [widthPx, setWidthPx] = useState(800)
+  // 刮擦中的尺规/轨道元素与几何：capture 后 pointermove 始终以该矩形换算位置
+  const scrubRef = useRef<{ element: ScrubElement; left: number; width: number } | null>(null)
+  const [scrubbing, setScrubbing] = useState(false)
 
   useEffect(() => {
     const element = trackRef.current
     if (!element) return
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0]
-      if (entry) setWidthPx(Math.max(120, entry.contentRect.width))
+      if (!entry) return
+      setWidthPx(Math.max(120, entry.contentRect.width))
+      const rect = element.getBoundingClientRect()
+      if (scrubRef.current?.element === element) scrubRef.current = { ...scrubRef.current, left: rect.left, width: rect.width }
     })
     observer.observe(element)
     setWidthPx(Math.max(120, element.clientWidth))
@@ -45,10 +59,38 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const step = pickStep(durationSec, widthPx)
   const ticks = buildTicks(durationSec, project.fps, step)
 
-  const seekFromEvent = (event: ReactMouseEvent<HTMLDivElement>): void => {
+  /** 用按下/移动时的矩形换算秒并吸附帧边界：尺规与轨道同一水平几何，capture 后离开元素也能继续跟随。 */
+  const seekFromScrub = (clientX: number): void => {
+    const scrub = scrubRef.current
+    if (!scrub || scrub.width <= 0) return
+    const sec = pxToSec(clientX - scrub.left, durationSec, scrub.width)
+    seekTo(snapTimeToFrame(Math.min(durationSec, sec), project.fps))
+  }
+
+  const beginScrub = (event: ReactPointerEvent<ScrubElement>): void => {
+    // 只响应主键；片段卡片的 pointerdown 已 stopPropagation，不会走到这里
+    if (event.button !== 0) return
     const rect = event.currentTarget.getBoundingClientRect()
-    const sec = pxToSec(event.clientX - rect.left, durationSec, rect.width)
-    seekTo(snapTimeToFrame(sec, project.fps))
+    scrubRef.current = { element: event.currentTarget, left: rect.left, width: rect.width }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    // 刮擦接管播放头：先暂停，否则时钟会继续前进、覆盖拖拽定位
+    if (playing) setPlaying(false)
+    setScrubbing(true)
+    seekFromScrub(event.clientX)
+  }
+
+  const moveScrub = (event: ReactPointerEvent<ScrubElement>): void => {
+    if (!scrubRef.current) return
+    seekFromScrub(event.clientX)
+  }
+
+  const endScrub = (event: ReactPointerEvent<ScrubElement>): void => {
+    if (!scrubRef.current) return
+    scrubRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    setScrubbing(false)
   }
 
   return (
@@ -78,7 +120,13 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
         </div>
       </div>
 
-      <div className="timeline__ruler" onClick={seekFromEvent}>
+      <div
+        className={`timeline__ruler${scrubbing ? ' timeline__ruler--scrubbing' : ''}`}
+        onPointerDown={beginScrub}
+        onPointerMove={moveScrub}
+        onPointerUp={endScrub}
+        onPointerCancel={endScrub}
+      >
         {ticks.map((tick) => (
           <div
             key={tick.sec}
@@ -90,7 +138,14 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
         ))}
       </div>
 
-      <div className="timeline__track" ref={trackRef} onClick={seekFromEvent}>
+      <div
+        className={`timeline__track${scrubbing ? ' timeline__track--scrubbing' : ''}`}
+        ref={trackRef}
+        onPointerDown={beginScrub}
+        onPointerMove={moveScrub}
+        onPointerUp={endScrub}
+        onPointerCancel={endScrub}
+      >
         {project.clips.length === 0 ? (
           <span className="timeline__empty">
             {TEXT.timeline.empty}
@@ -109,7 +164,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
           />
         ))}
         <div
-          className="timeline__playhead"
+          className={`timeline__playhead${scrubbing ? ' timeline__playhead--scrubbing' : ''}`}
           style={{ left: secToPx(Math.min(displayTime, durationSec), durationSec, widthPx) }}
         />
       </div>

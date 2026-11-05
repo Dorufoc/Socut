@@ -282,6 +282,20 @@ export const DEFAULT_CLIP_DURATION_SEC = 5
 /** 时间轴可编辑最大时长（无参考视频时） */
 export const MAX_TIMELINE_SEC = 60
 
+/**
+ * 新建片段默认的入场/出场时长（秒）。
+ * 存储以秒为准，跨帧率观感一致：24fps 自动 → 24 帧，30fps → 30 帧，
+ * 非标准帧率（23.976 / 29.97 / 50 / 59.94）写入时自动吸附到当前帧率的整帧边界。
+ */
+export const DEFAULT_ANIMATION_IN_SEC = 1
+export const DEFAULT_ANIMATION_OUT_SEC = 1
+/**
+ * 面板可编辑的入场/出场最长时长（秒）。
+ * 与旧 30 帧硬顶不同：上限以秒为准，面板内部的帧步进会跟随当前帧率自动伸缩
+ * (3s @ 60fps = 180 帧，@ 24fps = 24 帧)，保证“时长→帧”而不是“帧→时长”的口径。
+ */
+export const MAX_ANIMATION_SEC = 3
+
 /** 自动保存 debounce */
 export const AUTOSAVE_DEBOUNCE_MS = 800
 

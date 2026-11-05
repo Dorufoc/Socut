@@ -8,8 +8,8 @@ import {
   validateClips
 } from '@shared/projectSchema'
 import { projectDurationSec, projectSpanSec } from '@shared/presetResolver'
-import { MIN_CLIP_DURATION_SEC, PROJECT_VERSION, DEFAULT_FONT_ID, AUTOSAVE_FILE } from '@shared/constants'
-import { snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
+import { MIN_CLIP_DURATION_SEC, PROJECT_VERSION, DEFAULT_FONT_ID, AUTOSAVE_FILE, DEFAULT_ANIMATION_IN_SEC, DEFAULT_ANIMATION_OUT_SEC } from '@shared/constants'
+import { durationSecToFrames, framesToDurationSec, snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
 import { DEFAULT_PRESET_ID } from '@shared/presets'
 import { PRESETS } from '@shared/presets'
 import type { Project, SubtitleClip } from '@shared/types'
@@ -107,6 +107,24 @@ describe('片段工具', () => {
     expect(clip.startTime).toBe(snapTimeToFrame(1.017, FPS))
     expect(clip.endTime - clip.startTime).toBeGreaterThan(0)
     expect(clip.id.startsWith('clip-')).toBe(true)
+  })
+
+  it('新建片段：入场/出场默认 1 秒，写入时吸附到当前帧率的整帧', () => {
+    // 30/1 下 1s 正好落在 30 帧，与默认常量完全相等
+    const p30 = createClip({ fps: { num: 30, den: 1 } }).animation
+    expect(p30.inDuration).toBeCloseTo(DEFAULT_ANIMATION_IN_SEC, 6)
+    expect(p30.outDuration).toBeCloseTo(DEFAULT_ANIMATION_OUT_SEC, 6)
+    expect(durationSecToFrames(p30.inDuration, { num: 30, den: 1 })).toBe(30)
+
+    // 23.976 这种非标准帧率：自动取整帧 (24)，回写的秒不恰好是 1，但仍是整帧边界
+    const ntsc = { num: 24000, den: 1001 }
+    const pNtsc = createClip({ fps: ntsc }).animation
+    expect(durationSecToFrames(pNtsc.inDuration, ntsc)).toBe(24)
+    expect(pNtsc.inDuration).toBe(framesToDurationSec(24, ntsc))
+
+    // 60fps：展开为 60 帧，不再受旧 30 帧硬顶限制
+    const p60 = createClip({ fps: { num: 60, den: 1 } }).animation
+    expect(durationSecToFrames(p60.inDuration, { num: 60, den: 1 })).toBe(60)
   })
 
   it('复制片段：新 id、紧接原片段之后且不重叠', () => {

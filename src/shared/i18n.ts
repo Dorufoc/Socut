@@ -97,8 +97,8 @@ export const TEXT = {
     gradientFrom: '起始色',
     gradientTo: '结束色',
     gradientAngle: '角度',
-    inDuration: '入场（帧）',
-    outDuration: '出场（帧）',
+    inDuration: '入场（秒）',
+    outDuration: '出场（秒）',
     easing: '缓动',
     textReveal: '逐字过渡跨度（字）',
     /** 右侧「当前字幕条」检查器 */
