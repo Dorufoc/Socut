@@ -1,8 +1,9 @@
 import { create } from 'zustand'
 import { DEFAULT_FPS, DEFAULT_RESOLUTION, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
-import { applyClipStyleToAll, createClip, createId, duplicateClip, normalizeProject } from '@shared/projectSchema'
+import { applyClipStyleToAll, createClip, createId, duplicateClip, normalizeProject, splitSubtitleClipAt } from '@shared/projectSchema'
 import { snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
-import { alignAfterOverlap, compactMediaClips, findActiveMediaClip, splitMediaClipAt } from '@shared/mediaClips'
+import { alignAfterOverlap, compactMediaClips, splitMediaClipAt } from '@shared/mediaClips'
+import { resolveTargetAt, findSelectedRef, type TargetRef, type TimelineSelection, type TimelineTracks } from '@shared/timelineTargets'
 import { useStabPreviewStore } from './stabPreviewStore'
 import type {
   AudioClip,
@@ -26,7 +27,7 @@ import { clipWithPresetDefaults, hasKeys } from '@shared/clipStyle'
 import { defaultMediaVideo, normalizeMediaVideo } from '@shared/mediaClipVideo'
 import { defaultMediaStab, normalizeMediaStab } from '@shared/mediaStab'
 import { defaultClipAudio, defaultClipSpeed, normalizeClipAudio, normalizeClipSpeed, speedValueOf } from '@shared/mediaClipAudio'
-import { IMAGE_STILL_SEC, applyAudioClipSpeed, inferMediaKind, makeAudioClip, moveAudioClip, normalizeLayer, sortAudioClips, trimAudioClip } from '@shared/audioClips'
+import { IMAGE_STILL_SEC, applyAudioClipSpeed, inferMediaKind, makeAudioClip, moveAudioClip, normalizeLayer, sortAudioClips, splitAudioClipAt, trimAudioClip } from '@shared/audioClips'
 
 /** 工程状态（规格 §4.6）。所有时间值在写入时已吸附到帧边界，存储仍为秒。 */
 
@@ -47,6 +48,11 @@ export interface ProjectState {
   /** 每次变更递增，驱动自动保存与预览重建 */
   revision: number
   currentPath: string | null
+  /**
+   * 工程被整体替换（打开工程文件 / 启动恢复自动存档）时自增。
+   * 历史记账用它判「换工程了」——跨工程的撤销没有意义，看到它变化就清空整条历史。
+   */
+  projectEpoch: number
 
   loadProject: (project: Project, path?: string) => void
   setName: (name: string) => void
@@ -116,10 +122,18 @@ export interface ProjectState {
   /** 删除一段（不动素材池；素材库卡片仍在）。 */
   removeMediaClip: (id: string) => void
   /**
-   * 在 atSec（播放头）处拆分当前帧所在的片段：切点落在段内且两半都够长才生效。
-   * 返回拆分出的右段 id；不可拆分返回 null。
+   * 拆「当前该操作的那一段」（P3）：选中优先（字幕条 / 媒体段 / 音频段三类都算），
+   * 未选中时拆播放头处媒体轨的最下一层。返回右半段 id；
+   * 没有目标段、切点不在段内或任一半不足最短时长时返回 null，由 UI 提示。
    */
-  splitAtFrame: (atSec: number) => string | null
+  splitTargetAt: (atSec: number) => string | null
+  /** 删「当前该操作的那一段」（目标解析与 splitTargetAt 同源）。返回是否真的删掉了。 */
+  removeTargetAt: (atSec: number) => boolean
+  /**
+   * 只删「当前选中的那一段」，没选中就什么都不做。
+   * Delete 键走这条而不是 removeTargetAt：一个键盘就能删掉用户没选中的段太可疑。
+   */
+  removeSelected: () => boolean
 
   // ---------------------------------------------------------------- v6 画面编辑
   /** 写回媒体段的画面变换/调色（patch 为增量；全部默认时整键删除） */
@@ -231,6 +245,31 @@ function withAudioClips(project: Project, audioClips: AudioClip[]): Project {
   return next
 }
 
+/** P3：拆分/删除的目标解析要看的三条轨。 */
+function tracksOf(project: Project): TimelineTracks {
+  return { clips: project.clips, mediaClips: project.mediaClips, audioClips: project.audioClips ?? [] }
+}
+
+/**
+ * P3：当前选中态。三个选中 id 可以并存，`selectionKind`（最后一次点选的类型）才是分流依据，
+ * 所以下面三个都得带上，不能只挑一个非空的传。
+ */
+function selectionOf(state: ProjectState): TimelineSelection {
+  return {
+    clipId: state.selectedClipId,
+    mediaClipId: state.selectedMediaClipId,
+    audioClipId: state.selectedAudioClipId,
+    kind: state.selectionKind
+  }
+}
+
+/** 按解析出的目标段分派到三条轨各自的删除动作。 */
+function removeTargetRef(store: ProjectState, target: TargetRef): void {
+  if (target.kind === 'subtitle') store.removeClip(target.id)
+  else if (target.kind === 'audio') store.removeAudioClip(target.id)
+  else store.removeMediaClip(target.id)
+}
+
 /** 时长恒等式（timelineEnd - timelineStart === sourceOut - sourceIn）的唯一写入口。 */
 function makeMediaClip(input: {
   id?: string
@@ -259,6 +298,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   fonts: [],
   revision: 0,
   currentPath: null,
+  projectEpoch: 0,
 
   loadProject: (project, path) =>
     set((state) => ({
@@ -269,7 +309,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       selectedAudioClipId: project.audioClips?.[0]?.id ?? null,
       // 打开工程默认先看字幕（这是主任务）；没有字幕条时才落到视频编辑器
       selectionKind: project.clips.length > 0 ? 'subtitle' : 'media',
-      revision: state.revision + 1
+      revision: state.revision + 1,
+      projectEpoch: state.projectEpoch + 1
     })),
 
   setName: (name) =>
@@ -644,16 +685,47 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     })
   },
 
-  splitAtFrame: (atSec) => {
+  splitTargetAt: (atSec) => {
     const state = get()
     const fps = state.project.fps
-    const target = findActiveMediaClip(state.project.mediaClips, atSec)
+    const target = resolveTargetAt(tracksOf(state.project), selectionOf(state), atSec)
     if (!target) return null
-    const result = splitMediaClipAt(target, atSec, fps, () => createId('mclip'))
+
+    if (target.kind === 'subtitle') {
+      const clip = state.project.clips.find((item) => item.id === target.id)
+      if (!clip) return null
+      const result = splitSubtitleClipAt(clip, atSec, fps, () => createId('clip'))
+      if (!result) return null
+      const clips = state.project.clips.filter((item) => item.id !== clip.id).concat(result.left, result.right)
+      set({
+        project: withClips(state.project, clips),
+        selectedClipId: result.right.id,
+        selectionKind: 'subtitle',
+        revision: state.revision + 1
+      })
+      return result.right.id
+    }
+
+    if (target.kind === 'audio') {
+      const clip = (state.project.audioClips ?? []).find((item) => item.id === target.id)
+      if (!clip) return null
+      const result = splitAudioClipAt(clip, atSec, fps, () => createId('aclip'))
+      if (!result) return null
+      const audioClips = (state.project.audioClips ?? []).filter((item) => item.id !== clip.id).concat(result.left, result.right)
+      set({
+        project: withAudioClips(state.project, audioClips),
+        selectedAudioClipId: result.right.id,
+        selectionKind: 'audio',
+        revision: state.revision + 1
+      })
+      return result.right.id
+    }
+
+    const clip = state.project.mediaClips.find((item) => item.id === target.id)
+    if (!clip) return null
+    const result = splitMediaClipAt(clip, atSec, fps, () => createId('mclip'))
     if (!result) return null
-    const mediaClips = state.project.mediaClips
-      .filter((c) => c.id !== target.id)
-      .concat(result.left, result.right)
+    const mediaClips = state.project.mediaClips.filter((item) => item.id !== clip.id).concat(result.left, result.right)
     set({
       project: withMediaClips(state.project, mediaClips),
       selectedMediaClipId: result.right.id,
@@ -662,6 +734,22 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       revision: state.revision + 1
     })
     return result.right.id
+  },
+
+  removeTargetAt: (atSec) => {
+    const state = get()
+    const target = resolveTargetAt(tracksOf(state.project), selectionOf(state), atSec)
+    if (!target) return false
+    removeTargetRef(state, target)
+    return true
+  },
+
+  removeSelected: () => {
+    const state = get()
+    const target = findSelectedRef(tracksOf(state.project), selectionOf(state))
+    if (!target) return false
+    removeTargetRef(state, target)
+    return true
   },
 
   // ---------------------------------------------------------------- v6 画面编辑

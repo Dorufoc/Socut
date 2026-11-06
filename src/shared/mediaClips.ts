@@ -49,18 +49,6 @@ export function mediaClipsOverlap(a: MediaClip, b: MediaClip): boolean {
 }
 
 /**
- * 纯谓词：atSec（自动吸附帧边界）处能不能拆。
- * 与 `splitMediaClipAt` 同一套判定（切点在段内且两半都不短于最短时长），
- * 供 UI 在渲染期算按钮禁用态，不去调有副作用的拆分动作。
- */
-export function canSplitMediaClipAt(tracks: MediaClip[], atSec: number, fps: Fps): boolean {
-  const clip = findActiveMediaClip(tracks, atSec)
-  if (!clip) return false
-  const cut = snapTimeToFrame(atSec, fps)
-  return cut > clip.timelineStartSec + MIN_MEDIA_CLIP_SEC - 1e-9 && cut < clip.timelineEndSec - MIN_MEDIA_CLIP_SEC + 1e-9
-}
-
-/**
  * 「仅重叠才右移」的对齐：把 `tracks` 里 id 不等于 `anchorId` 且与新版右段重叠的片段起点推到锚段末尾，
  * 保持其时长不变；无重叠则原样返回。拆分与拖拽排序共用此函数。
  */

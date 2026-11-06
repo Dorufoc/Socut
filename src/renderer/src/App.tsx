@@ -5,7 +5,7 @@ import {
   RESOLUTION_PRESETS,
   fpsToString
 } from '@shared/constants'
-import { createClip, createDefaultProject, normalizeProject } from '@shared/projectSchema'
+import { createClip, createDefaultProject, LEFT_TABS, normalizeProject } from '@shared/projectSchema'
 import { frameTimeSec, stepLocalFrame } from '@shared/fps'
 import { secondsToTimecode } from '@shared/timecode'
 import { TEXT } from '@shared/i18n'
@@ -17,6 +17,8 @@ import { useUiStore } from './state/uiStore'
 import { useExportStore } from './state/exportStore'
 import { usePreviewSpec } from './hooks/usePreviewSpec'
 import { useTransportKeys, isEditableTarget } from './hooks/useTransportKeys'
+import { useEditKeys } from './hooks/useEditKeys'
+import { attachProjectHistory, useHistoryStore } from './state/projectHistory'
 import { useProjectAutosave } from './hooks/useProjectAutosave'
 import { runAppSmoke } from './smoke/runAppSmoke'
 import { renderReviewSheet } from './smoke/renderReviewSheet'
@@ -36,9 +38,8 @@ import { useMediaIntegrity } from './hooks/useMediaIntegrity'
 import { FontLoadingOverlay } from './dialog/FontLoadingOverlay'
 import { CompatModal } from './dialog/CompatModal'
 import { MediaLibraryPanel } from './panels/MediaLibraryPanel'
-import { CaptionListPanel } from './panels/CaptionListPanel'
-import { WatermarkPanel } from './panels/WatermarkPanel'
-import type { Project } from '@shared/types'
+import { WrapPanel } from './panels/WrapPanel'
+import type { LeftTabValue, Project } from '@shared/types'
 
 /** 自动存档里是否有值得恢复的编辑进度：字幕/媒体/音频任一轨有内容，或水印已启用 */
 export function hasRestoreProgress(project: Project): boolean {
@@ -51,12 +52,22 @@ export function hasRestoreProgress(project: Project): boolean {
 }
 
 /**
- * 主界面（WinUI 3 / Fluent）：标题栏 + 命令栏 + 左侧 Tab 壳（素材库/水印/字幕/导出/进度） + 中央预览 + 右侧字幕条检查器 + 双轨时间轴。
+ * 主界面（WinUI 3 / Fluent）：标题栏 + 命令栏 + 左侧 Tab 壳（素材库/包装/导出/进度） + 中央预览 + 右侧字幕条检查器 + 双轨时间轴。
  * 默认基础模式，只暴露高频入口；配色、字体、动画、编码与工程分辨率等低频项收进高级模式。
  * v2：左侧不再堆叠三块面板，同一时刻只展开当前 Tab；选中项写回 project.ui.leftTab 持久化。
  * v3：四条区域之间的三条分隔线可拖拽（usePaneLayout + Splitter），比例存本机 localStorage，冷启动恢复。
  * v4：左侧新增「字幕」Tab（按时间顺序的标题列表，点击 = 选中 + 跳到入点）；时间轴字幕轨改为窄示意条。
+ * v10（P6）：字幕与水印合并成「包装」，片尾只做占位，左侧只剩四个 Tab；Tab 清单取自
+ * shared 的 LEFT_TABS，旧工程里的 'captions' / 'watermark' 在 normalizeProject 里已迁到 'wrap'。
  */
+
+/** 左侧 Tab 的显示名（顺序取 LEFT_TABS，不另写一份清单） */
+const RAIL_LABELS: Record<LeftTabValue, string> = {
+  media: '素材库',
+  wrap: TEXT.wrap.tab,
+  export: '导出',
+  progress: '进度'
+}
 
 export function App(): ReactElement {
   const project = useProjectStore((state) => state.project)
@@ -110,6 +121,18 @@ export function App(): ReactElement {
   }, [])
 
   /**
+   * 项目级撤销/重做记账（P1）：挂上工程 store 的订阅，本次启动轮次内最多 100 步。
+   * 启动恢复自动存档发生在订阅之后，它走 loadProject（换工程）路径，
+   * 记账侧看到 projectEpoch 变了会清空历史，所以恢复不会留下一条“可撤销”的步骤。
+   */
+  useEffect(() => attachProjectHistory(), [])
+
+  useEditKeys({
+    undo: () => useHistoryStore.getState().undo(),
+    redo: () => useHistoryStore.getState().redo()
+  })
+
+  /**
    * 把播放头跳转能力交给 uiStore：样式面板（配色/字体/动画/预设）改完参数后
    * 用它把播放头落到「能看清当前样式」的帧上，避免预览看着没反应（片段入点在别处时）。
    */
@@ -146,9 +169,10 @@ export function App(): ReactElement {
   })
 
   /**
-   * 快捷键（阶段 6）：
-   * - Ctrl/Cmd+B：在播放头处拆分媒体段；
-   * - Delete：选中媒体段且焦点不在输入控件时删除该段。
+   * 快捷键（阶段 6，P3 改成走统一目标解析）：
+   * - Ctrl/Cmd+B：拆「当前该操作的那一段」（选中优先，未选中拆播放头处的媒体段）；
+   * - Delete：删「当前选中的那一段」（三类段都算）。Delete 不做「未选中退到播放头」的兼容，
+   *   一个键盘就能删掉用户没打算动的段太危疑；工具栏的删除才走完整默认解析。
    * 输入控件里不拦：文本框内的 Ctrl+B（如浏览器式加粗）不得被抢走。
    * 空格与方向键在 `useTransportKeys` 里，共用同一条 `isEditableTarget` 判据。
    */
@@ -159,15 +183,15 @@ export function App(): ReactElement {
         event.preventDefault()
         const ui = useUiStore.getState()
         if (ui.playing) ui.setPlaying(false)
-        const rightId = useProjectStore.getState().splitAtFrame(ui.displayTimeSec)
-        if (!rightId) ui.setNotice('播放头不在可拆分的媒体片段内，或拆出的半段不足最短时长')
+        // P4：黄线（预览轴）在的时候，拆分以它指向的那一帧为准，蓝线位置不变
+        const atSec = ui.hoverPreviewSec ?? ui.displayTimeSec
+        if (!useProjectStore.getState().splitTargetAt(atSec)) ui.setNotice(TEXT.timeline.noSplitTarget)
         return
       }
       if (event.key === 'Delete' && !inField) {
-        const mediaClipId = useProjectStore.getState().selectedMediaClipId
-        if (!mediaClipId) return
+        // 只删选中的那一段（不退到播放头默认解析）：没选中时 Delete 保持安静
+        if (!useProjectStore.getState().removeSelected()) return
         event.preventDefault()
-        useProjectStore.getState().removeMediaClip(mediaClipId)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -477,63 +501,43 @@ export function App(): ReactElement {
 
       <div className="shell" ref={layout.shellRef} style={layout.shellStyle}>
         <div className="body">
-          {/* 左侧：Tab 壳（素材库 / 导出 / 进度）——与「当前字幕条」无关的全局操作 */}
+          {/* 左侧：Tab 壳（素材库 / 包装 / 导出 / 进度）——与「当前字幕条」无关的全局操作 */}
           <aside className="rail">
             <div className="rail__tabs" role="tablist" aria-label="左侧面板">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={leftTab === 'media'}
-                className={`rail__tab${leftTab === 'media' ? ' rail__tab--active' : ''}`}
-                onClick={() => setLeftTab('media')}
-              >
-                素材库
-                <span className="rail__tab-badge">{project.media.length > 0 ? project.media.length : ''}</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={leftTab === 'watermark'}
-                className={`rail__tab${leftTab === 'watermark' ? ' rail__tab--active' : ''}`}
-                onClick={() => setLeftTab('watermark')}
-              >
-                水印
-                {project.watermark?.enabled ? <span className="rail__tab-badge">●</span> : null}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={leftTab === 'captions'}
-                className={`rail__tab${leftTab === 'captions' ? ' rail__tab--active' : ''}`}
-                onClick={() => setLeftTab('captions')}
-              >
-                {TEXT.captions.tab}
-                <span className="rail__tab-badge">{project.clips.length > 0 ? project.clips.length : ''}</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={leftTab === 'export'}
-                className={`rail__tab${leftTab === 'export' ? ' rail__tab--active' : ''}`}
-                onClick={() => setLeftTab('export')}
-              >
-                导出
-                {busy ? <span className="rail__tab-badge rail__tab-badge--busy">●</span> : null}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={leftTab === 'progress'}
-                className={`rail__tab${leftTab === 'progress' ? ' rail__tab--active' : ''}`}
-                onClick={() => setLeftTab('progress')}
-              >
-                进度
-              </button>
+              {LEFT_TABS.map((tab) => {
+                const badge =
+                  tab === 'media'
+                    ? project.media.length > 0
+                      ? project.media.length
+                      : null
+                    : tab === 'wrap'
+                      ? project.clips.length > 0
+                        ? project.clips.length
+                        : null
+                      : tab === 'export' && busy
+                        ? '●'
+                        : null
+                return (
+                  <button
+                    key={tab}
+                    type="button"
+                    role="tab"
+                    aria-selected={leftTab === tab}
+                    className={`rail__tab${leftTab === tab ? ' rail__tab--active' : ''}`}
+                    onClick={() => setLeftTab(tab)}
+                  >
+                    {RAIL_LABELS[tab]}
+                    {badge !== null ? (
+                      <span className={`rail__tab-badge${tab === 'export' ? ' rail__tab-badge--busy' : ''}`}>{badge}</span>
+                    ) : null}
+                    {tab === 'wrap' && project.watermark?.enabled ? <span className="rail__tab-badge">●</span> : null}
+                  </button>
+                )
+              })}
             </div>
             <div className="rail__panels">
               {leftTab === 'media' ? <MediaLibraryPanel /> : null}
-              {leftTab === 'watermark' ? <WatermarkPanel /> : null}
-              {leftTab === 'captions' ? <CaptionListPanel /> : null}
+              {leftTab === 'wrap' ? <WrapPanel /> : null}
               {leftTab === 'export' ? (
                 <ExportPanel spec={spec} fontLoading={fontLoading} ffmpegAvailable={appInfo?.ffmpegAvailable ?? false} />
               ) : null}

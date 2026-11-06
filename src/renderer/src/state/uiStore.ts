@@ -1,13 +1,16 @@
 import { create } from 'zustand'
-import type { MediaItem } from '@shared/types'
+import type { LeftTabValue, MediaItem } from '@shared/types'
 import { detectCompat } from '@shared/probe'
 
 /** UI 状态：模态队列、面板开关、预览播放态。高频播放头不进 store（见 usePreviewLoop）。 */
 
 export type UiMode = 'basic' | 'advanced'
 
-/** 左侧栏 Tab：素材库 / 水印 / 字幕列表 / 导出 / 进度；写入 project.ui.leftTab 持久化。 */
-export type LeftTab = 'media' | 'watermark' | 'captions' | 'export' | 'progress'
+/**
+ * 左侧栏 Tab（P6）：素材库 / 包装（字幕 + 片尾 + 水印）/ 导出 / 进度；
+ * 写入 project.ui.leftTab 持久化。清单在 shared/types（LeftTabValue），这里只做别名。
+ */
+export type LeftTab = LeftTabValue
 
 export type CompatDialogContent =
   | { kind: 'non169'; label: string }
@@ -64,6 +67,13 @@ export interface UiState {
   setRefVideoMissing: (missing: boolean) => void
   setLeftTab: (tab: LeftTab) => void
   setSeekHandler: (handler: ((sec: number) => void) | null) => void
+  /**
+   * P4：预览轴的悬停帧（秒）。非空时预览改画这一帧，而 `displayTimeSec`（蓝线、
+   * 时间码、拆分参照）一律不动；null = 没有悬停（或正在播放、预览轴整体禁用）。
+   * 不进任何持久化：它只是「当前这一帧画面要画在哪」。
+   */
+  hoverPreviewSec: number | null
+  setHoverPreview: (sec: number | null) => void
   /** 预览里的画面交互层（拖拽缩放/平移/旋转）：关掉后字幕点选恢复原样 */
   stageInteract: boolean
   toggleStageInteract: () => void
@@ -96,6 +106,7 @@ export const useUiStore = create<UiState>((set) => ({
   missingMediaIds: [],
   leftTab: 'media',
   seekHandler: null,
+  hoverPreviewSec: null,
   dialogQueue: [],
   fontLoadingCount: 0,
   notice: null,
@@ -110,6 +121,8 @@ export const useUiStore = create<UiState>((set) => ({
   setRefVideoMissing: (missing) => set({ refVideoMissing: missing }),
   setLeftTab: (tab) => set({ leftTab: tab }),
   setSeekHandler: (handler) => set({ seekHandler: handler }),
+  // 同一个帧重复写入不产生新 state：鼠标每动一下都会走到这里
+  setHoverPreview: (sec) => set((state) => (state.hoverPreviewSec === sec ? state : { hoverPreviewSec: sec })),
   // 默认开：选中媒体段就是来调画面的；万一挡住字幕点选，面板上一键关掉
   stageInteract: true,
   toggleStageInteract: () => set((state) => ({ stageInteract: !state.stageInteract })),

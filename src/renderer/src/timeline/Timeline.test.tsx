@@ -4,12 +4,13 @@ import { cleanup, fireEvent, render } from '@testing-library/react'
 import { FPS_30 } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
-import { frameTimeSec } from '@shared/fps'
+import { frameTimeSec, snapTimeToFrame } from '@shared/fps'
 import { secondsToTimecode } from '@shared/timecode'
 import type { MediaItem, Project, VideoMeta } from '@shared/types'
 import { Timeline } from './Timeline'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
+import { attachProjectHistory } from '../state/projectHistory'
 
 /**
  * 时间轴交互契约（v2 双轨）：
@@ -205,22 +206,23 @@ describe('Timeline v2 媒体轨', () => {
     expect(root.textContent).toMatch(/总时长 1[1-9]\.\d\ds/)
   })
 
-  it('拆分按钮：播放头在段内且两半够长时启用，点击拆出右段并选中', () => {
+  it('拆分按钮：永远可点，播放头在段内且两半够长时拆出右段并选中', () => {
     seed()
     const media = seedMedia()
     const clip = useProjectStore.getState().project.mediaClips.find((c) => c.mediaId === media.id)!
     act(() => useUiStore.setState({ displayTimeSec: clip.timelineStartSec + 2 }))
     const root = renderTimeline(vi.fn())
-    const splitBtn = [...root.querySelectorAll('button')].find((b) => b.textContent === '拆分媒体段') as HTMLButtonElement
+    const splitBtn = toolButton(root, TEXT.timeline.splitClip)
     expect(splitBtn.disabled).toBe(false)
 
     fireEvent.click(splitBtn)
     const after = useProjectStore.getState()
     expect(after.project.mediaClips.filter((c) => c.mediaId === media.id)).toHaveLength(2)
     expect(after.selectedMediaClipId).not.toBe(clip.id)
+    expect(useUiStore.getState().notice).toBeNull()
   })
 
-  it('播放头落在段外（空隙）时拆分按钮禁用', () => {
+  it('播放头落在空隙（没有目标段）：不动工程，只提示没有可拆的', () => {
     seed()
     const media = seedMedia()
     // 重新铺一段 4s 的：段尾 4s，播放头 6s 落在空隙里
@@ -228,19 +230,29 @@ describe('Timeline v2 媒体轨', () => {
     act(() => useProjectStore.getState().trimMediaClip(clip.id, { timelineEndSec: 4 }))
     act(() => useUiStore.setState({ displayTimeSec: 6 }))
     const root = renderTimeline(vi.fn())
-    const splitBtn = [...root.querySelectorAll('button')].find((b) => b.textContent === '拆分媒体段') as HTMLButtonElement
-    expect(splitBtn.disabled).toBe(true)
+    const splitBtn = toolButton(root, TEXT.timeline.splitClip)
+    // 不置灰：保持可点才能把「没有」说给用户听
+    expect(splitBtn.disabled).toBe(false)
+    const before = useProjectStore.getState().project.mediaClips.length
+
+    fireEvent.click(splitBtn)
+
+    expect(useProjectStore.getState().project.mediaClips).toHaveLength(before)
+    expect(useUiStore.getState().notice).toBe(TEXT.timeline.noSplitTarget)
   })
 
-  it('媒体卡片按下选中媒体段而不是字幕段', () => {
+  it('媒体卡片按下选中媒体段而不是字幕段，且不推动播放头', () => {
     seed()
     const media = seedMedia()
-    const root = renderTimeline(vi.fn())
+    const seekTo = vi.fn()
+    const root = renderTimeline(seekTo)
     const card = root.querySelector('.media-clip-card') as HTMLElement
     fireEvent.pointerDown(card, pointerInit(300))
     expect(useProjectStore.getState().selectedMediaClipId).toBe(
       useProjectStore.getState().project.mediaClips.find((c) => c.mediaId === media.id)!.id
     )
+    // P5：点段落只管选中
+    expect(seekTo).not.toHaveBeenCalled()
   })
 })
 
@@ -312,14 +324,16 @@ describe('音频轨', () => {
           { id: 'a1', mediaId: 'media-1', timelineStartSec: 2, timelineEndSec: 10, sourceInSec: 0, sourceOutSec: 8 }
         ]
       },
-      selectedAudioClipId: null
+      selectedAudioClipId: null,
+      // 选中态三个 id + 类型一起归零：这几条测的就是「未选中时退到哪里」，不能继承上一条用例的选中
+      selectedMediaClipId: null,
+      selectedClipId: null,
+      selectionKind: 'subtitle'
     })
   }
 
   const audioButton = (root: HTMLElement): HTMLButtonElement =>
-    Array.from(root.querySelectorAll('.timeline__bar button')).find(
-      (button) => button.textContent === TEXT.timeline.removeAudioClip
-    ) as HTMLButtonElement
+    toolButton(root, TEXT.timeline.removeTarget)
 
   it('音频段渲染在独立车道：宽度按占比、名称在条上', () => {
     seedAudio()
@@ -331,17 +345,40 @@ describe('音频轨', () => {
     expect(parseFloat(card.style.width) / 1000).toBeCloseTo(8 / 31, 2)
   })
 
-  it('删除音频段按钮只在选中音频段时可用', () => {
+  it('一个删除按钮管三条轨：选中音频段就删它', () => {
     seedAudio()
     const root = renderTimeline(vi.fn())
-    expect(audioButton(root).disabled).toBe(true)
 
     act(() => useProjectStore.getState().selectAudioClip('a1'))
-    expect(audioButton(root).disabled).toBe(false)
-
     fireEvent.click(audioButton(root))
+
     expect(useProjectStore.getState().project.audioClips).toBeUndefined()
     expect(useProjectStore.getState().selectedAudioClipId).toBeNull()
+    expect(useUiStore.getState().notice).toBeNull()
+  })
+
+  it('选中字幕条时删除删的是字幕条，媒体段一个不少', () => {
+    seedAudio()
+    const subtitleId = useProjectStore.getState().project.clips[0]!.id
+    const mediaCount = useProjectStore.getState().project.mediaClips.length
+    const root = renderTimeline(vi.fn())
+
+    act(() => useProjectStore.getState().selectClip(subtitleId))
+    fireEvent.click(audioButton(root))
+
+    expect(useProjectStore.getState().project.clips).toHaveLength(0)
+    expect(useProjectStore.getState().project.mediaClips).toHaveLength(mediaCount)
+  })
+
+  it('什么都没选中且播放头处没有媒体段：删除只给提示', () => {
+    seedAudio()
+    act(() => useUiStore.setState({ displayTimeSec: 25 }))
+    const root = renderTimeline(vi.fn())
+
+    fireEvent.click(audioButton(root))
+
+    expect(useProjectStore.getState().project.mediaClips).toHaveLength(2)
+    expect(useUiStore.getState().notice).toBe(TEXT.timeline.noRemoveTarget)
   })
 
   it('音频素材拖到媒体轨被拒（提示去音频轨）', () => {
@@ -404,6 +441,7 @@ function meta(): VideoMeta {
  */
 const DURATION_SEC = 31
 const timeAtPx = (px: number): number => (px / 1000) * DURATION_SEC
+const pxAtSec = (sec: number): number => (sec / DURATION_SEC) * 1000
 
 function seedTools(): void {
   const project = createDefaultProject('工具')
@@ -499,14 +537,15 @@ describe('时间轴工具栏', () => {
     expect(root.querySelector('.timeline__snap-line')).toBeNull()
   })
 
-  it('预览轴：开着时悬停出黄线并顶掉蓝色播放头，移出即消失', () => {
+  it('预览轴：开着时悬停出黄线并写进 uiStore，蓝色播放头留在原地', () => {
     seedTools()
     const root = renderTimeline(vi.fn())
     const timelineEl = root.querySelector('.timeline') as HTMLElement
 
-    // 默认关闭：移动鼠标不产生预览轴
+    // 默认关闭：移动鼠标不产生预览轴，也不写 uiStore
     fireEvent.pointerMove(timelineEl, { pointerId: 3, pointerType: 'mouse', clientX: 500 })
     expect(root.querySelector('.timeline__hover-line')).toBeNull()
+    expect(useUiStore.getState().hoverPreviewSec).toBeNull()
 
     fireEvent.click(toolButton(root, TEXT.timeline.hoverPreview))
     fireEvent.pointerMove(timelineEl, { pointerId: 3, pointerType: 'mouse', clientX: 500 })
@@ -515,11 +554,152 @@ describe('时间轴工具栏', () => {
     expect(line).toBeTruthy()
     // 500px → 时间轴上对应的帧
     expect(line.querySelector('.timeline__hover-tag')?.textContent).toBe(secondsToTimecode(timeAtPx(500), FPS_30))
-    // 蓝色播放头被暂时隐藏（用根节点上的状态类）
+    expect(useUiStore.getState().hoverPreviewSec).toBe(snapTimeToFrame(timeAtPx(500), FPS_30))
+    // P4：黄线接管预览，蓝线不再被顶掉：只是压暗，位置仍是播放头那里
+    const head = root.querySelector('.timeline__playhead') as HTMLElement
+    expect(head).toBeTruthy()
+    expect(head.style.left).toBe('0px')
     expect(timelineEl.className).toContain('timeline--hover-preview')
 
     fireEvent.pointerLeave(timelineEl)
     expect(root.querySelector('.timeline__hover-line')).toBeNull()
-    expect((root.querySelector('.timeline') as HTMLElement).className).not.toContain('timeline--hover-preview')
+    expect(useUiStore.getState().hoverPreviewSec).toBeNull()
+  })
+
+  it('正在播放时预览轴整体禁用：黄线不出现，已经画出来的立即收起', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+    fireEvent.click(toolButton(root, TEXT.timeline.hoverPreview))
+    const timelineEl = root.querySelector('.timeline') as HTMLElement
+
+    // 暂停态下悬停有效
+    fireEvent.pointerMove(timelineEl, { pointerId: 4, pointerType: 'mouse', clientX: 300 })
+    expect(root.querySelector('.timeline__hover-line')).toBeTruthy()
+
+    // 开始播放：黄线与接管态立刻收起，不必等鼠标移出
+    act(() => useUiStore.setState({ playing: true }))
+    expect(root.querySelector('.timeline__hover-line')).toBeNull()
+    expect(useUiStore.getState().hoverPreviewSec).toBeNull()
+
+    // 暂停后同样的悬停又有效
+    act(() => useUiStore.setState({ playing: false }))
+    fireEvent.pointerMove(timelineEl, { pointerId: 4, pointerType: 'mouse', clientX: 300 })
+    expect(root.querySelector('.timeline__hover-line')).toBeTruthy()
+  })
+
+  it('拆分以黄线指向的帧为准，蓝线位置不动', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+    fireEvent.click(toolButton(root, TEXT.timeline.hoverPreview))
+    const timelineEl = root.querySelector('.timeline') as HTMLElement
+    // 蓝线停在 3s 的空隙（那里没有媒体段），黄线指到 B 段 [5,7] 的 6s
+    act(() => useUiStore.setState({ displayTimeSec: 3 }))
+    fireEvent.pointerMove(timelineEl, { pointerId: 6, pointerType: 'mouse', clientX: pxAtSec(6) })
+
+    fireEvent.click(toolButton(root, TEXT.timeline.splitClip))
+
+    const clips = useProjectStore.getState().project.mediaClips
+    expect(clips).toHaveLength(3)
+    expect(clips.some((clip) => Math.abs(clip.timelineStartSec - 6) < 0.05)).toBe(true)
+    // 拆分没有顺手把播放头推走
+    expect(useUiStore.getState().displayTimeSec).toBe(3)
+  })
+})
+
+describe('时间轴工具栏：撤销 / 重做', () => {
+  it('「新建片段」「删除片段」不在工具栏里了（入口已合并到左侧字幕 Tab）', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+
+    const names = Array.from(root.querySelectorAll('.timeline__bar button')).map((button) => button.textContent)
+    // 这两个文案已经只属于左侧「字幕」Tab（TEXT.captions.add），工具栏不再重复提供入口
+    expect(names).not.toContain('新建片段')
+    expect(names).not.toContain('删除片段')
+  })
+
+  it('没有可撤销的改动时，撤销与重做都是禁用态', () => {
+    seedTools()
+    const detach = attachProjectHistory()
+    try {
+      const root = renderTimeline(vi.fn())
+
+      expect((toolButton(root, TEXT.timeline.undo) as HTMLButtonElement).disabled).toBe(true)
+      expect((toolButton(root, TEXT.timeline.redo) as HTMLButtonElement).disabled).toBe(true)
+    } finally {
+      detach()
+    }
+  })
+
+  it('点「撤销」回到改动前，点「重做」再回来', () => {
+    seedTools()
+    const detach = attachProjectHistory()
+    try {
+      const root = renderTimeline(vi.fn())
+      act(() => {
+        useProjectStore.getState().addClip(0)
+      })
+      expect(useProjectStore.getState().project.clips).toHaveLength(2)
+
+      fireEvent.click(toolButton(root, TEXT.timeline.undo))
+      expect(useProjectStore.getState().project.clips).toHaveLength(1)
+
+      fireEvent.click(toolButton(root, TEXT.timeline.redo))
+      expect(useProjectStore.getState().project.clips).toHaveLength(2)
+    } finally {
+      detach()
+    }
+  })
+})
+
+/**
+ * P5：轨道上的段落只管选中。
+ * 跳转只留给两处「指着时间说我要过去」的入口：轨道空白处与上方尺规；
+ * 段内点击不再顺手推动播放头，想过去时在右侧编辑器点「定位到这一段」。
+ */
+describe('Timeline 点段落只选中不跳转（P5）', () => {
+  it('点媒体段：选中它，但 seek 与播放头读数都不动', () => {
+    seedTools()
+    act(() => useUiStore.setState({ displayTimeSec: 10 }))
+    const seekTo = vi.fn()
+    const root = renderTimeline(seekTo)
+
+    const cards = root.querySelectorAll('.timeline__track--media .media-clip-card')
+    fireEvent.pointerDown(cards[1] as Element, pointerInit(600))
+
+    expect(useProjectStore.getState().selectedMediaClipId).toBe('b')
+    expect(seekTo).not.toHaveBeenCalled()
+    expect(useUiStore.getState().displayTimeSec).toBe(10)
+  })
+
+  it('点音频段：同样只选中，不跳到这一段', () => {
+    seedTools()
+    act(() => {
+      const project = useProjectStore.getState().project
+      useProjectStore.setState({
+        project: {
+          ...project,
+          audioClips: [{ id: 'a1', mediaId: 'media-1', timelineStartSec: 5, timelineEndSec: 7, sourceInSec: 0, sourceOutSec: 2 }]
+        }
+      })
+    })
+    act(() => useUiStore.setState({ displayTimeSec: 10 }))
+    const seekTo = vi.fn()
+    const root = renderTimeline(seekTo)
+
+    fireEvent.pointerDown(root.querySelector('.audio-clip-card') as Element, pointerInit(600))
+
+    expect(useProjectStore.getState().selectedAudioClipId).toBe('a1')
+    expect(seekTo).not.toHaveBeenCalled()
+    expect(useUiStore.getState().displayTimeSec).toBe(10)
+  })
+
+  it('轨道空白处按下仍然跳转：入口只换了位置，没有丢掉', () => {
+    seedTools()
+    const seekTo = vi.fn()
+    const root = renderTimeline(seekTo)
+
+    fireEvent.pointerDown(findTrack(root), pointerInit(250))
+
+    expect(seekTo).toHaveBeenCalled()
   })
 })

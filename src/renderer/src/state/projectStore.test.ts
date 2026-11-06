@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_FONT_ID, FPS_29_97, FPS_30, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
-import { createDefaultProject } from '@shared/projectSchema'
+import { DEFAULT_FONT_ID, FPS_29_97, FPS_30, MIN_CLIP_DURATION_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
+import { createClip, createDefaultProject } from '@shared/projectSchema'
 import { getPreset } from '@shared/presets'
 import { snapTimeToFrame } from '@shared/fps'
 import type { MediaItem, Project, VideoMeta } from '@shared/types'
@@ -182,11 +182,11 @@ describe('媒体轨动作', () => {
     expect(after.timelineEndSec - after.timelineStartSec).toBeCloseTo(after.sourceOutSec - after.sourceInSec, 6)
   })
 
-  it('splitAtFrame：拆出的两段首尾相接、右段入选中；切点无效返回 null', () => {
+  it('splitTargetAt（未选中退到媒体轨）：拆出的两段首尾相接、右段入选中；切点无效返回 null', () => {
     const store = useProjectStore.getState()
     const id = store.addMedia(seedItem())
     const clip = store.insertMediaClip({ mediaId: id, timelineStartSec: 0, durationSec: 6, sourceInSec: 2 })!
-    const rightId = useProjectStore.getState().splitAtFrame(2)
+    const rightId = useProjectStore.getState().splitTargetAt(2)
     expect(rightId).not.toBeNull()
     const after = useProjectStore.getState()
     expect(after.selectedMediaClipId).toBe(rightId)
@@ -198,9 +198,9 @@ describe('媒体轨动作', () => {
     expect(left.sourceOutSec).toBe(right.sourceInSec)
     expect(left.timelineEndSec - left.timelineStartSec + (right.timelineEndSec - right.timelineStartSec)).toBeCloseTo(6, 6)
     // 空隙处无可拆段
-    expect(useProjectStore.getState().splitAtFrame(100)).toBeNull()
+    expect(useProjectStore.getState().splitTargetAt(100)).toBeNull()
     // 太贴近段首（不足最短）不可拆
-    expect(useProjectStore.getState().splitAtFrame(clip.timelineStartSec + MIN_MEDIA_CLIP_SEC / 2)).toBeNull()
+    expect(useProjectStore.getState().splitTargetAt(clip.timelineStartSec + MIN_MEDIA_CLIP_SEC / 2)).toBeNull()
   })
 
   it('removeMediaClip：只删段，素材池不动', () => {
@@ -590,5 +590,156 @@ describe('v9 片段音频与变速动作', () => {
     expect('audio' in cleared).toBe(false)
     expect('speed' in cleared).toBe(false)
     expect(cleared.timelineEndSec).toBeCloseTo(10, 6)
+  })
+})
+
+describe('拆分 / 删除作用于「当前该操作的那一段」（P3）', () => {
+  /** 直接搭轨：避开插入时的重叠右移规则，把叠层场景摆准 */
+  function seedTracks(clips: Array<{ id: string; start: number; end: number; layer?: number }>): void {
+    const project = createDefaultProject('拆分目标')
+    project.fps = FPS_30
+    project.media = [{ id: 'media-1', ...seedItem() }]
+    project.mediaClips = clips.map((clip) => ({
+      id: clip.id,
+      mediaId: 'media-1',
+      timelineStartSec: clip.start,
+      timelineEndSec: clip.end,
+      sourceInSec: clip.start,
+      sourceOutSec: clip.end,
+      ...(clip.layer ? { layer: clip.layer } : {})
+    }))
+    useProjectStore.setState({
+      project,
+      selectedClipId: null,
+      selectedMediaClipId: null,
+      selectedAudioClipId: null,
+      selectionKind: 'subtitle',
+      fonts: []
+    })
+  }
+
+  function seedSubtitle(title: string, start: number, end: number): string {
+    const project = createDefaultProject('拆字幕')
+    project.fps = FPS_30
+    const clip = createClip({ startTime: start, fps: FPS_30 })
+    clip.content = { title, subtitle: '省应急管理厅' }
+    clip.endTime = end
+    project.clips = [clip]
+    useProjectStore.setState({
+      project,
+      selectedClipId: null,
+      selectedMediaClipId: null,
+      selectedAudioClipId: null,
+      selectionKind: 'subtitle',
+      fonts: []
+    })
+    return clip.id
+  }
+
+  const mediaClips = () => useProjectStore.getState().project.mediaClips
+  const audioClips = () => useProjectStore.getState().project.audioClips ?? []
+
+  it('选中字幕条时拆字幕条：两半文字一致，右半入选中', () => {
+    const id = seedSubtitle('汛期防御启动', 0, 6)
+    useProjectStore.getState().selectClip(id)
+
+    const rightId = useProjectStore.getState().splitTargetAt(2)
+
+    expect(rightId).not.toBeNull()
+    const after = useProjectStore.getState().project.clips
+    expect(after).toHaveLength(2)
+    const left = after.find((clip) => clip.id === id)!
+    const right = after.find((clip) => clip.id === rightId)!
+    expect(left.endTime).toBe(2)
+    expect(right.startTime).toBe(2)
+    expect(right.content.title).toBe('汛期防御启动')
+    expect(useProjectStore.getState().selectedClipId).toBe(rightId)
+    expect(useProjectStore.getState().selectionKind).toBe('subtitle')
+  })
+
+  it('选中音频段时拆音频段，源窗口按切点投影', () => {
+    const mediaId = useProjectStore.getState().addMedia({ ...seedItem(), path: 'C:/media/vo.mp3', name: 'vo.mp3', meta: baseMeta({ width: 0, height: 0, durationSec: 10 }) })
+    const clip = useProjectStore.getState().insertAudioClip({ mediaId, timelineStartSec: 0, durationSec: 6 })!
+    useProjectStore.getState().selectAudioClip(clip.id)
+
+    const rightId = useProjectStore.getState().splitTargetAt(2)
+
+    expect(rightId).not.toBeNull()
+    expect(audioClips()).toHaveLength(2)
+    expect(audioClips().find((item) => item.id === rightId)?.sourceInSec).toBe(2)
+    expect(useProjectStore.getState().selectedAudioClipId).toBe(rightId)
+    expect(useProjectStore.getState().selectionKind).toBe('audio')
+  })
+
+  it('未选中时拆播放头处的媒体段，叠层中取最下面那一层', () => {
+    seedTracks([
+      { id: 'base', start: 0, end: 10, layer: 0 },
+      { id: 'top', start: 0, end: 10, layer: 3 }
+    ])
+
+    const rightId = useProjectStore.getState().splitTargetAt(4)
+
+    expect(rightId).not.toBeNull()
+    // 被拆的是最下层（layer 3）；底层保持整段不动
+    expect(mediaClips().find((clip) => clip.id === 'base')?.timelineEndSec).toBe(10)
+    expect(mediaClips().find((clip) => clip.id === 'top')).toMatchObject({ timelineStartSec: 0, timelineEndSec: 4 })
+    expect(mediaClips().find((clip) => clip.id === rightId)).toMatchObject({ timelineStartSec: 4, timelineEndSec: 10, layer: 3 })
+  })
+
+  it('切点不在选中段里：返回 null 且工程一个字节也不动', () => {
+    const id = seedSubtitle('地铁新线开通', 10, 16)
+    useProjectStore.getState().selectClip(id)
+    const before = JSON.stringify(useProjectStore.getState().project)
+
+    expect(useProjectStore.getState().splitTargetAt(2)).toBeNull()
+
+    expect(JSON.stringify(useProjectStore.getState().project)).toBe(before)
+  })
+
+  it('removeTargetAt：选中谁就删谁，未选中删播放头处的媒体段', () => {
+    const id = seedSubtitle('长三角一体化新规', 0, 6)
+    useProjectStore.getState().selectClip(id)
+    expect(useProjectStore.getState().removeTargetAt(3)).toBe(true)
+    expect(useProjectStore.getState().project.clips).toHaveLength(0)
+
+    seedTracks([
+      { id: 'base', start: 0, end: 10, layer: 0 },
+      { id: 'top', start: 0, end: 10, layer: 2 }
+    ])
+    expect(useProjectStore.getState().removeTargetAt(3)).toBe(true)
+    expect(mediaClips().map((clip) => clip.id)).toEqual(['base'])
+  })
+
+  it('播放头处什么都没有：removeTargetAt 返回 false，工程不变', () => {
+    seedTracks([{ id: 'base', start: 8, end: 10 }])
+    const before = JSON.stringify(useProjectStore.getState().project)
+
+    expect(useProjectStore.getState().removeTargetAt(2)).toBe(false)
+
+    expect(JSON.stringify(useProjectStore.getState().project)).toBe(before)
+  })
+
+  it('拆出来的半段不够长时返回 null（与媒体段同一套最短时长口径）', () => {
+    const id = seedSubtitle('汛期防御启动', 0, 6)
+    useProjectStore.getState().selectClip(id)
+
+    expect(useProjectStore.getState().splitTargetAt(MIN_CLIP_DURATION_SEC / 2)).toBeNull()
+    expect(useProjectStore.getState().project.clips).toHaveLength(1)
+  })
+
+  it('removeSelected（Delete 键的路径）：只删选中的段，没选中就不动工程', () => {
+    const id = seedSubtitle('汛期防御启动', 0, 6)
+
+    expect(useProjectStore.getState().removeSelected()).toBe(false)
+    expect(useProjectStore.getState().project.clips).toHaveLength(1)
+
+    useProjectStore.getState().selectClip(id)
+    expect(useProjectStore.getState().removeSelected()).toBe(true)
+    expect(useProjectStore.getState().project.clips).toHaveLength(0)
+
+    // 播放头处有媒体段也不会被顺手删掉
+    seedTracks([{ id: 'base', start: 0, end: 10 }])
+    expect(useProjectStore.getState().removeSelected()).toBe(false)
+    expect(mediaClips()).toHaveLength(1)
   })
 })

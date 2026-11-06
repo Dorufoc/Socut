@@ -24,3 +24,4 @@ docs/verification/artifacts/
 .vite/
 .DS_Store
 Thumbs.db
+.omo/

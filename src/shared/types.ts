@@ -580,6 +580,12 @@ export interface WatermarkSettings {
   importedAt: string
 }
 
+/**
+ * 左侧栏 Tab（P6）：字幕与水印合并成「包装」。
+ * 这里是唯一一份清单——工程持久化、UI 壳、归一化都从这里取，避免三处各写一份 enum。
+ */
+export type LeftTabValue = 'media' | 'wrap' | 'export' | 'progress'
+
 export interface Project {
   version: number
   name: string
@@ -597,7 +603,7 @@ export interface Project {
   /** 水印设置；缺省 = 未导入水印（合成链与旧工程逐字节一致） */
   watermark?: WatermarkSettings
   /** UI 状态（不参与渲染）；leftTab 记住上次离开左侧栏的位置，随工程走 */
-  ui?: { leftTab?: 'media' | 'watermark' | 'captions' | 'export' | 'progress' } & Record<string, unknown>
+  ui?: { leftTab?: LeftTabValue } & Record<string, unknown>
   /**
    * @deprecated v1 遗留字段，`normalizeProject` 自动迁移到 `media/mediaClips`，写入时不再产出。
    * 保留类型为 ftype 旧工程 JSON 能直接反序列化。

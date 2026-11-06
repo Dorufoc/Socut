@@ -83,17 +83,22 @@ export const TEXT = {
 
   // 时间轴与片段
   timeline: {
-    addClip: '新建片段',
-    removeClip: '删除片段',
-    /** v2 媒体轨 */
-    splitClip: '拆分媒体段',
-    splitHint: '在播放头处拆分（Ctrl+B）',
-    removeMediaClip: '删除媒体段',
+    /** v10 P2：新建/删除字幕条的入口已合并到左侧「字幕」Tab，工具栏只留通用拆/删与撤销 */
+    undo: '撤销',
+    redo: '重做',
+    undoHint: (count: number) => `撤销上一步（还能撤 ${count} 步，Ctrl+Z）`,
+    redoHint: (count: number) => `重做（还能重做 ${count} 步，Ctrl+Shift+Z / Ctrl+Y）`,
+    /** v2 媒体轨 → v10 P3：拆分/删除不再分轨，都作用于「当前该操作的那一段」 */
+    splitClip: '拆分',
+    splitHint: '拆开当前选中的段（未选中时拆播放头处的媒体段）· Ctrl+B',
+    removeTarget: '删除',
+    removeTargetHint: '删掉当前选中的段（未选中时删播放头处的媒体段）',
+    noSplitTarget: '没有可拆分的段：先选中一段，或把播放头放到要拆的媒体段上',
+    noRemoveTarget: '没有可删除的段：先选中一段，或把播放头放到要删的媒体段上',
     emptyMedia: '空轨：从素材库拖入',
     /** v7：音频轨 */
     audioLane: '音频',
     emptyAudio: '空轨：从素材库拖入音频',
-    removeAudioClip: '删除音频段',
     /** v7：叠层 */
     layerUp: '上移层',
     layerDown: '下移层',
@@ -115,14 +120,30 @@ export const TEXT = {
     hoverPreviewHint: '悬停时用黄线预览帧位置'
   },
 
-  /** 左侧「字幕」Tab：按时间顺序列出全部标题 */
+  /**
+   * 左侧「包装」Tab（P6）：字幕 / 片尾 / 水印三块从上到下一次铺开。
+   * 片尾先占位——功能未实现就不给假入口。
+   */
+  wrap: {
+    tab: '包装',
+    captions: '字幕',
+    ending: '片尾',
+    endingTodo: '片尾功能尚未实现，后续版本开放',
+    endingPlaceholder: '片尾占位',
+    watermark: '水印'
+  },
+
+  /** 左侧「字幕」Tab：按时间顺序列出全部标题，并且是新建/删除字幕条的唯一入口 */
   captions: {
     tab: '字幕',
     title: '字幕',
     count: (n: number) => `${n} 条`,
     empty: '暂无字幕条',
-    emptyHint: '点「新建片段」或在预览里点选',
-    hint: '选中并跳到入点',
+    add: '新建片段',
+    addHint: '在时间轴末尾接一条新的字幕条，随即可在右侧编辑',
+    remove: '删除这条字幕',
+    removeNamed: (title: string) => `删除字幕条：《${title}》`,
+    hint: '选中并跳到中点',
     onAir: '正在显示',
     noTitle: '未填写',
     noSubtitle: '未填写'
@@ -250,6 +271,9 @@ export const TEXT = {
     selectedClip: '当前字幕条',
     noneSelected: '未选择片段',
     noneSelectedHint: '点时间轴或预览选择一条',
+    /** P5：点段落只选中不跳转，编辑器里给一个明确的定位入口 */
+    locate: '定位到这一段',
+    locateHint: '播放头不在这一段的入点→出点里；点一下把画面带到这一段中间',
     fontSizeTitle: '主标题字号',
     fontSizeSubtitle: '副标题字号',
     fontScaleHint: '相对预设字号缩放，受可读上限约束',

@@ -1,18 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { FPS_30 } from '@shared/constants'
+import { DEFAULT_CLIP_DURATION_SEC, FPS_30 } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import type { Project, SubtitleClip } from '@shared/types'
 import { CaptionListPanel } from './CaptionListPanel'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
+import { attachProjectHistory, useHistoryStore } from '../state/projectHistory'
 
 /**
- * 左侧「字幕」Tab（v4）：按时间顺序列出全部已添加标题，点一条 = 选中 + 跳到入点。
- * 这里锁住四条契约：排序、内容（主标题 + 副标题）、跳转与暂停接管、选中/正在显示态。
+ * 左侧「字幕」Tab（P2：新建/删除合并到这里）：
+ * 按时间顺序列出全部字幕条，点一条 = 选中 + 跳到**区间中点**；
+ * 0 条时整块面板就是新建入口（大虚线加号），有字幕时列表末尾常驻虚线加号条；
+ * 每张卡片自带删除按钮（SVG 垃圾桶），删掉后靠项目级撤销找回。
+ * 这里锁住：排序、内容、中点跳转与暂停接管、选中/正在显示态、两个新建入口、删除与撤销。
  */
+
+/** 默认新建时长下的中点：入点 + 半个条长 */
+const mid = (startSec: number): number => startSec + DEFAULT_CLIP_DURATION_SEC / 2
 
 function clipAt(start: number, title: string, subtitle: string): SubtitleClip {
   const clip = createClip({ startTime: start, fps: FPS_30 })
@@ -53,7 +60,7 @@ describe('CaptionListPanel（字幕列表 Tab）', () => {
     expect(screen.getByText('3 条')).toBeTruthy()
   })
 
-  it('点击一条：选中它并把播放头跳到它的入点（预览与时间轴同步）', () => {
+  it('点击一条：选中它并把播放头跳到它的区间中点（预览与时间轴同步）', () => {
     const project = seed()
     const seek = vi.fn()
     useUiStore.getState().setSeekHandler(seek)
@@ -63,10 +70,11 @@ describe('CaptionListPanel（字幕列表 Tab）', () => {
 
     const second = project.clips[2]!
     expect(useProjectStore.getState().selectedClipId).toBe(second.id)
-    expect(seek).toHaveBeenCalledWith(second.startTime)
+    // 中点天然落在「入场完成→出场开始」窗口内，预览一定看得见完整样式
+    expect(seek).toHaveBeenCalledWith(mid(second.startTime))
   })
 
-  it('播放中点击先暂停：否则跳过去立刻被时钟带走，看不出跳到入点', () => {
+  it('播放中点击先暂停：否则跳过去立刻被时钟带走，看不出跳到中点', () => {
     const project = seed()
     const seek = vi.fn()
     act(() => {
@@ -77,7 +85,7 @@ describe('CaptionListPanel（字幕列表 Tab）', () => {
     fireEvent.click(screen.getByText('第三条：地铁新线开通'))
 
     expect(useUiStore.getState().playing).toBe(false)
-    expect(seek).toHaveBeenCalledWith(project.clips[0]!.startTime)
+    expect(seek).toHaveBeenCalledWith(mid(project.clips[0]!.startTime))
   })
 
   it('没有 seekHandler（预览还没挂载）时仍然选中，不抛异常', () => {
@@ -111,16 +119,97 @@ describe('CaptionListPanel（字幕列表 Tab）', () => {
 
     const active = screen.getByRole('button', { pressed: true })
     expect(active.textContent).toContain('第一条：长三角一体化新规')
-    expect(active.className).toContain('caption-item--active')
+    // 选中态在卡片行容器上（左边那一条强调色），按钮只是行里的点击区
+    expect((active.closest('.caption-item') as HTMLElement).className).toContain('caption-item--active')
     expect(useProjectStore.getState().selectedClipId).toBe(project.clips[1]!.id)
   })
 
-  it('工程里没有字幕条时给出可操作的空态，而不是空白面板', () => {
+  it('工程里没有字幕条时，整块面板就是新建入口（大虚线加号）', () => {
     useProjectStore.setState({ project: createDefaultProject('空'), selectedClipId: null, fonts: [] })
+    const { container } = render(<CaptionListPanel />)
+
+    expect(screen.getByText('0 条')).toBeTruthy()
+    expect(container.querySelector('.caption-add--hero')).toBeTruthy()
+    expect(screen.queryAllByText('第二条：汛期防御启动')).toHaveLength(0)
+  })
+
+  it('点空态的大加号：新建一条、选中它，并把播放头跳到这条的中点', () => {
+    useProjectStore.setState({ project: createDefaultProject('空'), selectedClipId: null, fonts: [] })
+    const seek = vi.fn()
+    useUiStore.getState().setSeekHandler(seek)
+    const { container } = render(<CaptionListPanel />)
+
+    fireEvent.click(container.querySelector('.caption-add--hero')!)
+
+    const created = useProjectStore.getState().project.clips[0]!
+    expect(useProjectStore.getState().project.clips).toHaveLength(1)
+    expect(useProjectStore.getState().selectedClipId).toBe(created.id)
+    expect(seek).toHaveBeenCalledWith(mid(created.startTime))
+  })
+
+  it('有字幕时列表末尾常驻虚线加号条，点它继续往后接一条', () => {
+    seed()
+    const seek = vi.fn()
+    useUiStore.getState().setSeekHandler(seek)
+    const { container } = render(<CaptionListPanel />)
+
+    const rows = container.querySelectorAll('.caption-item')
+    expect(rows).toHaveLength(3)
+    // 有字幕时空态大加号让位给列表末尾那条矮加号条
+    expect(container.querySelector('.caption-add--hero')).toBeNull()
+
+    fireEvent.click(container.querySelector('.caption-add')!)
+
+    const clips = useProjectStore.getState().project.clips
+    expect(clips).toHaveLength(4)
+    const created = clips[3]!
+    expect(useProjectStore.getState().selectedClipId).toBe(created.id)
+    expect(seek).toHaveBeenCalledWith(mid(created.startTime))
+  })
+
+  it('每张卡片都有删除按钮，点它只删那一条且不会顺带选中别的条', () => {
+    const project = seed()
+    const target = project.clips.find((clip) => clip.content.title === '第二条：汛期防御启动')!
+    act(() => {
+      useProjectStore.setState({ selectedClipId: target.id })
+    })
     render(<CaptionListPanel />)
 
-    expect(screen.getByText(TEXT.captions.empty)).toBeTruthy()
-    expect(screen.queryAllByText('第二条：汛期防御启动')).toHaveLength(0)
-    expect(screen.getByText('0 条')).toBeTruthy()
+    const removeButtons = screen.getAllByRole('button', { name: /^删除字幕条/ })
+    expect(removeButtons).toHaveLength(3)
+    // 列表按时间排序：6s 的「第二条」在卡片里排第二
+    expect(removeButtons[1]!.getAttribute('aria-label')).toBe(TEXT.captions.removeNamed(target.content.title))
+
+    fireEvent.click(removeButtons[1]!)
+
+    const left = useProjectStore.getState().project.clips
+    expect(left).toHaveLength(2)
+    expect(left.some((clip) => clip.id === target.id)).toBe(false)
+    // 选中不会落在已删的那条上，也不会因此把播放头推到别处
+    const selected = useProjectStore.getState().selectedClipId
+    expect(selected).not.toBe(target.id)
+    expect(left.some((clip) => clip.id === selected)).toBe(true)
+  })
+
+  it('删掉的这条能靠项目级撤销找回来，连选中一起恢复', () => {
+    const project = seed()
+    const detach = attachProjectHistory()
+    try {
+      const third = project.clips[0]! // 排序后是第三条（写入顺序 12s 那条）
+      act(() => {
+        useProjectStore.setState({ selectedClipId: third.id })
+      })
+      render(<CaptionListPanel />)
+
+      fireEvent.click(screen.getAllByRole('button', { name: /^删除字幕条/ })[2]!)
+      expect(useProjectStore.getState().project.clips).toHaveLength(2)
+
+      useHistoryStore.getState().undo()
+
+      expect(useProjectStore.getState().project.clips).toHaveLength(3)
+      expect(useProjectStore.getState().selectedClipId).toBe(third.id)
+    } finally {
+      detach()
+    }
   })
 })

@@ -28,6 +28,7 @@
     "make:fixtures": "node scripts/make-probe-fixtures.mjs",
     "preview": "electron-vite preview",
     "dist": "npm run build && electron-builder --win x64",
+    "package:win": "node scripts/package-win.mjs",
     "dist:win": "node scripts/dist-win.mjs",
     "dist:cache": "node scripts/dist-win.mjs --dir",
     "verify:packaged": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/verify-packaged.ps1",

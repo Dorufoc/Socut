@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { FPS_30 } from '@shared/constants'
@@ -7,6 +7,7 @@ import { createClip, createDefaultProject } from '@shared/projectSchema'
 import type { AudioClip, MediaItem, VideoMeta } from '@shared/types'
 import { ClipInspector } from './ClipInspector'
 import { useProjectStore } from '../state/projectStore'
+import { useUiStore } from '../state/uiStore'
 
 /**
  * 音频片段编辑器（v9）：选中音频轨上的段时右栏换成音频视图。
@@ -246,5 +247,30 @@ describe('音频片段的音频与变速编辑', () => {
     render(<ClipInspector />)
 
     expect(screen.getByText(new RegExp(TEXT.audioEditor.missingMedia))).toBeTruthy()
+  })
+})
+
+/** P5：点音频段只选中不跳转，于是音频编辑器也要有明确的「过去」入口 */
+describe('音频编辑器 · 定位到这一段（P5）', () => {
+  it('播放头在本段之外时出现，点一下跳到该段中点', () => {
+    const { audioClipId } = seed()
+    act(() => useProjectStore.getState().selectAudioClip(audioClipId))
+    const seek = vi.fn()
+    act(() => useUiStore.setState({ displayTimeSec: 20, seekHandler: seek }))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.inspector.locate }))
+
+    // 本段 0→4s
+    expect(seek).toHaveBeenCalledWith(2)
+  })
+
+  it('播放头已在本段区间内：不出现', () => {
+    const { audioClipId } = seed()
+    act(() => useProjectStore.getState().selectAudioClip(audioClipId))
+    act(() => useUiStore.setState({ displayTimeSec: 1, seekHandler: vi.fn() }))
+    render(<ClipInspector />)
+
+    expect(screen.queryByRole('button', { name: TEXT.inspector.locate })).toBeNull()
   })
 })

@@ -74,6 +74,9 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   const setLiveClipId = useUiStore((state) => state.setLiveClipId)
   const showSafeArea = useUiStore((state) => state.showSafeArea)
   const displayTime = useUiStore((state) => state.displayTimeSec)
+  /** P4：预览轴的悬停帧。非空时画面（Canvas 层与参考视频）改跟这一帧，蓝线/时间码仍走 displayTime */
+  const hoverPreviewSec = useUiStore((state) => state.hoverPreviewSec)
+  const previewTime = hoverPreviewSec ?? displayTime
   const setDisplayTime = useUiStore((state) => state.setDisplayTime)
   const selectClip = useProjectStore((state) => state.selectClip)
   const mediaClips = useProjectStore((state) => state.project.mediaClips)
@@ -83,10 +86,10 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   const legacyHasAudio = useProjectStore((state) => state.project.refVideo?.meta.audioCodec != null)
   const watermark = useProjectStore((state) => state.project.watermark)
 
-  /** 播放头落在哪枚素材上（含源坐标）；多层时取**最上层**，段间空隙/空轨为 null。 */
+  /** 预览时间落在哪枚素材上（含源坐标）；多层时取**最上层**，段间空隙/空轨为 null。 */
   const mediaSource = useMemo(() => {
     if (mediaClips.length > 0) {
-      const at = topActiveMediaClip(mediaClips, Math.max(0, displayTime))
+      const at = topActiveMediaClip(mediaClips, Math.max(0, previewTime))
       if (!at) return null
       const item = mediaPool.find((m) => m.id === at.mediaId)
       if (!item) return null
@@ -94,7 +97,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
         mediaId: item.id,
         path: item.path,
         // v9：时间轴 1s 吃掉 speed 秒源内容（1x 时与旧写法逐字节一致）
-        sourceSec: sourceTimeAt(at, Math.max(0, displayTime)),
+        sourceSec: sourceTimeAt(at, Math.max(0, previewTime)),
         clip: at,
         kind: mediaKindOf(item),
         hasAudio: typeof item.meta.audioCodec === 'string' && item.meta.audioCodec.length > 0
@@ -104,14 +107,14 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
       return {
         mediaId: 'legacy-ref',
         path: legacyRefPath,
-        sourceSec: Math.max(0, displayTime),
+        sourceSec: Math.max(0, previewTime),
         clip: null,
         kind: 'video' as const,
         hasAudio: legacyHasAudio
       }
     }
     return null
-  }, [mediaClips, mediaPool, legacyRefPath, legacyHasAudio, displayTime])
+  }, [mediaClips, mediaPool, legacyRefPath, legacyHasAudio, previewTime])
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoState, setVideoState] = useState<RefVideoState>('idle')
@@ -174,17 +177,19 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   }, [videoEdit])
 
   /**
-   * 画面交互层只在「选中媒体段 + 打开交互开关 + 该段正处在播放头下」时出现：
+   * 画面交互层只在「选中媒体段 + 打开交互开关 + 该段正处在**播放头**下」时出现：
    * 否则手柄会画在一个看不见的画面位置上，拖了也看不到效果。
+   * P4：这里故意不用悬停帧取段——黄线只负责“给用户看那一帧”，
+   * 拖手柄必须挂在真正选中的那一段上，不然悬停一飘就在改另一段。
    */
   const selectionKind = useProjectStore((state) => state.selectionKind)
   const selectedMediaClipId = useProjectStore((state) => state.selectedMediaClipId)
   const stageInteract = useUiStore((state) => state.stageInteract)
   const audioClips = useProjectStore((state) => state.project.audioClips) ?? EMPTY_AUDIO_CLIPS
-  const activeMediaClip = mediaSource?.clip ?? null
+  const playheadClip = useMemo(() => topActiveMediaClip(mediaClips, Math.max(0, displayTime)) ?? null, [mediaClips, displayTime])
   const overlayClip =
-    stageInteract && selectionKind === 'media' && activeMediaClip && activeMediaClip.id === selectedMediaClipId
-      ? activeMediaClip
+    stageInteract && selectionKind === 'media' && playheadClip && playheadClip.id === selectedMediaClipId
+      ? playheadClip
       : null
 
   /**
@@ -253,6 +258,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     playing,
     showSafeArea,
     transparent: videoReady,
+    overrideSec: hoverPreviewSec,
     onDisplayTime: setDisplayTime
   })
 

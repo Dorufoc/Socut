@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react'
 import { MAX_TIMELINE_SEC } from '@shared/constants'
 import { snapTimeToFrame } from '@shared/fps'
-import { canSplitMediaClipAt } from '@shared/mediaClips'
 import { collectSnapEdges, snapEdge, snapMove, snapWindowSec } from '@shared/timelineSnap'
 import { secondsToTimecode } from '@shared/timecode'
 import { TEXT } from '@shared/i18n'
 import { timelineDurationSec, useProjectStore } from '../state/projectStore'
+import { useHistoryStore } from '../state/projectHistory'
 import { useUiStore } from '../state/uiStore'
+import { IconRedo, IconUndo } from '../components/ui/Icon'
 import { ClipCard } from './ClipCard'
 import { MediaClipCard } from './MediaClipCard'
 import { AudioClipCard } from './AudioClipCard'
@@ -21,6 +22,7 @@ import { buildTicks, pickStep, pxToSec, secToPx } from './ruler'
  * 素材库卡片可拖入媒体轨：拖拽悬停时高亮落点竖线，放下即在吸附位置插入片段。
  * v4：字幕轨改为「窄示意条」——一条卡的摆位就是该字幕在当前画面的入点→出点，
  * 标签只放主标题，条内细游标标出播放头落在区间的哪里（位置关系与全局播放头同源）。
+ * v10 P4：预览轴的悬停帧存进 uiStore 并接管预览与拆分参照；蓝线留在原地，正在播放时整个禁用。
  */
 
 type ScrubElement = HTMLDivElement
@@ -36,15 +38,13 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const project = useProjectStore((state) => state.project)
   const selectedClipId = useProjectStore((state) => state.selectedClipId)
   const selectClip = useProjectStore((state) => state.selectClip)
-  const addClip = useProjectStore((state) => state.addClip)
-  const removeClip = useProjectStore((state) => state.removeClip)
   const setClipTimes = useProjectStore((state) => state.setClipTimes)
   const selectedMediaClipId = useProjectStore((state) => state.selectedMediaClipId)
   const selectMediaClip = useProjectStore((state) => state.selectMediaClip)
   const moveMediaClip = useProjectStore((state) => state.moveMediaClip)
   const trimMediaClip = useProjectStore((state) => state.trimMediaClip)
-  const removeMediaClip = useProjectStore((state) => state.removeMediaClip)
-  const splitAtFrame = useProjectStore((state) => state.splitAtFrame)
+  const splitTargetAt = useProjectStore((state) => state.splitTargetAt)
+  const removeTargetAt = useProjectStore((state) => state.removeTargetAt)
   const insertMediaClip = useProjectStore((state) => state.insertMediaClip)
   const audioClips = useProjectStore((state) => state.project.audioClips) ?? EMPTY_AUDIO_CLIPS
   const selectedAudioClipId = useProjectStore((state) => state.selectedAudioClipId)
@@ -54,7 +54,6 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const insertAudioClip = useProjectStore((state) => state.insertAudioClip)
   const moveAudioClip = useProjectStore((state) => state.moveAudioClip)
   const trimAudioClip = useProjectStore((state) => state.trimAudioClip)
-  const removeAudioClip = useProjectStore((state) => state.removeAudioClip)
   const compactTimeline = useProjectStore((state) => state.compactTimeline)
   const displayTime = useUiStore((state) => state.displayTimeSec)
   const playing = useUiStore((state) => state.playing)
@@ -62,6 +61,11 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const setNotice = useUiStore((state) => state.setNotice)
   const tools = useUiStore((state) => state.timelineTools)
   const toggleTimelineTool = useUiStore((state) => state.toggleTimelineTool)
+  /** P1/P2：项目级撤销。新建与删除字幕条的入口已合并到左侧「字幕」Tab，这里只留撤销/重做 */
+  const undoDepth = useHistoryStore((state) => state.past.length)
+  const redoDepth = useHistoryStore((state) => state.future.length)
+  const undo = useHistoryStore((state) => state.undo)
+  const redo = useHistoryStore((state) => state.redo)
 
   const trackRef = useRef<HTMLDivElement | null>(null)
   // 媒体轨：预览轴的坐标基准（与卡片、播放头同一原点）
@@ -74,9 +78,9 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const [dropSec, setDropSec] = useState<number | null>(null)
   // 自动吸附命中的目标边缘（秒），画高亮竖线用；null = 当前没有吸附反馈
   const [snapGuideSec, setSnapGuideSec] = useState<number | null>(null)
-  // 预览轴：鼠标所在的帧时间（秒），null = 鼠标不在时间轴内
-  const [hoverSec, setHoverSec] = useState<number | null>(null)
-  const hoverRef = useRef<number | null>(null)
+  // 预览轴：悬停帧存在 uiStore 里（预览画面要跟着它走）；null = 没有悬停或正在播放
+  const hoverSec = useUiStore((state) => state.hoverPreviewSec)
+  const setHoverPreview = useUiStore((state) => state.setHoverPreview)
 
   useEffect(() => {
     const element = trackRef.current
@@ -214,7 +218,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     else if (activeAudioTarget) setAudioClipLayer(activeAudioTarget.id, next)
   }
   
-  const canSplit = canSplitMediaClipAt(project.mediaClips, displayTime, project.fps)
+  // P3：拆分与删除不再分轨，目标段由 store 统一解析（选中优先，其次播放头处媒体轨最下层）
 
   // ---------------------------------------------------------------- 时间轴工具
 
@@ -288,34 +292,33 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     if (tools.snapTogether) compactTimeline()
   }
 
-  /** 预览轴：鼠标所在的帧（吸附到帧边界），同一帧不重复写 state。
-   *  坐标用媒体轨的矩形（与卡片/播放头同一原点），所以黄线一定落在帧对应的格子上。 */
+  /** 预览轴：鼠标所在帧（吸附到帧边界）。坐标用媒体轨的矩形（与卡片/播放头同一原点），黄线一定落在帧对应的格子上。 */
   const onHoverMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
-    if (!tools.hoverPreview || event.pointerType !== 'mouse') return
+    // 播放中不接管：黄线会与时钟抢画面，用户也看不清自己停在哪一帧
+    if (!tools.hoverPreview || playing || event.pointerType !== 'mouse') return
     const track = mediaTrackRef.current
     if (!track) return
     const rect = track.getBoundingClientRect()
     if (rect.width <= 0) return
     const sec = snapTimeToFrame(Math.min(durationSec, Math.max(0, pxToSec(event.clientX - rect.left, durationSec, rect.width))), project.fps)
-    if (hoverRef.current === sec) return
-    hoverRef.current = sec
-    setHoverSec(sec)
+    setHoverPreview(sec)
   }
 
   const endHover = (): void => {
-    if (hoverRef.current === null) return
-    hoverRef.current = null
-    setHoverSec(null)
+    if (hoverSec === null) return
+    setHoverPreview(null)
   }
 
   useEffect(() => {
-    // 关掉预览轴时立刻把黄线收起来，不用等鼠标移出
-    if (tools.hoverPreview) return
-    hoverRef.current = null
-    setHoverSec(null)
-  }, [tools.hoverPreview])
+    // 关掉预览轴或开始播放：立刻把黄线与接管态收起，不用等鼠标移出
+    if (tools.hoverPreview && !playing) return
+    if (hoverSec === null) return
+    setHoverPreview(null)
+  }, [tools.hoverPreview, playing, hoverSec, setHoverPreview])
 
-  const hoverActive = tools.hoverPreview && hoverSec !== null
+  const hoverActive = tools.hoverPreview && !playing && hoverSec !== null
+  /** 预览与拆分都看黄线指的地方；黄线不在时才回到蓝线 */
+  const operateSec = hoverActive && hoverSec !== null ? hoverSec : displayTime
 
   /** 两轨都要画的导引线：吸附目标边缘（强调蓝）+ 预览轴（黄）。复用同一个元素实例。 */
   const guides = (
@@ -343,28 +346,34 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     >
       <div className="timeline__bar">
         <div className="row" style={{ gap: 6 }}>
-          <button type="button" className="btn btn--sm btn--primary" onClick={() => addClip()}>
-            {TEXT.timeline.addClip}
+          <button
+            type="button"
+            className="btn btn--sm btn--subtle"
+            disabled={undoDepth === 0}
+            title={TEXT.timeline.undoHint(undoDepth)}
+            onClick={undo}
+          >
+            <IconUndo size={13} />
+            {TEXT.timeline.undo}
           </button>
           <button
             type="button"
-            className="btn btn--sm"
-            disabled={!selectedClipId}
-            onClick={() => {
-              if (selectedClipId) removeClip(selectedClipId)
-            }}
+            className="btn btn--sm btn--subtle"
+            disabled={redoDepth === 0}
+            title={TEXT.timeline.redoHint(redoDepth)}
+            onClick={redo}
           >
-            {TEXT.timeline.removeClip}
+            <IconRedo size={13} />
+            {TEXT.timeline.redo}
           </button>
           <span className="timeline__divider" aria-hidden="true" />
+          {/* 不置灰：保持可点才能把「这里没有可拆/可删的段」说给用户听 */}
           <button
             type="button"
             className="btn btn--sm"
-            disabled={!canSplit}
             title={TEXT.timeline.splitHint}
             onClick={() => {
-              const rightId = splitAtFrame(displayTime)
-              if (!rightId) setNotice('播放头不在可拆分的媒体片段内，或拆出的半段不足最短时长')
+              if (!splitTargetAt(operateSec)) setNotice(TEXT.timeline.noSplitTarget)
             }}
           >
             {TEXT.timeline.splitClip}
@@ -372,22 +381,12 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
           <button
             type="button"
             className="btn btn--sm btn--danger"
-            disabled={!activeMediaTarget}
+            title={TEXT.timeline.removeTargetHint}
             onClick={() => {
-              if (activeMediaTarget) removeMediaClip(activeMediaTarget.id)
+              if (!removeTargetAt(displayTime)) setNotice(TEXT.timeline.noRemoveTarget)
             }}
           >
-            {TEXT.timeline.removeMediaClip}
-          </button>
-          <button
-            type="button"
-            className="btn btn--sm btn--danger"
-            disabled={!activeAudioTarget}
-            onClick={() => {
-              if (activeAudioTarget) removeAudioClip(activeAudioTarget.id)
-            }}
-          >
-            {TEXT.timeline.removeAudioClip}
+            {TEXT.timeline.removeTarget}
           </button>
           <button
             type="button"
@@ -494,19 +493,10 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             widthPx={widthPx}
             fps={project.fps}
             selected={clip.id === selectedMediaClipId}
-            onSelect={(id) => {
-              selectMediaClip(id)
-              // 选中后把播放头带进这一段：否则预览里根本没有这条画面，
-              // 右侧视频编辑器与画面交互层的手柄都无处可挂。
-              const target = project.mediaClips.find((item) => item.id === id)
-              if (target && (displayTime < target.timelineStartSec || displayTime >= target.timelineEndSec)) {
-                seekTo(target.timelineStartSec)
-              }
-            }}
+            onSelect={selectMediaClip}
             onMove={(start) => handleMediaMove(clip.id, start)}
             onTrim={(patch) => handleMediaTrim(clip.id, patch)}
             onCommit={commitMediaDrag}
-            onSeek={seekTo}
             layers={mediaLayers}
           />
         ))}
@@ -545,16 +535,9 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             fps={project.fps}
             selected={clip.id === selectedAudioClipId}
             layers={audioLayers}
-            onSelect={(id) => {
-              selectAudioClip(id)
-              const target = audioClips.find((item) => item.id === id)
-              if (target && (displayTime < target.timelineStartSec || displayTime >= target.timelineEndSec)) {
-                seekTo(target.timelineStartSec)
-              }
-            }}
+            onSelect={selectAudioClip}
             onMove={(start) => moveAudioClip(clip.id, start)}
             onTrim={(patch) => trimAudioClip(clip.id, patch)}
-            onSeek={seekTo}
           />
         ))}
         {dropSec !== null ? (

@@ -4,6 +4,8 @@ import {
   createClip,
   createDefaultProject,
   duplicateClip,
+  LEFT_TABS,
+  normalizeLeftTab,
   normalizeProject,
   validateClips
 } from '@shared/projectSchema'
@@ -379,5 +381,42 @@ describe('v9 音频与变速参数归一', () => {
     const clip = normalizeProject(audioDoc({ audio: { volumePercent: 100, fadeInSec: 0, fadeOutSec: 0 } }))!
       .audioClips![0] as unknown as Record<string, unknown>
     expect('audio' in clip).toBe(false)
+  })
+})
+
+/**
+ * P6：字幕与水印合并进左侧「包装」Tab。
+ * 旧工程里存的 `ui.leftTab` 可能是 'captions' 或 'watermark'，界面已经不再认识这两个值——
+ * 迁移必须在「读入工程」这一步做完，而不是留到 UI 里猜，否则恢复现场会落进一个空 Tab。
+ */
+describe('leftTab 归一化与旧值迁移（P6）', () => {
+  it('当前左侧 Tab 集合：素材库 / 包装 / 导出 / 进度（不再有独立的水印与字幕 Tab）', () => {
+    expect(LEFT_TABS).toEqual(['media', 'wrap', 'export', 'progress'])
+  })
+
+  it('旧工程的 captions 与 watermark 都落到 wrap', () => {
+    expect(normalizeLeftTab('captions')).toBe('wrap')
+    expect(normalizeLeftTab('watermark')).toBe('wrap')
+  })
+
+  it('认识的值原样返回；不认识或缺省返回 undefined（由调用方退回默认）', () => {
+    expect(normalizeLeftTab('export')).toBe('export')
+    expect(normalizeLeftTab('progress')).toBe('progress')
+    expect(normalizeLeftTab('bogus')).toBeUndefined()
+    expect(normalizeLeftTab(undefined)).toBeUndefined()
+  })
+
+  it('normalizeProject 只改 ui.leftTab，ui 里其它键一个不丢', () => {
+    const parsed = normalizeProject({
+      version: PROJECT_VERSION,
+      name: '包装迁移',
+      ui: { leftTab: 'captions', paneRatio: 0.4 }
+    })!
+    expect(parsed.ui).toEqual({ leftTab: 'wrap', paneRatio: 0.4 })
+  })
+
+  it('ui 里没有 leftTab 时不凭空补一个（冷启动默认由 uiStore 决定）', () => {
+    const parsed = normalizeProject({ version: PROJECT_VERSION, name: '只有别的 UI 键', ui: { paneRatio: 0.4 } })!
+    expect('leftTab' in (parsed.ui ?? {})).toBe(false)
   })
 })

@@ -92,16 +92,16 @@
 | 能力 | 实现 | 取证入口 / 状态 |
 |---|---|---|
 | 主进程批量导入 + 枚级缩略图协议 | `video:pickManyAndProbe`（多选逐文件探测，单文件失败不阻断整批）；`thumbProtocol.ts`：ffmpeg 抽帧落 `userData/thumbs/<mediaId>.jpg`，`focusnews-thumb://<mediaId>` 仅读已登记项；移出池回收文件 | `tests/ffmpegArgs.test.ts`（缩略图 argv 快照）；应用内启动路径随 `npm run verify:all` 门禁通过 |
-| 素材池/媒体轨 store 动作 | `projectStore`：addMedia/removeMedia/relocateMedia/ack 枚级、insert/move/trim/remove/splitAtFrame；时长恒等式 `timelineEnd-timelineStart === sourceOut-sourceIn` 唯一写入口 | `src/renderer/src/state/projectStore.test.ts`（13 例）+ `tests/mediaClips.test.ts`（纯函数：拆分/仅重叠右移/时间↔源换算） |
+| 素材池/媒体轨 store 动作 | `projectStore`：addMedia/removeMedia/relocateMedia/ack 枚级、insert/move/trim/remove、`splitTargetAt`/`removeTargetAt`/`removeSelected`（v10 P3：目标段由 `shared/timelineTargets` 统一解析）；时长恒等式 `timelineEnd-timelineStart === sourceOut-sourceIn` 唯一写入口 | `src/renderer/src/state/projectStore.test.ts` + `tests/mediaClips.test.ts`（纯函数：拆分/仅重叠右移/时间↔源换算）+ `tests/timelineTargets.test.ts`（目标解析与字幕/音频拆分） |
 | 旧工程迁移 | `normalizeProject` v1→v2：`refVideo` 折叠为 `media[0]` + 覆盖整段的 mediaClip，旧字段不回流 | `tests/projectSchema.test.ts`（迁移两组） |
-| 左侧 Tab 壳 + 素材库 | `App.tsx` rail__tabs（素材库/水印/字幕/导出/进度，同一时刻只展开一个；v4 后 5 个，窄侧栏里自动换行而不被裁切）；卡片拖拽携带 `application/x-focusnews-media` | `Timeline.test.tsx` v2 媒体轨 4 例 + `FOCUSNEWS_SHOT` 可出图 |
-| 水印（Watermark）模块 | 左侧新增「水印」Tab + `WatermarkPanel`：导入本机图片（`watermark:pick` 用 ffprobe 取原图宽高）、启用/停用/移除；`ffmpegArgs.computeWatermarkGeometry` 以 1080P 为基准（显示尺寸 = 原图 32%，距顶/左各 30px）按输出高度等比换算，四条合成路径统一作为**最后一层** overlay 叠在字幕条之上；预览用同一函数定位 `<img>`（不进 Canvas，透明出口永不烧录台标） | `tests/watermark.test.ts`（几何/argv/图片解析/持久化 20 例）+ `WatermarkPanel.test.tsx`（导入/开关/移除/读数 9 例）+ `tests/ffmpegPipeline.test.ts`（真机 FFmpeg 取像素判定：两阶段单输入 / trim+concat 拼接 / 直管道 3 例） |
-| 双轨时间轴 + 落点高亮 | 媒体轨/字幕轨共享尺规与播放头；拖拽悬停显示吸附落点竖线；拆分按钮 + `canSplitMediaClipAt` 纯谓词 | `Timeline.test.tsx`（拆分启用/禁用/选中/尺规跟随） |
+| 左侧 Tab 壳 + 素材库 | `App.tsx` rail__tabs 由 `shared` 的 `LEFT_TABS` 生成（v10 P6 后 4 个：素材库/包装/导出/进度，同一时刻只展开一个，窄侧栏里自动换行而不被裁切）；卡片拖拽携带 `application/x-focusnews-media` | `tests/projectSchema.test.ts`「leftTab 归一化」5 例 + `Timeline.test.tsx` v2 媒体轨 4 例 + `FOCUSNEWS_SHOT` 出图（`spikes/artifacts/ui-wrap-rail.png`） |
+| 水印（Watermark）模块 | `WatermarkPanel`（v10 P6 起在左侧「包装」Tab 内、字幕区下方）：导入本机图片（`watermark:pick` 用 ffprobe 取原图宽高）、启用/停用/移除；`ffmpegArgs.computeWatermarkGeometry` 以 1080P 为基准（显示尺寸 = 原图 32%，距顶/左各 30px）按输出高度等比换算，四条合成路径统一作为**最后一层** overlay 叠在字幕条之上；预览用同一函数定位 `<img>`（不进 Canvas，透明出口永不烧录台标） | `tests/watermark.test.ts`（几何/argv/图片解析/持久化 20 例）+ `WatermarkPanel.test.tsx`（导入/开关/移除/读数 9 例）+ `WrapPanel.test.tsx`（合并后仍在包装区内）+ `tests/ffmpegPipeline.test.ts`（真机 FFmpeg 取像素判定：两阶段单输入 / trim+concat 拼接 / 直管道 3 例） |
+| 双轨时间轴 + 落点高亮 | 媒体轨/字幕轨共享尺规与播放头；拖拽悬停显示吸附落点竖线；v10 P3：工具栏只留一个「拆分」与一个「删除」，作用于选中段（未选中退到播放头处媒体轨最下层），没有目标就给提示而不是置灰 | `Timeline.test.tsx`（拆分/删除目标解析、空隙提示、选中/尺规跟随） |
 | 预览按 mediaClip 切源 | `PreviewStage`：播放头落在哪段，`<video>` 就换那枚源文件，`currentTime` 按 `sourceTimeOf` 换算；段间空隙回棋盘格；无 mediaClips 时保留 v1 兼容 | 逐像素一致性（M1-7）仍走同一 `renderFrame`，本次重跑通过 |
-| Ctrl+B 剪切 | `App.tsx` keydown：输入控件内不拦；先暂停再 `splitAtFrame(displayTimeSec)`；Delete 删选中媒体段 | UI 快捷键（可人工验证）；拆分本体由 store 单测覆盖 |
+| Ctrl+B 剪切 | `App.tsx` keydown：输入控件内不拦；先暂停再 `splitTargetAt(displayTimeSec)`；Delete 走 `removeSelected()`（只删选中的段，不做播放头默认解析） | UI 快捷键（可人工验证）；拆分本体由 store 单测覆盖 |
 | 多输入 trim+concat 导出 | `ExportRequest.overlay.segments`（主进程按段 trim 后 concat，空隙补黑+静音；单段整段覆盖时回退旧单输入 argv 不变）；拼接路径音频强制 AAC 并提示 | `tests/ffmpegArgs.test.ts` v2 新增 5 例（滤镜链/两阶段/直管道 argv）；叠加冒烟（单段回退）仍通过 |
 | 素材完整性枚级看护 | `useMediaIntegrity` 遍历 MediaItem 池查存在性 → `missingMediaIds` 驱动卡片角标与叠加禁用；重新定位走生产导入路径 | 代码路径与 v1 同构（旧 `useRefVideoIntegrity` 删除）；`FOCUSNEWS_SHOT_REFMISSING` 取证保留 v1 兼容分支 |
-| leftTab 持久化 | `uiStore.leftTab` 为真值，`App.tsx` 分叉时补写 `project.ui.leftTab`，自动保存落盘、启动恢复 | `normalizeProject` 保留 `ui` 字段（往返单测覆盖） |
+| leftTab 持久化与旧值迁移 | `uiStore.leftTab` 为真值，`App.tsx` 分叉时补写 `project.ui.leftTab`，自动保存落盘、启动恢复；v10 P6：`normalizeLeftTab` 把旧工程的 `captions` / `watermark` 一律迁到 `wrap`，不认识的值丢弃（避免恢复出一个已经不存在的 Tab） | `tests/projectSchema.test.ts`「leftTab 归一化与旧值迁移」5 例；隔离 profile 写入 `leftTab: "captions"` 冷启动后落在「包装」（`spikes/artifacts/ui-wrap-tab.png`） |
 
 ## 主界面伸缩布局（v3）的机器化验收
 
@@ -243,6 +243,20 @@
 - 频谱条是**幅度包络**（等分时间桶峰值），不是频域分析；主进程侧是会话内存 LRU（240 键）+ 并发闸门，不落盘也不写进工程。
 - 预览出声只在「播放中 + 有音轨」时打开；浏览器自动播放策略可能拒绝 AudioContext，此时 >100% 增益在预览里听不到（导出仍按 `volume` 生效）。
 - 与 v7 同一限制：`verify:all` 的应用内冒烟工程不放媒体/音频段，因此频谱条「屏幕上的像素」不在自动化门禁里（它由 jsdom 结构断言 + 真机折桶数据两层锁定）；面板滑杆→预览→导出的逐环同步已由上述 argv/包络单测接上。
+
+## 撤销历史与交互统一（v10，P1–P6）的机器化验收
+
+背景：本轮把「新建/删除片段」从时间轴工具栏收回左侧列表、把拆分/删除改成按选中段解析、把预览轴改成真正的画面预览、把点段落从「选中+跳转」拆成「只选中」，并把水印与字幕合并成「包装」。删掉二次确认的前提是**有撤销**，所以先补了一个历史子系统。
+
+| 验收项 | 实现口径 | 机器化证据 |
+|---|---|---|
+| P1 撤销/重做 | `state/projectHistory.ts`：订阅 `projectStore`，命边界（任一段数变 / 选中变 / 距上一步 >500ms）才压快照；上限 100 步、新编辑清空重做栈、`loadProject` 清空；比较与恢复忽略 `ui`（leftTab）与 `media[].thumbnailUrl`（派生缓存），恢复时从活态带回；Ctrl+Z / Ctrl+Shift+Z（输入控件内不接管）+ 工具栏两个按钮（无可撤销时置灰） | `state/projectHistory.test.ts`（边界合成、100 步丢最旧、volatile 过滤、载入清空）+ `hooks/useEditKeys.test.tsx`（快捷键与输入框豁免）+ `Timeline.test.tsx`「时间轴工具栏：撤销 / 重做」3 例 |
+| P2 字幕 Tab 为唯一入口 | `CaptionListPanel`：0 条时整块大虚线加号，≥1 条时列表末尾矮加号条；每张卡片常驻 16px SVG 垃圾桶（`stopPropagation`，不触发选中）；点卡片 = 选中 + 播放头跳到**区间中点**（先暂停）；时间轴工具栏的「新建片段」「删除片段」已移除 | `CaptionListPanel.test.tsx` 13 例（空态/尾部入口、删除不选中、跳中点、无 seekHandler 不抛）+ `Timeline.test.tsx`（工具栏不再有这两个入口）+ `FOCUSNEWS_SHOT=spikes/artifacts/ui-wrap-rail.png` |
+| P3 拆分/删除按选中段解析 | `shared/timelineTargets.ts` 统一解析目标：选中哪类就作用于哪类（字幕/媒体/音频），未选中时退到**播放头处媒体轨最下层**（layer 号最大），都没有则不改工程只给提示；字幕拆分两段共用文字与样式、入出点切开 | `tests/timelineTargets.test.ts` + `projectStore.test.ts`（`splitTargetAt`/`removeTargetAt`/`removeSelected`）+ `Timeline.test.tsx`（三轨目标、空隙提示不置灰） |
+| P4 预览轴接管画面 | 悬停帧存 `uiStore.hoverPreviewSec`（null = 无悬停/播放中）；`PreviewStage` 与 `usePreviewLoop` 用 `previewFrame.choosePreviewFrame` 决定画哪一帧，而 `displayTimeSec`（蓝线、时间码、拆分参照）一律不动；播放时临时禁用、鼠标离开即回落；黄线在场时拆分以黄线为准 | `render/previewFrame.test.ts` + `uiStore.test.ts`（同帧不产生新 state）+ `Timeline.test.tsx`（悬停写入/离开清空/播放中禁用/拆分以黄线为准） |
+| P5 点段落只选中 | 媒体/音频/字幕卡片一律只 `onSelect`，不再 seek；`isStripTap` 与卡片点击跳转整体删除；跳转入口只留轨道空白处与尺规；编辑器顶部给「定位到这一段」（播放头在段外才出现，点击先暂停再跳到中点） | `Timeline.test.tsx`「点段落只选中不跳转」3 例 + `MediaClipCard.test.tsx`（点一格不再跳转）+ `ClipLocateButton.test.tsx` + 三个编辑器的「定位到这一段」用例 |
+| P6 「包装」Tab | `LEFT_TABS`（media/wrap/export/progress）为唯一清单；`WrapPanel` 自上而下 = 字幕（`CaptionListPanel`）/ 片尾（占位，无任何可点入口）/ 水印（`WatermarkPanel`）；`normalizeLeftTab` 把旧工程的 `captions`/`watermark` 迁到 `wrap` | `WrapPanel.test.tsx` 5 例（顺序、字幕区入口、水印区、片尾无入口）+ `tests/projectSchema.test.ts`「leftTab 归一化与旧值迁移」5 例 + 隔离 profile 写入 `leftTab:"captions"` 冷启动落在「包装」（`spikes/artifacts/ui-wrap-tab.png`） |
+| 零回归 | `npm run verify`（check:env + lint + typecheck×3 + vitest）全绿 | 774 例 / 56 文件通过（v9 为 666） |
 
 ## 播放键盘（空格 / 方向键逐帧）的机器化验收
 

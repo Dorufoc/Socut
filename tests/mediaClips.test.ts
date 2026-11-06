@@ -4,7 +4,6 @@ import { FPS_30 } from '@shared/constants'
 import { snapTimeToFrame } from '@shared/fps'
 import {
   alignAfterOverlap,
-  canSplitMediaClipAt,
   compactMediaClips,
   findActiveMediaClip,
   mediaClipsOverlap,
@@ -132,18 +131,14 @@ describe('mediaClips 边界常量', () => {
   })
 })
 
-describe('mediaClips.canSplitMediaClipAt（UI 按钮态谓词）', () => {
-  it('与 splitMediaClipAt 同口径：段内可拆、空隙/贴边不可拆', () => {
+describe('mediaClips 拆分判据（UI 按钮态的唯一依据）', () => {
+  it('切点贴边（两半不足最短）与落在段外都拆不开', () => {
     const tracks = [clip({ id: 'a', timelineStartSec: 1, timelineEndSec: 5 })]
-    expect(canSplitMediaClipAt(tracks, 3, FPS_30)).toBe(true)
-    // 切点贴边（两半不足最短）与落在段外：谓词与拆分函数给出一致结果
-    expect(canSplitMediaClipAt(tracks, 1 + MIN_MEDIA_CLIP_SEC / 2, FPS_30)).toBe(false)
-    expect(canSplitMediaClipAt(tracks, 5 - MIN_MEDIA_CLIP_SEC / 2, FPS_30)).toBe(false)
-    expect(canSplitMediaClipAt(tracks, 8, FPS_30)).toBe(false)
-    expect(canSplitMediaClipAt([], 3, FPS_30)).toBe(false)
-    // 谓词结论与实际拆分结果一致
+
     expect(splitMediaClipAt(tracks[0]!, 3, FPS_30, newId)).not.toBeNull()
     expect(splitMediaClipAt(tracks[0]!, 1 + MIN_MEDIA_CLIP_SEC / 2, FPS_30, newId)).toBeNull()
+    expect(splitMediaClipAt(tracks[0]!, 5 - MIN_MEDIA_CLIP_SEC / 2, FPS_30, newId)).toBeNull()
+    expect(splitMediaClipAt(tracks[0]!, 8, FPS_30, newId)).toBeNull()
   })
 })
 

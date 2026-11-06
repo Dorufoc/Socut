@@ -25,7 +25,6 @@ export interface AudioClipCardProps {
   onSelect: (id: string) => void
   onMove: (timelineStartSec: number) => void
   onTrim: (patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
-  onSeek: (timelineSec: number) => void
   onCommit?: () => void
 }
 
@@ -49,7 +48,6 @@ export function AudioClipCard({
   onSelect,
   onMove,
   onTrim,
-  onSeek,
   onCommit
 }: AudioClipCardProps): ReactElement {
   const dragRef = useRef<DragState | null>(null)
@@ -90,9 +88,8 @@ export function AudioClipCard({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
+    // 拖拽收尾：点段落不再顺手把播放头带过来（P5），只管选中与拖拽
     onCommit?.()
-    // 几乎没位移 = 单击：把播放头带到这一段
-    if (drag.edge === 'move' && Math.abs(event.clientX - drag.pointerX) <= 3) onSeek(clip.timelineStartSec)
   }
 
   return (

@@ -28,9 +28,6 @@ export const STRIP_FRAMES_MAX = STRIP_FRAME_STEPS[STRIP_FRAME_STEPS.length - 1] 
 /** 拼接图里每帧的像素宽：与轨道高度无关，按比例缩小即可（不需要保持原始比例，能辨认内容就行）。 */
 export const STRIP_FRAME_WIDTH_PX = 128
 
-/** 点击判定：位移不超过这个像素才算「点一格跳转」，超过就是拖拽入出点/整段平移。 */
-export const STRIP_CLICK_SLOP_PX = 3
-
 /** 主进程磁盘缓存目录（userData/thumbs/strips）里保留的最多文件数，超出按 mtime 淘汰。 */
 export const STRIP_CACHE_MAX_FILES = 240
 
@@ -116,11 +113,6 @@ export function stripTimeAtFraction(input: StripTimeInput): { sourceSec: number;
     sourceSec: snapTimeToFrame(input.sourceInSec + span * fraction, input.fps),
     timelineSec: snapTimeToFrame(input.timelineStartSec + span * fraction, input.fps)
   }
-}
-
-/** 位移是否小到可以当作「点一格跳转」（而不是拖拽）。 */
-export function isStripTap(deltaPx: number): boolean {
-  return Math.abs(deltaPx) <= STRIP_CLICK_SLOP_PX
 }
 
 /** 预览条状态：failed 时卡片显示占位符与「无法预览」，不再重复请求同一键。 */

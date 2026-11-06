@@ -2,11 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { FPS_23_976, FPS_30 } from '@shared/constants'
 import { snapTimeToFrame } from '@shared/fps'
 import {
-  STRIP_CLICK_SLOP_PX,
   STRIP_FRAMES_MAX,
   STRIP_FRAMES_MIN,
   STRIP_TARGET_PX_PER_FRAME,
-  isStripTap,
   stripCacheKey,
   stripDurationSec,
   stripFallbackLabel,
@@ -117,16 +115,7 @@ describe('指针位置 → 时间（stripTimeAtFraction）', () => {
   })
 })
 
-describe('点击判定与占位文案', () => {
-  it('位移不超过阈值才算「点一格跳转」，超过就是拖拽', () => {
-    expect(STRIP_CLICK_SLOP_PX).toBe(3)
-    expect(isStripTap(0)).toBe(true)
-    expect(isStripTap(3)).toBe(true)
-    expect(isStripTap(-3)).toBe(true)
-    expect(isStripTap(4)).toBe(false)
-    expect(isStripTap(Number.NaN)).toBe(false)
-  })
-
+describe('占位文案', () => {
   it('三态分开且都是短词：素材已移出 > 生成中 > 无法预览 > 待生成', () => {
     expect(stripFallbackLabel({ mediaMissing: true, status: 'failed' })).toBe('素材已移出')
     expect(stripFallbackLabel({ mediaMissing: false, status: 'loading' })).toBe('生成中…')

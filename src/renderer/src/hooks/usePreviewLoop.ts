@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, type RefObject } from 'react'
-import { frameIntervalSec, frameTimeSec, timeToFrameFloor } from '@shared/fps'
+import { frameIntervalSec, frameTimeSec } from '@shared/fps'
 import type { RenderJobSpec } from '@shared/types'
 import { NativeStage } from '../render/stage'
+import { choosePreviewFrame } from '../render/previewFrame'
 
 /**
  * 预览循环（规格 §4.3 / §11 纪律 6）。
@@ -16,6 +17,11 @@ export interface PreviewArgs {
   showSafeArea: boolean
   /** 有参考视频垫底时不再画棋盘格：让 Canvas 透明，视频从下层透出来 */
   transparent?: boolean
+  /**
+   * P4：预览轴的悬停帧（相对工程起点的秒）。非空时**只换画哪一帧**，
+   * 不回写 `onDisplayTime`，所以时间轴蓝线、时间码、逐帧跳转的基准全部留在原地。
+   */
+  overrideSec?: number | null
   /** UI 时间文本节流回调（不进高频 store） */
   onDisplayTime?: (sec: number) => void
 }
@@ -36,6 +42,7 @@ export function usePreviewLoop(args: PreviewArgs): PreviewHandle {
   const safeRef = useRef(args.showSafeArea)
   // rAF 循环只建立一次：透明垫底态必须进 ref，否则取到的是首次渲染的旧值
   const transparentRef = useRef(args.transparent === true)
+  const overrideRef = useRef<number | null>(args.overrideSec ?? null)
   const elapsedSecRef = useRef(0)
   const dirtyRef = useRef(true)
   const lastTsRef = useRef(0)
@@ -46,12 +53,13 @@ export function usePreviewLoop(args: PreviewArgs): PreviewHandle {
   playingRef.current = args.playing
   safeRef.current = args.showSafeArea
   transparentRef.current = args.transparent === true
+  overrideRef.current = args.overrideSec ?? null
   onDisplayRef.current = args.onDisplayTime
 
-  // 规格 / 内容 / 安全区 / 参考视频垫底变化：重画一帧
+  // 规格 / 内容 / 安全区 / 参考视频垫底 / 悬停帧变化：重画一帧
   useEffect(() => {
     dirtyRef.current = true
-  }, [args.spec, args.showSafeArea, args.transparent])
+  }, [args.spec, args.showSafeArea, args.transparent, args.overrideSec])
 
   const totalFrames = args.spec ? Math.max(0, args.spec.endFrame - args.spec.startFrame) : 0
 
@@ -80,16 +88,20 @@ export function usePreviewLoop(args: PreviewArgs): PreviewHandle {
             stage = new NativeStage(spec.width, spec.height)
             stageRef.current = stage
           }
-          const frame = Math.min(
-            framesTotal - 1,
-            Math.max(0, timeToFrameFloor(elapsedSecRef.current, spec.fps))
-          )
-          stage.render(spec, spec.startFrame + Math.max(0, frame), { safeArea: safeRef.current })
+          const choice = choosePreviewFrame({
+            elapsedSec: elapsedSecRef.current,
+            overrideSec: overrideRef.current,
+            fps: spec.fps,
+            startFrame: spec.startFrame,
+            endFrame: spec.endFrame
+          })
+          stage.render(spec, choice.frame, { safeArea: safeRef.current })
           stage.blitTo(canvas, { transparent: transparentRef.current })
           dirtyRef.current = false
-          if (ts - lastDisplayRef.current > DISPLAY_TICK_MS) {
+          // 悬停接管期间不回写：蓝线与时间码必须留在播放头上
+          if (choice.reportDisplay && ts - lastDisplayRef.current > DISPLAY_TICK_MS) {
             lastDisplayRef.current = ts
-            onDisplayRef.current?.(frameTimeSec(spec.startFrame + Math.max(0, frame), spec.fps))
+            onDisplayRef.current?.(frameTimeSec(choice.frame, spec.fps))
           }
         }
       }
@@ -118,12 +130,14 @@ export function usePreviewLoop(args: PreviewArgs): PreviewHandle {
   const currentFrame = useCallback((): number => {
     const spec = specRef.current
     if (!spec) return 0
-    const framesTotal = Math.max(1, spec.endFrame - spec.startFrame)
-    const local = Math.min(
-      framesTotal - 1,
-      Math.max(0, timeToFrameFloor(elapsedSecRef.current, spec.fps))
-    )
-    return spec.startFrame + Math.max(0, local)
+    // 逐帧跳转的基准始终是播放头自己（overrideSec 传 null），不受悬停影响
+    return choosePreviewFrame({
+      elapsedSec: elapsedSecRef.current,
+      overrideSec: null,
+      fps: spec.fps,
+      startFrame: spec.startFrame,
+      endFrame: spec.endFrame
+    }).frame
   }, [])
 
   const seekTime = useCallback((sec: number): void => {

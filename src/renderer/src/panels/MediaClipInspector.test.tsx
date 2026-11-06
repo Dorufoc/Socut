@@ -604,3 +604,45 @@ describe('防抖预览代理按钮（v8.1）', () => {
     await waitFor(() => expect(api.stabPreviewRemove).toHaveBeenCalledWith(mediaClipId))
   })
 })
+
+/**
+ * P5：时间轴上点媒体段现在只选中、不再顺手把播放头带过来，
+ * 所以画面编辑器必须给一个明确的「把画面带到这一段」入口，
+ * 否则用户改的缩放/防抖在预览里根本看不见。
+ */
+describe('视频编辑器 · 定位到这一段（P5）', () => {
+  it('播放头在本段之外时出现，点一下跳到该段中点', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    const seek = vi.fn()
+    act(() => useUiStore.setState({ displayTimeSec: 20, seekHandler: seek }))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.inspector.locate }))
+
+    // 本段 0→8s
+    expect(seek).toHaveBeenCalledWith(4)
+  })
+
+  it('播放头已在本段区间内：不出现', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    act(() => useUiStore.setState({ displayTimeSec: 3, seekHandler: vi.fn() }))
+    render(<ClipInspector />)
+
+    expect(screen.queryByRole('button', { name: TEXT.inspector.locate })).toBeNull()
+  })
+
+  it('播放中点定位：先接管时钟再跳，否则跳过去立刻被带走', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    const seek = vi.fn()
+    act(() => useUiStore.setState({ displayTimeSec: 20, playing: true, seekHandler: seek }))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.inspector.locate }))
+
+    expect(useUiStore.getState().playing).toBe(false)
+    expect(seek).toHaveBeenCalledWith(4)
+  })
+})

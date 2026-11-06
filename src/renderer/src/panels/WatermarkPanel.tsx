@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
 import { WATERMARK_BASE_RESOLUTION, WATERMARK_DISPLAY_SCALE, WATERMARK_MARGIN_PX } from '@shared/constants'
 import { computeWatermarkGeometry } from '@shared/ffmpegArgs'
+import { TEXT } from '@shared/i18n'
 import type { WatermarkSettings } from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
@@ -92,7 +93,7 @@ export function WatermarkPanel(): ReactElement {
   return (
     <section className="group">
       <div className="group__head">
-        <span className="group__title">水印</span>
+        <span className="group__title">{TEXT.wrap.watermark}</span>
         <span className={`chip${settings?.enabled ? ' chip--ok' : settings ? ' chip--warn' : ''}`}>
           {settings ? (settings.enabled ? '已启用' : '已停用') : '未导入'}
         </span>

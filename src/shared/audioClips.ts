@@ -163,3 +163,30 @@ export function applyAudioClipSpeed(clip: AudioClip, speed: ClipSpeed | undefine
   else delete next.speed
   return next
 }
+
+export interface AudioClipSplitResult {
+  left: AudioClip
+  right: AudioClip
+}
+
+/**
+ * 在 `atSec`（自动吸附帧边界）处把一段音频切成两段（P3：工具栏拆分对音频段也生效）。
+ *
+ * 与媒体段同一口径：切点往源上投影时要乘上倍速（变速段 1s 时间轴吃掉 `speed` 秒源内容），
+ * 音量/渐变/变速原样带到两半。任一半不足最短音频时长 → null。
+ */
+export function splitAudioClipAt(
+  clip: AudioClip,
+  atSec: number,
+  fps: Fps,
+  newId: (source: AudioClip) => string
+): AudioClipSplitResult | null {
+  const cut = snapTimeToFrame(atSec, fps)
+  if (cut <= clip.timelineStartSec + MIN_AUDIO_CLIP_SEC - 1e-9) return null
+  if (cut >= clip.timelineEndSec - MIN_AUDIO_CLIP_SEC + 1e-9) return null
+  const speed = speedValueOf(clip.speed)
+  const cutSourceSec = snapTimeToFrame(clip.sourceInSec + (cut - clip.timelineStartSec) * speed, fps)
+  const left: AudioClip = { ...clip, timelineEndSec: cut, sourceOutSec: cutSourceSec }
+  const right: AudioClip = { ...clip, id: newId(clip), timelineStartSec: cut, sourceInSec: cutSourceSec }
+  return { left, right }
+}

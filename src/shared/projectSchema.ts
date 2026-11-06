@@ -32,6 +32,7 @@ import type {
   FontRecord,
   Fps,
   GradientSpec,
+  LeftTabValue,
   MediaClip,
   MediaItem,
   PresetId,
@@ -55,6 +56,28 @@ import type {
 
 export const PROJECT_FILE_EXTENSION = 'focusnews.json'
 export { AUTOSAVE_FILE }
+
+/**
+ * 左侧栏 Tab 清单（P6）：素材库 / 包装 / 导出 / 进度。
+ * 「包装」把原来的字幕与水印两栏合并，旧工程里的 'captions' / 'watermark'
+ * 在读入时一律迁到 'wrap'（见 normalizeLeftTab）。
+ */
+export const LEFT_TABS = ['media', 'wrap', 'export', 'progress'] as const
+
+/** 旧版 Tab 值 → 现在的位置；只为兼容旧工程，写新值时不要再产出它们。 */
+const LEGACY_LEFT_TABS: Record<string, LeftTabValue> = { captions: 'wrap', watermark: 'wrap' }
+
+/**
+ * 把任意读到的 leftTab 归一成当前认识的值：
+ * 旧值迁到新位置，不认识的值返回 undefined（由调用方退回默认），
+ * 防止旧工程把一个界面已经不存在的 Tab 恢复出来变成空面板。
+ */
+export function normalizeLeftTab(value: unknown): LeftTabValue | undefined {
+  if (typeof value !== 'string') return undefined
+  const legacy = LEGACY_LEFT_TABS[value]
+  if (legacy) return legacy
+  return (LEFT_TABS as readonly string[]).includes(value) ? (value as LeftTabValue) : undefined
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -403,6 +426,16 @@ function normalizeFontRecord(value: unknown): FontRecord | null {
   }
 }
 
+/**
+ * 归一 ui 快照（P6）：只校验 leftTab，其余键（面板比例等）原样带走。
+ * 没有 leftTab 就不补——冷启动默认由 uiStore 决定，这里不该替它拍板。
+ */
+function normalizeUi(raw: Record<string, unknown>): NonNullable<Project['ui']> {
+  const { leftTab: rawLeftTab, ...rest } = raw
+  const leftTab = normalizeLeftTab(rawLeftTab)
+  return leftTab ? { ...rest, leftTab } : rest
+}
+
 /** 把未知 JSON 归一为 Project；结构完全不可用时返回 null。 */
 export function normalizeProject(raw: unknown): Project | null {
   if (!isRecord(raw)) return null
@@ -437,7 +470,7 @@ export function normalizeProject(raw: unknown): Project | null {
     .map((item) => normalizeAudioClip(item, fps, mediaIds))
     .filter((item): item is AudioClip => item !== null)
     .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
-  const ui = isRecord(migrated['ui']) ? (migrated['ui'] as Project['ui']) : undefined
+  const ui = isRecord(migrated['ui']) ? normalizeUi(migrated['ui']) : undefined
   const watermark = normalizeWatermark(migrated['watermark'])
   return {
     version: PROJECT_VERSION,
@@ -612,6 +645,47 @@ export function duplicateClip(clip: SubtitleClip, fps: Fps): SubtitleClip {
     content: { ...clip.content },
     animation: cloneAnimation(clip.animation)
   }
+}
+
+export interface SubtitleSplitResult {
+  /** 左半段：入点不变，出点落在切分帧 */
+  left: SubtitleClip
+  /** 右半段：入点从切分帧起，出点沿用原段 */
+  right: SubtitleClip
+}
+
+/**
+ * 在 `atSec`（自动吸附帧边界）处把一条字幕条切成两段（P3：工具栏拆分对字幕条也生效）。
+ *
+ * 拆分只改时间：文字、预设、自定义样式、字体、动画全部原样带到两半，
+ * 而且都是**独立副本**——否则改右半边的标题会连着改左半边。
+ * 切点不在本条区间内，或任一半不足最短时长 → null（与媒体段同一套判据）。
+ */
+export function splitSubtitleClipAt(
+  clip: SubtitleClip,
+  atSec: number,
+  fps: Fps,
+  newId: (source: SubtitleClip) => string
+): SubtitleSplitResult | null {
+  const cut = snapTimeToFrame(atSec, fps)
+  if (cut <= clip.startTime + MIN_CLIP_DURATION_SEC - 1e-9) return null
+  if (cut >= clip.endTime - MIN_CLIP_DURATION_SEC + 1e-9) return null
+  const left: SubtitleClip = {
+    ...clip,
+    endTime: cut,
+    styleOverrides: cloneStyleOverrides(clip.styleOverrides),
+    content: { ...clip.content },
+    animation: cloneAnimation(clip.animation)
+  }
+  const right: SubtitleClip = {
+    ...clip,
+    id: newId(clip),
+    startTime: cut,
+    styleOverrides: cloneStyleOverrides(clip.styleOverrides),
+    content: { ...clip.content },
+    animation: cloneAnimation(clip.animation)
+  }
+  return { left, right }
 }
 
 /** 片段是否落在给定帧区间内（导出 span 过滤用）。 */

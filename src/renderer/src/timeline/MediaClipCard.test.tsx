@@ -142,7 +142,6 @@ function makeProps(overrides: Partial<MediaClipCardProps> = {}): MediaClipCardPr
     onSelect: vi.fn(),
     onMove: vi.fn(),
     onTrim: vi.fn(),
-    onSeek: vi.fn(),
     ...overrides
   }
 }
@@ -230,7 +229,7 @@ describe('MediaClipCard 时间帧预览条', () => {
     expect(hint.className).toContain('media-clip-card__hint--visible')
   })
 
-  it('点一格即跳转：选中该段并把播放头 seek 到对应帧', async () => {
+  it('点一格只选中：不再顺手跳转（跳转留给轨道空白处、尺规与「定位到这一段」）', async () => {
     const props = makeProps()
     const card = await renderCard(props)
 
@@ -238,12 +237,11 @@ describe('MediaClipCard 时间帧预览条', () => {
     fireEvent.pointerUp(card, pointer(300))
 
     expect(props.onSelect).toHaveBeenCalledWith(clip.id)
-    // 300/400 = 0.75 → 时间轴 2 + 6×0.75 = 6.5s
-    expect(props.onSeek).toHaveBeenCalledWith(6.5)
     expect(props.onMove).not.toHaveBeenCalled()
+    expect(props.onTrim).not.toHaveBeenCalled()
   })
 
-  it('拖拽平移仍然优先：有位移时只 onMove，不跳转', async () => {
+  it('拖拽平移：只 onMove，不动区间', async () => {
     const props = makeProps()
     const card = await renderCard(props)
 
@@ -252,10 +250,9 @@ describe('MediaClipCard 时间帧预览条', () => {
     fireEvent.pointerUp(card, pointer(260))
 
     expect(props.onMove).toHaveBeenCalled()
-    expect(props.onSeek).not.toHaveBeenCalled()
   })
 
-  it('拖入点手柄：只调区间，既不平移也不跳转', async () => {
+  it('拖入点手柄：只调区间，不平移', async () => {
     const props = makeProps()
     const card = await renderCard(props)
     const handle = card.querySelector('.media-clip-card__handle--left') as HTMLElement
@@ -266,10 +263,9 @@ describe('MediaClipCard 时间帧预览条', () => {
 
     expect(props.onTrim).toHaveBeenCalled()
     expect(props.onMove).not.toHaveBeenCalled()
-    expect(props.onSeek).not.toHaveBeenCalled()
   })
 
-  it('手柄上「点一下」也不会误触跳转（抬起时拖拽状态已被手柄清掉）', async () => {
+  it('手柄上「点一下」不改区间（抬起时拖拽状态已被手柄清掉），也不选中之外的任何段', async () => {
     const props = makeProps()
     const card = await renderCard(props)
     const handle = card.querySelector('.media-clip-card__handle--right') as HTMLElement
@@ -277,7 +273,10 @@ describe('MediaClipCard 时间帧预览条', () => {
     fireEvent.pointerDown(handle, pointer(398))
     fireEvent.pointerUp(handle, pointer(398))
 
-    expect(props.onSeek).not.toHaveBeenCalled()
+    expect(props.onTrim).not.toHaveBeenCalled()
+    expect(props.onMove).not.toHaveBeenCalled()
+    // 手柄也是段落的一部分：点它同样只把选中交给上层
+    expect(props.onSelect).toHaveBeenCalledWith(clip.id)
   })
 
   it('卡片加宽但没跨密度档时不重复抽帧（逐像素拖宽不会连环请求）', async () => {

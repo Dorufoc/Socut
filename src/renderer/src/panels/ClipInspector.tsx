@@ -15,6 +15,7 @@ import { FontPanel } from './FontPanel'
 import { AnimationPanel } from './AnimationPanel'
 import { MediaClipInspector } from './MediaClipInspector'
 import { AudioClipInspector } from './AudioClipInspector'
+import { ClipLocateButton } from './ClipLocateButton'
 import type { AudioClip } from '@shared/types'
 
 /** 稳定的空音频轨引用（避免选择器每次返回新数组） */
@@ -51,7 +52,12 @@ export function ClipInspector(): ReactElement {
     const ordered = [...audioClips].sort((a, b) => a.timelineStartSec - b.timelineStartSec)
     const index = ordered.findIndex((item) => item.id === clip.id) + 1
     const name = mediaPool.find((item) => item.id === clip.mediaId)?.name ?? null
-    return <AudioClipInspector clip={clip} mediaName={name} index={index} total={ordered.length} fps={fps} />
+    return (
+      <>
+        <ClipLocateButton startSec={clip.timelineStartSec} endSec={clip.timelineEndSec} />
+        <AudioClipInspector clip={clip} mediaName={name} index={index} total={ordered.length} fps={fps} />
+      </>
+    )
   }
 
   if (selectionKind !== 'media') return <SubtitleClipInspector />
@@ -70,7 +76,12 @@ export function ClipInspector(): ReactElement {
   const index = ordered.findIndex((item) => item.id === clip.id) + 1
   const name = mediaPool.find((item) => item.id === clip.mediaId)?.name ?? null
 
-  return <MediaClipInspector clip={clip} mediaName={name} index={index} total={ordered.length} fps={fps} />
+  return (
+    <>
+      <ClipLocateButton startSec={clip.timelineStartSec} endSec={clip.timelineEndSec} />
+      <MediaClipInspector clip={clip} mediaName={name} index={index} total={ordered.length} fps={fps} />
+    </>
+  )
 }
 
 /**
@@ -166,6 +177,8 @@ function SubtitleClipInspector(): ReactElement {
           <p className="inspector__empty">{TEXT.inspector.noneSelectedHint}</p>
         )}
       </section>
+
+      {clip ? <ClipLocateButton startSec={clip.startTime} endSec={clip.endTime} /> : null}
 
       <TextPanel />
       <PresetPicker />

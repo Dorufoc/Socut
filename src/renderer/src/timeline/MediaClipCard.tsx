@@ -1,7 +1,7 @@
 import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react'
 import { MIN_MEDIA_CLIP_SEC } from '@shared/constants'
 import { snapTimeToFrame } from '@shared/fps'
-import { isStripTap, stripTimeAtFraction, stripFallbackLabel } from '@shared/mediaStrip'
+import { stripTimeAtFraction, stripFallbackLabel } from '@shared/mediaStrip'
 import { clipTimelineDurationSec } from '@shared/mediaClipAudio'
 import { spectrumBarHeights } from '@shared/audioPeaks'
 import { secondsToTimecode } from '@shared/timecode'
@@ -21,9 +21,10 @@ import { useSpectrumLive } from './useSpectrumLive'
  * 预览条（Thumbnail Strip）：
  * - 卡片底图换成主进程一次抽帧拼好的**长图**（横向无缝，覆盖整个源区间），
  *   由 CSS 拉满卡片宽度 → 每格覆盖的时间 = 片段时长 / 格数；
- * - 悬停显示指针处的时间读数（源坐标），点击该处即 seek 到对应的时间轴帧；
- * - **不影响原有交互**：拖拽判定仍是 pointerdown/pointermove/pointerup 那一条路径，
- *   只有「按下与抬起之间几乎没移动」（≤ STRIP_CLICK_SLOP_PX）才当作"点一格"，
+ * - 悬停显示指针处的时间读数（源坐标）；**读数只说明位置，点上去不跳转**（P5）：
+ *   段落上的点击一律只管选中，要过去时在右侧编辑器点「定位到这一段」，
+ *   跳转入口只留给轨道空白处与尺规；
+ * - 拖拽判定仍是 pointerdown/pointermove/pointerup 那一条路径，
  *   拖入出点、整段平移、手柄区域的行为与之前完全一致；
  * - 读数与位置用**命令式**更新（不走 React 状态），指针移动不会逐帧重渲染整条时间轴。
  *
@@ -44,8 +45,6 @@ export interface MediaClipCardProps {
   onSelect: (id: string) => void
   onMove: (timelineStartSec: number) => void
   onTrim: (patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
-  /** 点击预览条某处：seek 到该时间轴位置（吸附到帧边界后交给上层） */
-  onSeek: (timelineSec: number) => void
   /** 一次拖拽结束时回调（上层用它做「主轨对齐」重排；不传则什么都不做） */
   onCommit?: () => void
   /** v7：本条轨道的叠放层数（>1 时按层号切分高度，叠层可见） */
@@ -71,7 +70,6 @@ export function MediaClipCard({
   onSelect,
   onMove,
   onTrim,
-  onSeek,
   onCommit,
   layers = 1
 }: MediaClipCardProps): ReactElement {
@@ -164,12 +162,8 @@ export function MediaClipCard({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
-    // 拖拽收尾：先让上层把「主轨对齐」重排跑完，再判是否算一次点击
+    // 拖拽收尾：让上层把「主轨对齐」重排跑完。点一格不再顺手跳转（P5）
     onCommit?.()
-    // 只有「整段那一按」且几乎没位移，才当作点一格跳转；手柄区域走不到这里
-    if (drag.edge !== 'move' || !isStripTap(event.clientX - drag.pointerX)) return
-    const at = timeAt(event.clientX)
-    if (at) onSeek(at.timelineSec)
   }
 
   const stripReady = strip.status === 'ready' && strip.url !== null

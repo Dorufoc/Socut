@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { FPS_30 } from '@shared/constants'
@@ -205,6 +205,40 @@ describe('ClipInspector（右侧当前字幕条）', () => {
     seed(1)
     render(<ClipInspector />)
     expect(screen.queryByRole('button', { name: /恢复预设默认/ })).toBeNull()
+  })
+})
+
+describe('ClipInspector · 定位到这一段（P5）', () => {
+  it('播放头在这条字幕之外时给出入口，点一下跳到区间中点', () => {
+    const project = seed(3)
+    const target = project.clips[1]!
+    useProjectStore.getState().selectClip(target.id)
+    const seek = vi.fn()
+    act(() => useUiStore.setState({ displayTimeSec: 20, seekHandler: seek }))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.inspector.locate }))
+
+    expect(seek).toHaveBeenCalledWith((target.startTime + target.endTime) / 2)
+  })
+
+  it('播放头已经在区间里：不给这个按钮（没什么可定位的）', () => {
+    const project = seed(2)
+    const target = project.clips[0]!
+    useProjectStore.getState().selectClip(target.id)
+    act(() => useUiStore.setState({ displayTimeSec: (target.startTime + target.endTime) / 2, seekHandler: vi.fn() }))
+    render(<ClipInspector />)
+
+    expect(screen.queryByRole('button', { name: TEXT.inspector.locate })).toBeNull()
+  })
+
+  it('未选中任何片段时也不给（没有目标段）', () => {
+    seed(2)
+    useProjectStore.setState({ selectedClipId: null })
+    act(() => useUiStore.setState({ displayTimeSec: 20, seekHandler: vi.fn() }))
+    render(<ClipInspector />)
+
+    expect(screen.queryByRole('button', { name: TEXT.inspector.locate })).toBeNull()
   })
 })
 

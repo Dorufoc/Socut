@@ -342,8 +342,30 @@ textarea {
   min-height: 0;
   min-width: 0;
   display: flex;
+  /* P5：顶部可能要放一条「定位到这一段」，改成纵向列 */
+  flex-direction: column;
   overflow: hidden;
   background: rgba(32, 32, 32, 0.74);
+}
+
+/*
+ * P5：时间轴上点段落只选中、不推动播放头，于是编辑器顶部给一个明确的「过去」入口。
+ * 只在播放头落在段外时渲染（组件自己返回 null），所以这条不会留下空高。
+ */
+.locate-bar {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px 0;
+}
+
+.locate-bar + .inspector {
+  padding-top: 0;
+}
+
+/* 字幕检查器里这条已在 .inspector 的 padding 与 gap 内，不再自己加边距 */
+.inspector > .locate-bar {
+  padding: 0;
 }
 
 .stage {
@@ -1959,8 +1981,9 @@ input[type='color']:disabled {
   white-space: nowrap;
 }
 
+/* P4：黄线接管预览时，蓝线只是被压暗（让黄线当主角），仍然留在原地告诉用户播放头在哪 */
 .timeline--hover-preview .timeline__playhead {
-  visibility: hidden;
+  opacity: 0.55;
 }
 
 /*
@@ -2057,20 +2080,16 @@ input[type='color']:disabled {
   counter-reset: caption;
 }
 
+/* 卡片行：左侧点击区 + 右侧常驻删除按钮（P2）。行体只包不画，样式仍在 .caption-item 上 */
 .caption-item {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: stretch;
   width: 100%;
-  padding: 7px 8px;
   border: 1px solid var(--stroke-card);
   border-left: 3px solid transparent;
   border-radius: var(--radius-card);
   background: var(--bg-card);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
+  overflow: hidden;
   transition: border-color 120ms ease, background-color 120ms ease;
 }
 
@@ -2088,6 +2107,94 @@ input[type='color']:disabled {
 /* 播放头落在这一条的区间内 */
 .caption-item--onair {
   border-color: var(--accent-ring);
+}
+
+/* 卡片主体（选中 + 跳中点）：去掉按钮外壳，看起来就是整行可点 */
+.caption-item__pick {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* 删除：常驻而不是悬停才出现——藏起来的入口等于没有入口 */
+.caption-item__remove {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--stroke-card);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+
+.caption-item__remove:hover {
+  color: #ffbcc4;
+  background: rgba(255, 123, 138, 0.14);
+}
+
+/* 新建入口：空态是大虚线框，有字幕时是列表末尾一条矮虚线条 */
+.caption-add {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px dashed var(--stroke-control);
+  border-radius: var(--radius-card);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.caption-add:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.caption-add--hero {
+  flex-direction: column;
+  gap: 5px;
+  min-height: 132px;
+  margin-top: 0;
+  padding: 16px 12px;
+  border-width: 2px;
+  text-align: center;
+}
+
+.caption-add__glyph {
+  display: block;
+}
+
+.caption-add__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.caption-add__hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
 }
 
 .caption-item__index {
@@ -2356,6 +2463,22 @@ input[type='color']:disabled {
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
+}
+
+/*
+ * 「包装」Tab（P6）：字幕 / 片尾 / 水印三块纵向铺开。
+ * 每块自己就是一张卡片（内部仍是原来的 .group），这里只管三块之间的间距，
+ * 不做二次包壳，免得合并后多出一层边框与内边距。
+ */
+.wrap-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: none;
+}
+
+.wrap-section {
+  flex: none;
 }
 
 /* 素材库卡片网格 */
