@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
-import type { ReactElement } from 'react'
+import { useState, type ReactElement } from 'react'
 import { PANE_PREFS_KEY, readPaneRatios, writePaneRatios } from './panePrefs'
 import { usePaneLayout } from './usePaneLayout'
 import { Splitter } from '../components/ui/Splitter'
@@ -99,6 +99,44 @@ interface Scene {
   splitter: (edge: string) => HTMLElement
 }
 
+/**
+ * 真实启动路径的缩影：应用先落在「最近项目」页（没有 `.shell`），
+ * 新建/打开工程后编辑器骨架才挂载。测量必须跟着后挂载的 `.shell` 重建。
+ */
+function DeferredHarness(): ReactElement {
+  const layout = usePaneLayout()
+  const [mounted, setMounted] = useState(false)
+  return (
+    <div>
+      <button type="button" onClick={() => setMounted(true)}>
+        open-editor
+      </button>
+      {mounted ? (
+        <div
+          className="shell"
+          ref={layout.shellRef}
+          style={layout.shellStyle}
+          data-left={layout.sizes.left}
+          data-center={layout.sizes.center}
+          data-right={layout.sizes.right}
+          data-stage={layout.sizes.stage}
+          data-timeline={layout.sizes.timeline}
+        >
+          <div className="body">
+            <aside className="rail" />
+            <Splitter {...layout.splitterProps('left')} />
+            <main className="stage" />
+            <Splitter {...layout.splitterProps('right')} />
+            <aside className="inspector-dock" />
+          </div>
+          <Splitter {...layout.splitterProps('timeline')} />
+          <footer className="timeline-dock" />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function mount(): Scene {
   const { container } = render(<Harness />)
   const shell = container.querySelector('.shell') as HTMLElement
@@ -122,6 +160,50 @@ function resizeTo(width: number, height = 700): void {
     resizeCallback?.()
   })
 }
+
+describe('usePaneLayout 测量生命周期', () => {
+  it('编辑器骨架后挂载（最近项目页 → 新建工程）仍能测得尺寸，拖拽不会把区域写成 0', () => {
+    const { container } = render(<DeferredHarness />)
+    expect(container.querySelector('.shell')).toBeNull()
+
+    fireEvent.click(container.querySelector('button') as HTMLElement)
+    const shell = container.querySelector('.shell') as HTMLElement
+    // 后挂载也要立刻拿到真实容器尺寸，而不是停在 0
+    expect(Number(shell.dataset.left)).toBe(300)
+    expect(Number(shell.dataset.right)).toBe(344)
+    expect(Number(shell.dataset.timeline)).toBe(232)
+
+    const splitter = container.querySelector('.splitter[data-edge="left"]') as HTMLElement
+    fireEvent.pointerDown(splitter, pointer(300, 120))
+    fireEvent.pointerMove(splitter, pointer(360, 120))
+
+    // 其余两区保持原尺寸，任何一个都不能被写成 0
+    expect(shell.style.getPropertyValue('--pane-left')).toBe('360px')
+    expect(shell.style.getPropertyValue('--pane-right')).toBe('344px')
+    expect(shell.style.getPropertyValue('--pane-timeline')).toBe('232px')
+
+    fireEvent.pointerUp(splitter, pointer(360, 120))
+    expect(Number(shell.dataset.left)).toBe(360)
+    expect(Number(shell.dataset.center)).toBe(1440 - 14 - 360 - 344)
+    expect(readPaneRatios()).toEqual({ left: 0.25, right: 0.2389, timeline: 0.3314 })
+  })
+
+  it('容器尺寸还没测到时拖拽完全无效：不写 0px，也不落盘零比例', () => {
+    SHELL.width = 0
+    SHELL.height = 0
+    const scene = mount()
+    const splitter = scene.splitter('left')
+
+    fireEvent.pointerDown(splitter, pointer(0, 0))
+    fireEvent.pointerMove(splitter, pointer(240, 0))
+    fireEvent.pointerUp(splitter, pointer(240, 0))
+
+    expect(scene.varOf('--pane-left')).toBe('')
+    expect(scene.varOf('--pane-right')).toBe('')
+    expect(scene.varOf('--pane-timeline')).toBe('')
+    expect(readPaneRatios()).toBeNull()
+  })
+})
 
 describe('usePaneLayout 冷启动与恢复', () => {
   it('无存档时就是历史固定布局：左 300 / 右 344 / 时间轴 232', () => {

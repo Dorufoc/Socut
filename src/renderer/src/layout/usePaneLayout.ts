@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type RefObject
+  type RefCallback
 } from 'react'
 import { TEXT } from '@shared/i18n'
 import {
@@ -51,7 +51,7 @@ export type ShellStyle = CSSProperties & Partial<Record<'--pane-left' | '--pane-
 
 export interface PaneLayout {
   /** 挂在 `.shell` 上：既是 CSS 变量宿主，也是测量目标 */
-  shellRef: RefObject<HTMLDivElement | null>
+  shellRef: RefCallback<HTMLDivElement>
   shellStyle: ShellStyle
   sizes: PaneSizes
   metrics: PaneMetrics
@@ -70,8 +70,21 @@ function applySizes(element: HTMLElement | null, sizes: PaneSizes): void {
 
 export function usePaneLayout(): PaneLayout {
   const shellRef = useRef<HTMLDivElement | null>(null)
+  const [shellEl, setShellEl] = useState<HTMLDivElement | null>(null)
   const [metrics, setMetrics] = useState<PaneMetrics>(UNMEASURED)
   const [ratios, setRatios] = useState<PaneRatios | null>(() => readPaneRatios())
+
+  /**
+   * DOM ref 用回调形式而不是对象 ref：
+   * 应用先显示「最近项目」页，编辑器里的 `.shell` 是之后才挂载的。
+   * 对象 ref + `[]` effect 只在首次挂载时看一次 ref，那时 `.shell` 还不存在，
+   * 之后永远不再观察——容器尺寸停在 0，一拖分隔线就把三个区写成 0px 并污染存档。
+   * 回调 ref 在 `.shell` 挂载/卸载时都会通知，测量随之重建。
+   */
+  const attachShell = useCallback((node: HTMLDivElement | null): void => {
+    shellRef.current = node
+    setShellEl(node)
+  }, [])
 
   const sizes = useMemo(() => resolvePaneSizes(ratios ?? defaultRatios(metrics), metrics), [metrics, ratios])
   const ready = metrics.width >= 1 && metrics.height >= 1
@@ -87,10 +100,13 @@ export function usePaneLayout(): PaneLayout {
   }, [metrics, ready, sizes])
 
   useEffect(() => {
-    const element = shellRef.current
-    if (!element) return
+    if (!shellEl) {
+      // 离开编辑器：回到「未测量」态，避免下次挂载首帧沿用上一个窗口/上一次会话的尺寸
+      setMetrics((previous) => (previous.width === 0 && previous.height === 0 ? previous : UNMEASURED))
+      return
+    }
     const measure = (): void => {
-      const rect = element.getBoundingClientRect()
+      const rect = shellEl.getBoundingClientRect()
       const width = Math.round(rect.width)
       const height = Math.round(rect.height)
       setMetrics((previous) =>
@@ -101,8 +117,14 @@ export function usePaneLayout(): PaneLayout {
     }
     measure()
     const observer = new ResizeObserver(measure)
-    observer.observe(element)
+    observer.observe(shellEl)
     return () => observer.disconnect()
+  }, [shellEl])
+
+  /** 容器没测到尺寸时几何全是 0：此时任何写入都会把区域拖没，必须整体拒绝。 */
+  const isMeasured = useCallback((): boolean => {
+    const current = metricsRef.current
+    return current.width >= 1 && current.height >= 1
   }, [])
 
   const resolveLive = useCallback((edge: PaneEdge, px: number): PaneSizes => {
@@ -117,15 +139,17 @@ export function usePaneLayout(): PaneLayout {
 
   const onLiveResize = useCallback(
     (edge: PaneEdge, px: number): void => {
+      if (!isMeasured()) return
       const next = resolveLive(edge, px)
       sizesRef.current = next
       applySizes(shellRef.current, next)
     },
-    [resolveLive]
+    [isMeasured, resolveLive]
   )
 
   const onCommit = useCallback(
     (edge: PaneEdge, px: number): void => {
+      if (!isMeasured()) return
       const currentMetrics = metricsRef.current
       const next = resolveLive(edge, px)
       sizesRef.current = next
@@ -134,15 +158,18 @@ export function usePaneLayout(): PaneLayout {
       setRatios(committed)
       writePaneRatios(committed)
     },
-    [resolveLive]
+    [isMeasured, resolveLive]
   )
 
   const resetLayout = useCallback((): void => {
-    sizesRef.current = resolvePaneSizes(defaultRatios(metricsRef.current), metricsRef.current)
-    applySizes(shellRef.current, sizesRef.current)
+    // 先清存档/状态：即使当前是未测量态，也要把用户「恢复默认」的意图落实
     setRatios(null)
     writePaneRatios(null)
-  }, [])
+    if (!isMeasured()) return
+    const current = metricsRef.current
+    sizesRef.current = resolvePaneSizes(defaultRatios(current), current)
+    applySizes(shellRef.current, sizesRef.current)
+  }, [isMeasured])
 
   const splitterProps = useCallback(
     (edge: PaneEdge): SplitterProps => {
@@ -203,5 +230,5 @@ export function usePaneLayout(): PaneLayout {
     } as ShellStyle
   }, [ready, sizes])
 
-  return { shellRef, shellStyle, sizes, metrics, ready, splitterProps, resetLayout }
+  return { shellRef: attachShell, shellStyle, sizes, metrics, ready, splitterProps, resetLayout }
 }

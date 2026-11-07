@@ -149,7 +149,7 @@ export function FontPanel(): ReactElement {
               <div>
                 {hint.family}：{hint.reason}
               </div>
-              <div className="mono" style={{ userSelect: 'text', wordBreak: 'break-all' }}>
+              <div className="mono" style={{ wordBreak: 'break-all' }}>
                 {hint.officialPage}
               </div>
             </div>

@@ -90,6 +90,26 @@ body {
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+
+  /* 编辑器是重拖拽界面：默认禁止文本选中/高亮，避免拖拽时误选文本、触发原生文本拖拽 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 仅表单控件与可编辑区域保留文本选择能力，否则无法编辑/定位输入内容 */
+input,
+textarea,
+select,
+[contenteditable='true'],
+[contenteditable=''] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 图片/链接的原生拖拽同样会和卡片、时间轴拖拽冲突 */
+img,
+a {
+  -webkit-user-drag: none;
 }
 
 button,
@@ -1759,7 +1779,7 @@ input[type='color']:disabled {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-all;
-  user-select: text;
+  user-select: none;
 }
 
 .notice-list {
@@ -1779,7 +1799,7 @@ input[type='color']:disabled {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-all;
-  user-select: text;
+  user-select: none;
 }
 
 /* 动画面板 */

@@ -56,7 +56,17 @@ describe('panePrefs 读写', () => {
   })
 
   it('脏数据与旧版本一律当没有存档：非 JSON、缺字段、越界、版本不符', () => {
-    const cases: string[] = ['not json', 'null', '"0.25"', '[]', '{}', '{"left":0.2}', '{"left":0.2,"right":0.3,"timeline":1.4}']
+    const cases: string[] = [
+      'not json',
+      'null',
+      '"0.25"',
+      '[]',
+      '{}',
+      '{"left":0.2}',
+      '{"left":0.2,"right":0.3,"timeline":1.4}',
+      // 旧版「容器未测量就拖拽」会写坏成全 0，正常拖拽有下限，不可能出现
+      '{"version":1,"left":0,"right":0,"timeline":0}'
+    ]
     for (const raw of cases) {
       expect(readPaneRatios(memoryStorage({ [PANE_PREFS_KEY]: raw }))).toBeNull()
     }

@@ -309,6 +309,8 @@ export function normalizePaneRatios(raw: unknown): PaneRatios | null {
   }
   const [left, right, timeline] = out
   if (left === undefined || right === undefined || timeline === undefined) return null
+  // 三条全 0 只可能来自旧版「容器尚未测量就开始拖拽」写坏的存档（正常拖拽有下限保护），当脏数据丢弃
+  if (left === 0 && right === 0 && timeline === 0) return null
   return { left, right, timeline }
 }
 
