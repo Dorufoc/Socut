@@ -14,8 +14,6 @@ import { resetStripCache } from './useMediaStrips'
  * 的行为必须与加预览条之前一致，只有"按下与抬起几乎没位移"才当作点一格跳转。
  */
 
-const CARD_WIDTH_PX = 400
-
 const clip: MediaClip = {
   id: 'mclip-1',
   mediaId: 'media-1',
@@ -87,9 +85,12 @@ beforeAll(() => {
   Element.prototype.releasePointerCapture = () => undefined
   Element.prototype.hasPointerCapture = () => false
   Element.prototype.getBoundingClientRect = function rect(): DOMRect {
-    // 卡片本体按 400px 宽、0 起点算指针比例；其它元素给轨道内容宽
-    const width = this.classList.contains('media-clip-card') ? CARD_WIDTH_PX : 1000
-    return { width, height: 52, left: 0, top: 0, right: width, bottom: 52, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
+    // 卡片本体按自己的 style（left/width）给出屏幕矩形，和真实布局一致：
+    // 拖拽换算要用「卡片左缘 − style.left」反推车道原点，桩数据自相矛盾的话测的就不是真行为。
+    const isCard = this.classList.contains('media-clip-card')
+    const left = isCard ? Number.parseFloat((this as HTMLElement).style.left || '0') : 0
+    const width = isCard ? Number.parseFloat((this as HTMLElement).style.width || '0') : 1000
+    return { width, height: 52, left, top: 0, right: left + width, bottom: 52, x: left, y: 0, toJSON: () => ({}) } as DOMRect
   }
   class ResizeObserverStub {
     observe(): void {}
@@ -164,15 +165,15 @@ async function renderCard(props: MediaClipCardProps): Promise<HTMLElement> {
 }
 
 describe('MediaClipCard 时间帧预览条', () => {
-  it('按卡片像素宽请求格数，并把长图铺成卡片底图', async () => {
+  it('按卡片自身像素宽请求格数，并把长图铺成卡片底图', async () => {
     const card = await renderCard(makeProps())
 
     expect(stripCalls).toHaveLength(1)
     expect(stripCalls[0]).toMatchObject({ mediaId: 'media-1', path: 'C:/media/a.mp4', sourceInSec: 1, sourceOutSec: 7 })
-    // 1000px 宽 → 20 格（每约 44px 一格取档位）
-    expect(stripCalls[0]!.frames).toBe(20)
+    // 卡片 6s × 100px/s = 600px → 12 格（约 44px 一格取档位）；整条轨道再长也不影响密度
+    expect(stripCalls[0]!.frames).toBe(12)
     const strip = card.querySelector('.media-clip-card__strip') as HTMLImageElement
-    expect(strip.src).toContain('focusnews-strip://20')
+    expect(strip.src).toContain('focusnews-strip://12')
     // 有长图时不再显示占位符
     expect(card.querySelector('.media-clip-card__fallback')).toBeNull()
   })
@@ -218,8 +219,9 @@ describe('MediaClipCard 时间帧预览条', () => {
   it('悬停读出指针处的时间点（时间轴与源两个坐标）', async () => {
     const card = await renderCard(makeProps())
 
-    fireEvent.pointerEnter(card, hover(200))
-    fireEvent.pointerMove(card, hover(200))
+    // 卡片 200→800px（[2,8] @ 10s/1000px），500px 是正中
+    fireEvent.pointerEnter(card, hover(500))
+    fireEvent.pointerMove(card, hover(500))
 
     const hint = card.querySelector('.media-clip-card__hint') as HTMLElement
     // 卡片 400px 宽、中点 → 源 1+6×0.5=4s，时间轴 2+6×0.5=5s
@@ -252,6 +254,47 @@ describe('MediaClipCard 时间帧预览条', () => {
     expect(props.onMove).toHaveBeenCalled()
   })
 
+  it('拖到轴尾外（总时长被拉长）也不漂移：卡片仍贴着指针，不退回累计位移', async () => {
+    const props = makeProps()
+    const { container, rerender } = render(<MediaClipCard {...props} />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const card = container.querySelector('.media-clip-card') as HTMLElement
+
+    // 按住卡片中间（左缘 200px，抓取偏移 300px）
+    fireEvent.pointerDown(card, pointer(500))
+    fireEvent.pointerMove(card, pointer(700))
+    expect(props.onMove).toHaveBeenLastCalledWith(4)
+
+    // 拖出当前轴尾 → 上层把总时长从 10s 拉到 20s（整条轴重新缩放）
+    rerender(<MediaClipCard {...props} durationSec={20} />)
+    fireEvent.pointerMove(card, pointer(700))
+
+    // 指针没动，(700-300)px / 1000px × 20s = 8s；按「累计位移」算会得到 6s，卡片就离开指针了
+    expect(props.onMove).toHaveBeenLastCalledWith(8)
+  })
+
+  it('拖出点手柄：缩放变化后端点仍落在指针所在帧上', async () => {
+    const props = makeProps()
+    const { container, rerender } = render(<MediaClipCard {...props} />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const card = container.querySelector('.media-clip-card') as HTMLElement
+    const handle = card.querySelector('.media-clip-card__handle--right') as HTMLElement
+
+    // 卡片 [2,8] → 200→800px，按在出点手柄上
+    fireEvent.pointerDown(handle, pointer(800))
+    fireEvent.pointerMove(handle, pointer(900))
+    expect(props.onTrim).toHaveBeenLastCalledWith({ timelineEndSec: 9 })
+
+    // 总时长变 20s：900px 现在是 18s，端点必须跟到 18s（旧算法只会加 2s → 10s）
+    rerender(<MediaClipCard {...props} durationSec={20} />)
+    fireEvent.pointerMove(handle, pointer(900))
+    expect(props.onTrim).toHaveBeenLastCalledWith({ timelineEndSec: 18 })
+  })
+
   it('拖入点手柄：只调区间，不平移', async () => {
     const props = makeProps()
     const card = await renderCard(props)
@@ -280,6 +323,7 @@ describe('MediaClipCard 时间帧预览条', () => {
   })
 
   it('卡片加宽但没跨密度档时不重复抽帧（逐像素拖宽不会连环请求）', async () => {
+    // 卡片宽 = 6s × (车道宽 / 10s)：600px → 606px 同一档，720px 跨到 16 格
     await renderCard(makeProps({ widthPx: 1000 }))
     expect(stripCalls).toHaveLength(1)
 
@@ -288,7 +332,7 @@ describe('MediaClipCard 时间帧预览条', () => {
     expect(stripCalls).toHaveLength(1)
 
     cleanup()
-    await renderCard(makeProps({ widthPx: 1100 }))
+    await renderCard(makeProps({ widthPx: 1200 }))
     expect(stripCalls).toHaveLength(2)
   })
 })
@@ -300,16 +344,16 @@ describe('MediaClipCard 时间帧预览条', () => {
  * 以及取样拿不到时只能没有柱子，不许拖垮预览条与原有拖入出点交互。
  */
 describe('MediaClipCard 音频频谱条', () => {
-  it('有音轨：按卡片像素宽请求峰，柱子铺满整卡并标记 --spectrum', async () => {
+  it('有音轨：按卡片自身像素宽请求峰，柱子铺满整卡并标记 --spectrum', async () => {
     const card = await renderCard(makeProps())
 
     expect(peaksCalls).toHaveLength(1)
     expect(peaksCalls[0]).toMatchObject({ mediaId: 'media-1', path: 'C:/media/a.mp4', sourceInSec: 1, sourceOutSec: 7 })
-    // 1000px 宽 / 每 7px 一根 → 上限档 96
-    expect(peaksCalls[0]!.buckets).toBe(96)
+    // 卡片 600px / 每 7px 一根 → 档位 80（不足整轨 1 小时也不会被撑爆）
+    expect(peaksCalls[0]!.buckets).toBe(80)
     const spectrum = card.querySelector('.media-clip-card__spectrum') as HTMLElement
-    expect(spectrum.getAttribute('data-bars')).toBe('96')
-    expect(spectrum.querySelectorAll('.media-clip-card__spectrum-bar')).toHaveLength(96)
+    expect(spectrum.getAttribute('data-bars')).toBe('80')
+    expect(spectrum.querySelectorAll('.media-clip-card__spectrum-bar')).toHaveLength(80)
     expect(card.className).toContain('media-clip-card--spectrum')
     // 频谱是纯装饰，不能抢读屏与鼠标
     expect(spectrum.getAttribute('aria-hidden')).toBe('true')

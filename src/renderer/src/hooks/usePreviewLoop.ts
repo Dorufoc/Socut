@@ -18,12 +18,22 @@ export interface PreviewArgs {
   /** 有参考视频垫底时不再画棋盘格：让 Canvas 透明，视频从下层透出来 */
   transparent?: boolean
   /**
+   * 高优先级透明开关：媒体层在 rAF 里同步写这个 ref，绘制循环同一帧就能读到，
+   * 不必等 React re-render。切段时「视频已显示、Canvas 还画着棋盘格」的那一帧就是这样消掉的。
+   */
+  transparentRef?: RefObject<boolean>
+  /**
    * P4：预览轴的悬停帧（相对工程起点的秒）。非空时**只换画哪一帧**，
    * 不回写 `onDisplayTime`，所以时间轴蓝线、时间码、逐帧跳转的基准全部留在原地。
    */
   overrideSec?: number | null
   /** UI 时间文本节流回调（不进高频 store） */
   onDisplayTime?: (sec: number) => void
+  /**
+   * 每帧回调（绝对时间轴秒 + 是否正在播放）：媒体预览层用它同步 `<video>`。
+   * 在 Canvas 绘制之前调用，媒体层写透明 ref 后同一帧的 blit 就会用上新值。
+   */
+  onTick?: (timelineSec: number, playing: boolean) => void
 }
 
 export interface PreviewHandle {
@@ -48,6 +58,9 @@ export function usePreviewLoop(args: PreviewArgs): PreviewHandle {
   const lastTsRef = useRef(0)
   const lastDisplayRef = useRef(0)
   const onDisplayRef = useRef(args.onDisplayTime)
+  const onTickRef = useRef(args.onTick)
+  /** 上一帧实际用的透明值：媒体层同步翻转时用它触发同一帧重绘 */
+  const lastTransparentRef = useRef<boolean | null>(null)
 
   specRef.current = args.spec
   playingRef.current = args.playing
@@ -55,6 +68,7 @@ export function usePreviewLoop(args: PreviewArgs): PreviewHandle {
   transparentRef.current = args.transparent === true
   overrideRef.current = args.overrideSec ?? null
   onDisplayRef.current = args.onDisplayTime
+  onTickRef.current = args.onTick
 
   // 规格 / 内容 / 安全区 / 参考视频垫底 / 悬停帧变化：重画一帧
   useEffect(() => {
@@ -67,42 +81,56 @@ export function usePreviewLoop(args: PreviewArgs): PreviewHandle {
     let raf = 0
     const tick = (ts: number): void => {
       const spec = specRef.current
+      if (!spec) {
+        raf = requestAnimationFrame(tick)
+        return
+      }
+
+      const framesTotal = Math.max(1, spec.endFrame - spec.startFrame)
+      const durationSec = framesTotal * frameIntervalSec(spec.fps)
+
+      if (lastTsRef.current === 0) lastTsRef.current = ts
+      const dt = Math.min(0.25, (ts - lastTsRef.current) / 1000)
+      lastTsRef.current = ts
+
+      if (playingRef.current) {
+        elapsedSecRef.current += dt
+        if (elapsedSecRef.current >= durationSec) elapsedSecRef.current = 0
+        dirtyRef.current = true
+      }
+
+      const choice = choosePreviewFrame({
+        elapsedSec: elapsedSecRef.current,
+        overrideSec: overrideRef.current,
+        fps: spec.fps,
+        startFrame: spec.startFrame,
+        endFrame: spec.endFrame
+      })
+
+      // 媒体层先同步（它会写 transparentRef）；随后同一帧的 blit 就能用上新透明值，
+      // 不会出现「视频已经翻上来、Canvas 还盖着棋盘格」的那一帧。
+      onTickRef.current?.(frameTimeSec(choice.frame, spec.fps), playingRef.current)
+
+      const transparent = args.transparentRef?.current ?? transparentRef.current
+      if (lastTransparentRef.current !== transparent) {
+        lastTransparentRef.current = transparent
+        dirtyRef.current = true
+      }
+
       const canvas = args.canvasRef.current
-      if (spec && canvas) {
-        const framesTotal = Math.max(1, spec.endFrame - spec.startFrame)
-        const durationSec = framesTotal * frameIntervalSec(spec.fps)
-
-        if (lastTsRef.current === 0) lastTsRef.current = ts
-        const dt = Math.min(0.25, (ts - lastTsRef.current) / 1000)
-        lastTsRef.current = ts
-
-        if (playingRef.current) {
-          elapsedSecRef.current += dt
-          if (elapsedSecRef.current >= durationSec) elapsedSecRef.current = 0
-          dirtyRef.current = true
+      if (canvas && dirtyRef.current) {
+        let stage = stageRef.current
+        if (!stage || stage.width !== spec.width || stage.height !== spec.height) {
+          stage = new NativeStage(spec.width, spec.height)
+          stageRef.current = stage
         }
-
-        if (dirtyRef.current) {
-          let stage = stageRef.current
-          if (!stage || stage.width !== spec.width || stage.height !== spec.height) {
-            stage = new NativeStage(spec.width, spec.height)
-            stageRef.current = stage
-          }
-          const choice = choosePreviewFrame({
-            elapsedSec: elapsedSecRef.current,
-            overrideSec: overrideRef.current,
-            fps: spec.fps,
-            startFrame: spec.startFrame,
-            endFrame: spec.endFrame
-          })
-          stage.render(spec, choice.frame, { safeArea: safeRef.current })
-          stage.blitTo(canvas, { transparent: transparentRef.current })
-          dirtyRef.current = false
-          // 悬停接管期间不回写：蓝线与时间码必须留在播放头上
-          if (choice.reportDisplay && ts - lastDisplayRef.current > DISPLAY_TICK_MS) {
-            lastDisplayRef.current = ts
-            onDisplayRef.current?.(frameTimeSec(choice.frame, spec.fps))
-          }
+        stage.render(spec, choice.frame, { safeArea: safeRef.current })
+        stage.blitTo(canvas, { transparent })
+        dirtyRef.current = false
+        // 悬停接管期间不回写：蓝线与时间码必须留在播放头上
+        if (choice.reportDisplay && ts - lastDisplayRef.current > DISPLAY_TICK_MS) {
+          lastDisplayRef.current = ts
+          onDisplayRef.current?.(frameTimeSec(choice.frame, spec.fps))
         }
       }
       raf = requestAnimationFrame(tick)

@@ -16,6 +16,14 @@ export const CHANNELS = {
   projectAutosaveRead: 'project:autosaveRead',
   projectAutosaveWrite: 'project:autosaveWrite',
 
+  /** 启动页：最近工程列表 / 新建 / 打开 / 重命名 / 移出列表 / 拍封面 */
+  projectRecentList: 'project:recentList',
+  projectRecentCreate: 'project:recentCreate',
+  projectRecentOpen: 'project:recentOpen',
+  projectRecentRename: 'project:recentRename',
+  projectRecentRemove: 'project:recentRemove',
+  projectRecentCaptureCover: 'project:recentCaptureCover',
+
   fontsList: 'fonts:list',
   fontImport: 'fonts:import',
   fontReadBytes: 'fonts:readBytes',

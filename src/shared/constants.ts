@@ -16,12 +16,16 @@ export const USER_DATA_DIRS = {
   /** v5：媒体片段时间帧预览条（Thumbnail Strip）长图缓存，按 素材+区间+格数 命名 */
   strips: 'strips',
   /** v8.1：防抖预览代理（稳定化后的区间 mp4 + .trf 运动数据），按 片段+签名指纹 命名 */
-  stabPreview: 'stab-preview'
+  stabPreview: 'stab-preview',
+  /** 启动页工程封面（covers/<entryId>.png），由 focusnews-cover:// 协议只读提供 */
+  covers: 'covers'
 } as const
 
 export const FONTS_MANIFEST_FILE = 'fonts.json'
 export const AUTOSAVE_FILE = 'autosave.focusnews.json'
 export const AUTOSAVE_BACKUP_FILE = 'autosave.focusnews.bak.json'
+/** 最近工程索引（userData/projects/history.json） */
+export const RECENT_HISTORY_FILE = 'history.json'
 
 /**
  * 可导入的视频容器扩展名（不带点）。
@@ -328,8 +332,26 @@ export const MIN_CLIP_DURATION_SEC = 0.2
 export const MIN_MEDIA_CLIP_SEC = 0.2
 /** 新建片段默认时长（秒） */
 export const DEFAULT_CLIP_DURATION_SEC = 5
-/** 时间轴可编辑最大时长（无参考视频时） */
+/** @deprecated 旧「一屏铺满」上限（60s）。新时间轴用 MAX_TRACK_SEC 作为可滚动软上限。 */
 export const MAX_TIMELINE_SEC = 60
+
+// ---------------------------------------------------------------------------
+// 时间轴（滚动 + 缩放）
+// ---------------------------------------------------------------------------
+
+/** 轨道可滚动范围的软上限（秒）：内容再往右也只渲染到这里，避免误拖出超大画布。 */
+export const MAX_TRACK_SEC = 3600
+/** 100% 缩放的比例尺：1 秒 = 72px（与刻度最小间距同值，100% 时主刻度正好 1 秒）。 */
+export const TIMELINE_BASE_PX_PER_SEC = 72
+/** Ctrl/Cmd + 滚轮的比例尺缩放范围（相对 100%） */
+export const TIMELINE_MIN_ZOOM = 0.1
+export const TIMELINE_MAX_ZOOM = 8
+/** 内容末尾之后至少留出的可拖入余量（秒） */
+export const TRACK_TAIL_SEC = 15
+/** 轨道至少渲染的时长（秒）：空工程也能看到一块可拖入区域 */
+export const TRACK_MIN_SEC = 30
+/** 左侧轨道标签占位宽度（px）：车道坐标原点的 x 偏移，标签与车道必须同值 */
+export const LANE_GUTTER_PX = 56
 
 /**
  * 新建片段默认的入场/出场时长（秒）。

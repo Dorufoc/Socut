@@ -2,6 +2,7 @@ import { useRef, type PointerEvent as ReactPointerEvent, type ReactElement } fro
 import { snapTimeToFrame } from '@shared/fps'
 import { MIN_AUDIO_CLIP_SEC, normalizeLayer } from '@shared/audioClips'
 import { secToPx } from './ruler'
+import { laneBoxFromCard, secAtClientX } from './lane'
 import type { AudioClip, Fps, MediaItem } from '@shared/types'
 
 /**
@@ -25,6 +26,8 @@ export interface AudioClipCardProps {
   onSelect: (id: string) => void
   onMove: (timelineStartSec: number) => void
   onTrim: (patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
+  /** 按下时回调：上层在这一刻快照吸附候选边缘，拖拽途中不再重算 */
+  onDragStart?: () => void
   onCommit?: () => void
 }
 
@@ -32,7 +35,8 @@ type Edge = 'in' | 'out' | 'move'
 
 interface DragState {
   edge: Edge
-  pointerX: number
+  /** 按下时指针相对卡片左缘的偏移，整段平移时用它抵消「按住的是卡片中间」 */
+  grabOffsetPx: number
   start: number
   end: number
 }
@@ -48,9 +52,11 @@ export function AudioClipCard({
   onSelect,
   onMove,
   onTrim,
+  onDragStart,
   onCommit
 }: AudioClipCardProps): ReactElement {
   const dragRef = useRef<DragState | null>(null)
+  const cardRef = useRef<HTMLDivElement | null>(null)
   const lane = Math.max(1, layers)
   const layer = Math.min(normalizeLayer(clip.layer), lane - 1)
   const left = secToPx(clip.timelineStartSec, durationSec, widthPx)
@@ -58,26 +64,45 @@ export function AudioClipCard({
   const name = item?.name ?? '（素材已移出）'
 
   const begin = (edge: Edge) => (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const card = cardRef.current
+    if (!card) return
+    const rect = card.getBoundingClientRect()
+    if (rect.width <= 0) return
     onSelect(clip.id)
-    dragRef.current = { edge, pointerX: event.clientX, start: clip.timelineStartSec, end: clip.timelineEndSec }
+    dragRef.current = {
+      edge,
+      grabOffsetPx: event.clientX - rect.left,
+      start: clip.timelineStartSec,
+      end: clip.timelineEndSec
+    }
     event.currentTarget.setPointerCapture(event.pointerId)
     event.stopPropagation()
+    onDragStart?.()
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
     const drag = dragRef.current
     if (!drag) return
-    const deltaSec = ((event.clientX - drag.pointerX) / Math.max(1, widthPx)) * durationSec
+    // 绝对换算（与媒体段同口径）：指针位置直接映射成秒，不累计位移
+    // 每次移动都用卡片当前位置反推车道原点：横向滚动后快照坐标会整体偏一个 scrollLeft
+    const box = laneBoxFromCard(cardRef.current, widthPx)
+    if (!box) return
     if (drag.edge === 'move') {
-      onMove(snapTimeToFrame(Math.max(0, drag.start + deltaSec), fps))
+      onMove(snapTimeToFrame(secAtClientX(event.clientX - drag.grabOffsetPx, box, durationSec), fps))
       return
     }
     if (drag.edge === 'in') {
-      const candidate = snapTimeToFrame(Math.min(drag.end - MIN_AUDIO_CLIP_SEC, Math.max(0, drag.start + deltaSec)), fps)
+      const candidate = snapTimeToFrame(
+        Math.min(drag.end - MIN_AUDIO_CLIP_SEC, secAtClientX(event.clientX, box, durationSec)),
+        fps
+      )
       if (candidate !== drag.start) onTrim({ timelineStartSec: candidate })
       return
     }
-    const candidate = snapTimeToFrame(Math.max(drag.start + MIN_AUDIO_CLIP_SEC, drag.end + deltaSec), fps)
+    const candidate = snapTimeToFrame(
+      Math.max(drag.start + MIN_AUDIO_CLIP_SEC, secAtClientX(event.clientX, box, durationSec)),
+      fps
+    )
     if (candidate !== drag.end) onTrim({ timelineEndSec: candidate })
   }
 
@@ -94,6 +119,8 @@ export function AudioClipCard({
 
   return (
     <div
+        ref={cardRef}
+        data-clip-id={clip.id}
       className={`audio-clip-card${selected ? ' audio-clip-card--selected' : ''}${item ? '' : ' audio-clip-card--orphan'}`}
       style={{
         left,

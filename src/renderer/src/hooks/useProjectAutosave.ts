@@ -20,8 +20,9 @@ export function useProjectAutosave(): { lastError: string | null } {
     if (timerRef.current) clearTimeout(timerRef.current)
     const write = (): void => {
       if (savedRevRef.current === revision) return
+      // entryId 在真正写入时现取：debounce 窗口内另存为/打开切换了身份，也不会写错归属。
       void window.focusnews.project
-        .autosaveWrite(useProjectStore.getState().project)
+        .autosaveWrite(useProjectStore.getState().project, useProjectStore.getState().currentEntryId)
         .then(() => {
           savedRevRef.current = revision
           errorRef.current = null

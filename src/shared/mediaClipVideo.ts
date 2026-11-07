@@ -445,7 +445,10 @@ export const MEDIA_GRADE_FILTER_ID = 'focusnews-media-grade'
  * 预览里的调色（CSS filter）。
  * 亮度/对比度/饱和度/光感补偿走 CSS 函数；曝光/冷暖/曲线/光感提亮走 SVG 曲线表。
  */
-export function mediaVideoFilter(video: MediaClipVideo | undefined): string {
+export function mediaVideoFilter(
+  video: MediaClipVideo | undefined,
+  channelTableId = MEDIA_GRADE_FILTER_ID
+): string {
   if (!video) return 'none'
   const parts: string[] = []
   if (Math.abs(video.brightness) > 1e-6) parts.push(`brightness(${(1 + video.brightness / 100).toFixed(3)})`)
@@ -453,6 +456,7 @@ export function mediaVideoFilter(video: MediaClipVideo | undefined): string {
   const saturation = 1 + video.saturation / 100
   const withLight = video.vibrance === 0 ? saturation : saturation * lightToneSaturate(video.vibrance)
   if (Math.abs(video.saturation) > 1e-6 || Math.abs(video.vibrance) > 1e-6) parts.push(`saturate(${withLight.toFixed(3)})`)
-  if (needsChannelTable(video)) parts.push(`url(#${MEDIA_GRADE_FILTER_ID})`)
+  // 多候选预览时每段各有自己的曲线表，id 由调用方给；默认仍用全局 id（旧调用不变）
+  if (needsChannelTable(video)) parts.push(`url(#${channelTableId})`)
   return parts.length === 0 ? 'none' : parts.join(' ')
 }

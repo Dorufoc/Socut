@@ -5,9 +5,12 @@ import {
   RESOLUTION_PRESETS,
   fpsToString
 } from '@shared/constants'
-import { createClip, createDefaultProject, LEFT_TABS, normalizeProject } from '@shared/projectSchema'
+import { createClip, createDefaultProject, LEFT_TABS } from '@shared/projectSchema'
 import { frameTimeSec, stepLocalFrame } from '@shared/fps'
 import { secondsToTimecode } from '@shared/timecode'
+import { timelineContentEndSec } from '@shared/presetResolver'
+import { mediaKindOf } from '@shared/audioClips'
+import { projectHasProgress } from '@shared/recentProjects'
 import { TEXT } from '@shared/i18n'
 import type { AppInfo } from '@shared/api'
 import { attachFrameSource } from './render/frameSource'
@@ -27,6 +30,9 @@ import { runErrorDemo } from './smoke/runErrorDemo'
 import { runVisualCheck } from './smoke/runVisualCheck'
 import { ensureFontRegistered } from './hooks/useFontLoader'
 import { PreviewStage, type StageSeekHandle } from './components/PreviewStage'
+import { RecentProjectsPage } from './launcher/RecentProjectsPage'
+import { captureCurrentCover } from './launcher/cover'
+import { useRecentProjectsStore } from './state/recentProjectsStore'
 import { InfoBar } from './components/ui/InfoBar'
 import { Splitter } from './components/ui/Splitter'
 import { usePaneLayout } from './layout/usePaneLayout'
@@ -43,12 +49,7 @@ import type { LeftTabValue, Project } from '@shared/types'
 
 /** 自动存档里是否有值得恢复的编辑进度：字幕/媒体/音频任一轨有内容，或水印已启用 */
 export function hasRestoreProgress(project: Project): boolean {
-  return (
-    project.clips.length > 0 ||
-    project.mediaClips.length > 0 ||
-    (project.audioClips?.length ?? 0) > 0 ||
-    project.watermark?.enabled === true
-  )
+  return projectHasProgress(project)
 }
 
 /**
@@ -74,7 +75,6 @@ export function App(): ReactElement {
   const setProject = useProjectStore((state) => state.loadProject)
   const setResolution = useProjectStore((state) => state.setResolution)
   const setFps = useProjectStore((state) => state.setFps)
-  const setFonts = useProjectStore((state) => state.setFonts)
 
   const playing = useUiStore((state) => state.playing)
   const setPlaying = useUiStore((state) => state.setPlaying)
@@ -88,6 +88,8 @@ export function App(): ReactElement {
   const setNotice = useUiStore((state) => state.setNotice)
   const leftTab = useUiStore((state) => state.leftTab)
   const setLeftTab = useUiStore((state) => state.setLeftTab)
+  const view = useUiStore((state) => state.view)
+  const setView = useUiStore((state) => state.setView)
 
   const busy = useExportStore((state) => state.busy)
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
@@ -109,12 +111,32 @@ export function App(): ReactElement {
   const setDisplayTime = useUiStore((state) => state.setDisplayTime)
   const seekTo = useCallback(
     (sec: number): void => {
-      stageRef.current?.seekTime(sec)
+      // 播放头不是「无限长」的：最多到最后一个媒体/字幕/音频段的末尾（空工程 = 0s）。
+      // 轨道本身可以更宽（方便往后拖新段），但定位永远停在有内容的地方。
+      const contentEnd = timelineContentEndSec(useProjectStore.getState().project)
+      const clamped = Math.min(Math.max(0, sec), contentEnd)
+      stageRef.current?.seekTime(clamped)
       // 拖拽刮擦时同步 UI 时间文本：预览循环是节流的，不等它才能让时间码/播放头即刻跟随
-      setDisplayTime(sec)
+      setDisplayTime(clamped)
     },
     [setDisplayTime]
   )
+
+  /**
+   * 素材库「放到播放头」：媒体进媒体轨、音频进音频轨，落点被占时由 store 顺延到空档。
+   * 播放头已经夹在内容末尾内，所以这里不需要再夹（但空工程时就是 0s，正好落在开头）。
+   */
+  const placeMediaAtPlayhead = useCallback((mediaId: string): void => {
+    const store = useProjectStore.getState()
+    const item = store.project.media.find((m) => m.id === mediaId)
+    if (!item) return
+    const atSec = Math.min(useUiStore.getState().displayTimeSec, timelineContentEndSec(store.project))
+    if (mediaKindOf(item) === 'audio') {
+      store.insertAudioClip({ mediaId, timelineStartSec: atSec, durationSec: item.meta.durationSec })
+      return
+    }
+    store.insertMediaClip({ mediaId, timelineStartSec: atSec, durationSec: item.meta.durationSec, sourceInSec: 0 })
+  }, [])
 
   const registerHandle = useCallback((handle: StageSeekHandle): void => {
     stageRef.current = handle
@@ -203,12 +225,14 @@ export function App(): ReactElement {
    * 自动保存因此能记住上次离开左侧栏的位置（冷启动仍默认素材库，见 uiStore 初始态）。
    */
   useEffect(() => {
+    // 启动页不该为了一个编辑器面板偏好去推 revision（否则冷启动会写一份空草稿）
+    if (view !== 'editor') return
     if (project.ui?.leftTab === leftTab) return
     useProjectStore.setState((state) => ({
       project: { ...state.project, ui: { ...(state.project.ui ?? {}), leftTab } },
       revision: state.revision + 1
     }))
-  }, [leftTab, project.ui?.leftTab])
+  }, [leftTab, project.ui?.leftTab, view])
 
   // 帧通道与任务事件：一次订阅
   useEffect(() => {
@@ -226,10 +250,24 @@ export function App(): ReactElement {
       try {
         const info = await window.focusnews.app.info()
         setAppInfo(info)
+        /**
+         * 开发取证分支（冒烟 / 视觉检查 / 评审表 / 像素回归 / 错误与缺失取证）
+         * 都必须直接落在编辑器：它们不经过用户点击，启动页会挡住取证目标。
+         */
+        const specialBoot = Boolean(
+          info.visualCheck ||
+            info.smoke ||
+            info.reviewSheet ||
+            info.pixelCheck ||
+            info.errorDemo ||
+            info.refMissingDemo
+        )
+        if (specialBoot) useUiStore.getState().setView('editor')
         if (info.presetIssues.length > 0) {
           setBootError(`预设校验问题 ${info.presetIssues.length} 条：${info.presetIssues[0] ?? ''}`)
         }
-        setFonts(await window.focusnews.fonts.list())
+        // 直接写字体库而不走 setFonts：后者会推 revision，冷启动会因此自动保存一份空工程
+        useProjectStore.setState({ fonts: await window.focusnews.fonts.list() })
         if (info.visualCheck) {
           // 视觉检查：先用生产渲染路径出图 + 指标，再由主进程按报告 passed 退出
           const fontIndex = await window.focusnews.fonts.list()
@@ -337,22 +375,16 @@ export function App(): ReactElement {
           }
           return
         }
-        const saved = await window.focusnews.project.autosaveRead()
-        // 自动恢复上次编辑进度（不再弹确认）：任意一轨有内容或开了水印就恢复，
-        // 纯参数改动（分辨率/帧率/空工程）不值得打扰冷启动默认态
-        if (saved && hasRestoreProgress(saved)) {
-          const restored = normalizeProject(saved) ?? saved
-          setProject(restored)
-          // 工程里存过的左侧栏 Tab 恢复现场（无则保持冷启动默认素材库）
-          if (restored.ui?.leftTab) useUiStore.getState().setLeftTab(restored.ui.leftTab)
-          setNotice(TEXT.project.restoredAutosave)
-        }
+        // 正常启动：落在启动页，不读自动存档。
+        // 草稿只在用户从最近列表主动打开时恢复（避免启动页被旧工程顶掉）。
+        useUiStore.getState().setView('launcher')
+        void useRecentProjectsStore.getState().refresh()
       } catch (bootFailure) {
         setBootError(String(bootFailure))
       }
     }
     void boot()
-  }, [setFonts, setProject])
+  }, [setProject])
 
   const resolutionKey = useMemo(() => {
     const match = RESOLUTION_PRESETS.find(
@@ -370,8 +402,99 @@ export function App(): ReactElement {
   const lastClipEnd = project.clips.reduce((acc, clip) => Math.max(acc, clip.endTime), 0)
   const banner = error ?? bootError ?? notice
 
+  // ---------------------------------------------------------------- 启动页动作
+
+  const handleOpenRecent = useCallback(
+    async (id: string): Promise<void> => {
+      try {
+        const opened = await window.focusnews.project.openRecent(id)
+        if (!opened) {
+          setNotice('工程文件已丢失或无法读取')
+          void useRecentProjectsStore.getState().refresh()
+          return
+        }
+        setProject(opened.project, opened.path, opened.entryId)
+        setView('editor')
+        void useRecentProjectsStore.getState().refresh()
+      } catch (failure) {
+        setNotice(`打开工程失败：${String(failure)}`)
+      }
+    },
+    [setNotice, setProject, setView]
+  )
+
+  const handleCreate = useCallback(async (): Promise<void> => {
+    try {
+      const created = await window.focusnews.project.createNew()
+      setProject(created.project, created.entry.filePath ?? undefined, created.entry.id)
+      setView('editor')
+      void useRecentProjectsStore.getState().refresh()
+      setNotice(`已新建工程：${created.project.name}`)
+    } catch (failure) {
+      setNotice(`新建工程失败：${String(failure)}`)
+    }
+  }, [setNotice, setProject, setView])
+
+  const handleBrowse = useCallback(async (): Promise<void> => {
+    try {
+      const opened = await window.focusnews.project.open()
+      if (!opened) return
+      setProject(opened.project, opened.path, opened.entryId)
+      setView('editor')
+      void useRecentProjectsStore.getState().refresh()
+    } catch (failure) {
+      setNotice(`打开工程失败：${String(failure)}`)
+    }
+  }, [setNotice, setProject, setView])
+
+  /**
+   * 回到启动页：先暂停播放、趁 `.stage__frame` 还挂载时补拍封面，再切视图。
+   * 不清空工程——用户从启动页再点回来时应看到刚才的编辑现场。
+   */
+  const handleBackToLauncher = useCallback(async (): Promise<void> => {
+    setPlaying(false)
+    await captureCurrentCover(useProjectStore.getState().currentEntryId)
+    setView('launcher')
+    await useRecentProjectsStore.getState().refresh()
+  }, [setPlaying, setView])
+
+  /** 另存为：主进程返回新路径/entryId，当前工程从此按新身份自动保存与拍封面。 */
+  const handleSaveAs = useCallback(async (): Promise<void> => {
+    try {
+      const saved = await window.focusnews.project.saveAs(useProjectStore.getState().project)
+      if (!saved) return
+      useProjectStore.getState().adoptSavedEntry(saved.path, saved.entryId)
+      setNotice(`${TEXT.project.saveAs}：${saved.path}`)
+      await captureCurrentCover(saved.entryId)
+      void useRecentProjectsStore.getState().refresh()
+    } catch (failure) {
+      setNotice(`另存为失败：${String(failure)}`)
+    }
+  }, [setNotice])
+
+  /** 标题栏「打开」：打开成功同样接住 entryId，后续自动保存记到同一条最近记录。 */
+  const handleOpenProject = useCallback(async (): Promise<void> => {
+    try {
+      const opened = await window.focusnews.project.open()
+      if (!opened) return
+      setProject(opened.project, opened.path, opened.entryId)
+      void useRecentProjectsStore.getState().refresh()
+    } catch (failure) {
+      setNotice(`打开工程失败：${String(failure)}`)
+    }
+  }, [setNotice, setProject])
+
   return (
-    <div className="app">
+    <>
+      {view === 'launcher' ? (
+        <RecentProjectsPage
+          appVersion={appInfo?.version ?? ''}
+          onOpen={handleOpenRecent}
+          onCreate={handleCreate}
+          onBrowse={handleBrowse}
+        />
+      ) : (
+        <div className="app">
       <header className="titlebar">
         <div className="titlebar__identity">
           <span className="brandmark" aria-hidden="true">
@@ -457,21 +580,15 @@ export function App(): ReactElement {
           <button
             type="button"
             className="btn btn--sm btn--subtle"
-            onClick={async () => {
-              const loaded = await window.focusnews.project.open()
-              if (loaded) setProject(loaded.project, loaded.path)
-            }}
+            title="返回最近项目（先暂停播放并保存封面）"
+            onClick={() => void handleBackToLauncher()}
           >
+            最近项目
+          </button>
+          <button type="button" className="btn btn--sm btn--subtle" onClick={() => void handleOpenProject()}>
             {TEXT.project.open}
           </button>
-          <button
-            type="button"
-            className="btn btn--sm btn--subtle"
-            onClick={async () => {
-              const saved = await window.focusnews.project.saveAs(project)
-              if (saved) setNotice(`${TEXT.project.saveAs}：${saved.path}`)
-            }}
-          >
+          <button type="button" className="btn btn--sm btn--subtle" onClick={() => void handleSaveAs()}>
             {TEXT.project.saveAs}
           </button>
         </div>
@@ -536,7 +653,7 @@ export function App(): ReactElement {
               })}
             </div>
             <div className="rail__panels">
-              {leftTab === 'media' ? <MediaLibraryPanel /> : null}
+              {leftTab === 'media' ? <MediaLibraryPanel onPlaceAtPlayhead={placeMediaAtPlayhead} /> : null}
               {leftTab === 'wrap' ? <WrapPanel /> : null}
               {leftTab === 'export' ? (
                 <ExportPanel spec={spec} fontLoading={fontLoading} ffmpegAvailable={appInfo?.ffmpegAvailable ?? false} />
@@ -655,9 +772,12 @@ export function App(): ReactElement {
         {appInfo && !appInfo.ffmpegAvailable ? <span className="chip chip--danger">FFmpeg 缺失</span> : null}
       </div>
 
-      <CompatModal />
       {/* 规格 §4.5：大字体加载遮罩（之前组件存在但从未被挂载，用户看不到任何加载指示） */}
       <FontLoadingOverlay />
-    </div>
+        </div>
+      )}
+      {/* 启动页与编辑器共用同一个模态队列：askConfirm 在两边都能弹 */}
+      <CompatModal />
+    </>
   )
 }

@@ -32,7 +32,14 @@ function tightenCspInProd(): Plugin {
     name: 'focusnews-tighten-csp-in-prod',
     apply: 'build',
     transformIndexHtml(html: string): string {
-      return html.replace(/\s*connect-src\s+'self'\s+ws:\s+http:\/\/localhost:5173/, " connect-src 'self'")
+      // 按 token 过滤而不是整段替换：源码里 connect-src 还带着 wasm 需要的 `data:`
+      return html.replace(/connect-src([^;"]*)/, (_match: string, sources: string) => {
+        const kept = sources
+          .trim()
+          .split(/\s+/)
+          .filter((source) => source !== 'ws:' && source !== 'http://localhost:5173')
+        return `connect-src ${kept.join(' ')}`
+      })
     }
   }
 }

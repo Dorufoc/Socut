@@ -1,10 +1,20 @@
 import { create } from 'zustand'
 import type { LeftTabValue, MediaItem } from '@shared/types'
 import { detectCompat } from '@shared/probe'
+import { TIMELINE_MAX_ZOOM, TIMELINE_MIN_ZOOM } from '@shared/constants'
 
 /** UI 状态：模态队列、面板开关、预览播放态。高频播放头不进 store（见 usePreviewLoop）。 */
 
 export type UiMode = 'basic' | 'advanced'
+
+/** 顶层视图：启动页（最近项目）或编辑器。冷启动默认落在启动页。 */
+export type AppView = 'launcher' | 'editor'
+
+/** 时间轴缩放夹取（10%..800%）：滚轮可能连发，非法值一律回落 100%。 */
+function clampZoom(zoom: number): number {
+  if (!Number.isFinite(zoom)) return 1
+  return Math.min(TIMELINE_MAX_ZOOM, Math.max(TIMELINE_MIN_ZOOM, zoom))
+}
 
 /**
  * 左侧栏 Tab（P6）：素材库 / 包装（字幕 + 片尾 + 水印）/ 导出 / 进度；
@@ -33,6 +43,9 @@ export type TimelineTool = 'snapTogether' | 'magneticSnap' | 'hoverPreview'
 export type TimelineTools = Record<TimelineTool, boolean>
 
 export interface UiState {
+  /** 顶层视图：启动页 / 编辑器（默认启动页，开发取证分支会立刻切到编辑器） */
+  view: AppView
+  setView: (view: AppView) => void
   playing: boolean
   /** 播放头（秒），仅供 UI 文本显示，节流更新 */
   displayTimeSec: number
@@ -81,6 +94,12 @@ export interface UiState {
   timelineTools: TimelineTools
   toggleTimelineTool: (tool: TimelineTool) => void
   /**
+   * 时间轴比例尺缩放（100% = 1 秒 72px）。只在本会话记忆，不写工程、不写 localStorage：
+   * 同一份工程在不同机器/不同窗口大小下重新打开时从 100% 起更可预测。
+   */
+  timelineZoom: number
+  setTimelineZoom: (zoom: number) => void
+  /**
    * v9：正在发声的片段 id（媒体段或音频段），只有它会拿到实时频谱电平。
    * 由预览侧写入（只有它知道“现在谁在出声”），时间轴卡片只读它自己的那一份，
    * 所以选择器返回的是布尔值，不会因播放头逐帧变化而重渲染整条轨道。
@@ -95,6 +114,8 @@ export interface UiState {
 }
 
 export const useUiStore = create<UiState>((set) => ({
+  view: 'launcher',
+  setView: (view) => set((state) => (state.view === view ? state : { view })),
   playing: false,
   displayTimeSec: 0,
   // 规格：程序启动总是进入基础模式（不跨会话记住高级模式）
@@ -129,6 +150,12 @@ export const useUiStore = create<UiState>((set) => ({
   timelineTools: { snapTogether: false, magneticSnap: false, hoverPreview: false },
   toggleTimelineTool: (tool) =>
     set((state) => ({ timelineTools: { ...state.timelineTools, [tool]: !state.timelineTools[tool] } })),
+  timelineZoom: 1,
+  setTimelineZoom: (zoom) =>
+    set((state) => {
+      const next = clampZoom(zoom)
+      return state.timelineZoom === next ? state : { timelineZoom: next }
+    }),
   liveClipId: null,
   setLiveClipId: (id) => set((state) => (state.liveClipId === id ? state : { liveClipId: id })),
   pushPrompt: (prompt) => set((state) => ({ dialogQueue: [...state.dialogQueue, prompt] })),

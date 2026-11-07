@@ -21,6 +21,8 @@ import { attachProjectHistory } from '../state/projectHistory'
  */
 
 const TRACK_WIDTH = 1000
+/** v12：100% 缩放下的固定比例尺（px/秒）——轨道不再「把一屏摊满」 */
+const PX_PER_SEC = 72
 
 function seed(): Project {
   const project = createDefaultProject('刮擦测试')
@@ -34,14 +36,21 @@ function seed(): Project {
   return project
 }
 
-/** jsdom 没有指针捕获与 ResizeObserver：用最小桩替代，几何统一按 1000px 宽、0 起点。 */
+/** jsdom 没有指针捕获与 ResizeObserver：用最小桩替代。几何优先读 inline 宽/left（车道宽度=时长×比例尺）。 */
 beforeAll(() => {
   Element.prototype.setPointerCapture = () => undefined
   Element.prototype.releasePointerCapture = () => undefined
   Element.prototype.hasPointerCapture = () => false
   Element.prototype.getBoundingClientRect = function getRect(this: Element): DOMRect {
-    const width = this.classList.contains('clip-card') ? 400 : TRACK_WIDTH
-    const left = this.classList.contains('clip-card') ? 400 : 0
+    const element = this as HTMLElement
+    const inlineWidth = Number.parseFloat(element.style?.width ?? '')
+    const inlineLeft = Number.parseFloat(element.style?.left ?? '')
+    const isCard =
+      element.classList?.contains('clip-card') ||
+      element.classList?.contains('media-clip-card') ||
+      element.classList?.contains('audio-clip-card')
+    const width = Number.isFinite(inlineWidth) && inlineWidth > 0 ? inlineWidth : isCard ? 400 : TRACK_WIDTH
+    const left = Number.isFinite(inlineLeft) ? inlineLeft : isCard ? 400 : 0
     return { width, left, top: 0, height: 40, right: left + width, bottom: 40, x: left, y: 0, toJSON: () => ({}) } as DOMRect
   }
   // jsdom 的 clientWidth 恒为 0：不给个值的话，effect 里那句
@@ -69,7 +78,7 @@ afterEach(() => {
   cleanup()
   act(() => {
     useProjectStore.setState({ project: createDefaultProject('空'), selectedClipId: null, fonts: [] })
-    useUiStore.setState({ playing: false, displayTimeSec: 0, notice: null })
+    useUiStore.setState({ playing: false, displayTimeSec: 0, notice: null, timelineZoom: 1 })
     useUiStore.setState({ timelineTools: { snapTogether: false, magneticSnap: false, hoverPreview: false } })
   })
 })
@@ -137,17 +146,17 @@ describe('Timeline 拖拽刮擦定位', () => {
     const root = renderTimeline(seekTo)
     const element = findTrack(root)
 
-    fireEvent.pointerDown(element, pointerInit(250))
+    fireEvent.pointerDown(element, pointerInit(90))
     expect(seekTo).toHaveBeenLastCalledWith(frameTimeSec(38, FPS_30))
 
-    fireEvent.pointerMove(element, pointerInit(500))
-    // 250/500/750px → 1.25/2.5/3.75s：1.25s 恰在两帧中间就近归第 38 帧，2.5s 正好落在第 75 帧边界
+    fireEvent.pointerMove(element, pointerInit(180))
+    // 90/180/270px = 1.25/2.5/3.75s（比例尺 72px/s）：1.25s 恰在两帧中间就近归第 38 帧，2.5s 正好落在第 75 帧边界
     expect(seekTo).toHaveBeenLastCalledWith(frameTimeSec(75, FPS_30))
-    fireEvent.pointerMove(element, pointerInit(750))
+    fireEvent.pointerMove(element, pointerInit(270))
     expect(seekTo).toHaveBeenLastCalledWith(frameTimeSec(113, FPS_30))
     expect(element.className).toContain('timeline__track--scrubbing')
 
-    fireEvent.pointerUp(element, pointerInit(750))
+    fireEvent.pointerUp(element, pointerInit(270))
     expect(element.className).not.toContain('timeline__track--scrubbing')
     // 抬起之后的移动不再定位
     seekTo.mockClear()
@@ -170,12 +179,12 @@ describe('Timeline 拖拽刮擦定位', () => {
     const root = renderTimeline(seekTo)
     const ruler = findRuler(root)
 
-    fireEvent.pointerDown(ruler, pointerInit(200))
+    fireEvent.pointerDown(ruler, pointerInit(72))
     expect(seekTo).toHaveBeenLastCalledWith(frameTimeSec(30, FPS_30))
-    fireEvent.pointerMove(ruler, pointerInit(800))
+    fireEvent.pointerMove(ruler, pointerInit(288))
     expect(seekTo).toHaveBeenLastCalledWith(frameTimeSec(120, FPS_30))
     expect(ruler.className).toContain('timeline__ruler--scrubbing')
-    fireEvent.pointerUp(ruler, pointerInit(800))
+    fireEvent.pointerUp(ruler, pointerInit(288))
     expect(ruler.className).not.toContain('timeline__ruler--scrubbing')
   })
 
@@ -202,8 +211,8 @@ describe('Timeline v2 媒体轨', () => {
     expect(lane).toBeTruthy()
     const card = lane.querySelector('.media-clip-card') as HTMLElement
     expect(card.textContent).toContain('a.mp4')
-    // 媒体 10s：总时长至少 11s（覆盖 + 1s 余量）
-    expect(root.textContent).toMatch(/总时长 1[1-9]\.\d\ds/)
+    // 媒体 10s：总时长按内容末尾算（不再凭空加 1s 余量）
+    expect(root.textContent).toMatch(/总时长 10\.00s/)
   })
 
   it('拆分按钮：永远可点，播放头在段内且两半够长时拆出右段并选中', () => {
@@ -341,8 +350,8 @@ describe('音频轨', () => {
     const card = root.querySelector('.timeline__track--audio .audio-clip-card') as HTMLElement
     expect(card).toBeTruthy()
     expect(card.textContent).toContain('a.mp4')
-    // 2s→10s 共 8s，在 31s 的时间轴上占 8/31 ≈ 25.8%
-    expect(parseFloat(card.style.width) / 1000).toBeCloseTo(8 / 31, 2)
+    // 2s→10s 共 8s：宽度 = 时长 × 比例尺（车道总宽另有「内容 + 余量」，所以只看卡片自身）
+    expect(parseFloat(card.style.width)).toBeCloseTo(8 * PX_PER_SEC, 0)
   })
 
   it('一个删除按钮管三条轨：选中音频段就删它', () => {
@@ -436,12 +445,11 @@ function meta(): VideoMeta {
 
 /**
  * 媒体轨：A [0,2] + B [5,7]（中间留 3s 空隙）；
- * 另放一条 [0,30] 的字幕条把时间轴拉到 31s，这样拖拽不会撞到轨道末尾的夹取，
- * 吸附窗口 = 10px = 0.31s，位移与秒的换算在测试里可以直接算。
+ * 另放一条 [0,30] 的字幕条把时间轴拉到 31s 内容长度，这样拖拽不会撞到轨道末尾的夹取。
+ * v12 起轨道不再「把一屏摊满」：比例尺固定 72px/s（100%），所以 px 与秒是线性换算。
  */
-const DURATION_SEC = 31
-const timeAtPx = (px: number): number => (px / 1000) * DURATION_SEC
-const pxAtSec = (sec: number): number => (sec / DURATION_SEC) * 1000
+const timeAtPx = (px: number): number => px / PX_PER_SEC
+const pxAtSec = (sec: number): number => sec * PX_PER_SEC
 
 function seedTools(): void {
   const project = createDefaultProject('工具')
@@ -514,9 +522,9 @@ describe('时间轴工具栏', () => {
     fireEvent.click(toolButton(root, TEXT.timeline.magneticSnap))
 
     const card = root.querySelector('.media-clip-card') as HTMLElement
-    // 往右拖 90px → 起点≈2.8s、尾巴≈4.8s，离 B 的开头 5s 只差 0.2s（窗口 0.31s）
+    // 往右拖 210px → 起点≈2.92s、尾巴≈4.92s，离 B 的开头 5s 只差 0.08s（吸附窗口按 10px 换算）
     fireEvent.pointerDown(card, { pointerId: 1, clientX: 0 })
-    fireEvent.pointerMove(card, { pointerId: 1, clientX: 90 })
+    fireEvent.pointerMove(card, { pointerId: 1, clientX: pxAtSec(2.92) })
 
     expect(mediaClip('a').timelineStartSec).toBe(3) // 吸附后尾巴恰好接上 B 的开头
     expect(mediaClip('a').timelineEndSec).toBe(5)
@@ -529,11 +537,11 @@ describe('时间轴工具栏', () => {
     const target = root.querySelector('.media-clip-card') as HTMLElement
 
     fireEvent.pointerDown(target, { pointerId: 2, clientX: 0 })
-    fireEvent.pointerMove(target, { pointerId: 2, clientX: 90 })
+    fireEvent.pointerMove(target, { pointerId: 2, clientX: pxAtSec(2.92) })
 
-    // 不吸附：停在帧吸附后的原位量（2.8s），不会跳到 3s
+    // 不吸附：停在帧吸附后的原位（≈2.93s），不会跳到 3s
     expect(mediaClip('a').timelineStartSec).not.toBe(3)
-    expect(mediaClip('a').timelineStartSec).toBeCloseTo(2.8, 3)
+    expect(mediaClip('a').timelineStartSec).toBeCloseTo(snapTimeToFrame(2.92, FPS_30), 3)
     expect(root.querySelector('.timeline__snap-line')).toBeNull()
   })
 
@@ -558,7 +566,8 @@ describe('时间轴工具栏', () => {
     // P4：黄线接管预览，蓝线不再被顶掉：只是压暗，位置仍是播放头那里
     const head = root.querySelector('.timeline__playhead') as HTMLElement
     expect(head).toBeTruthy()
-    expect(head.style.left).toBe('0px')
+    // 播放头挂在整块轨道内容上：左侧 56px 是 sticky 标签槽，0s 就落在槽的右缘
+    expect(head.style.left).toBe('56px')
     expect(timelineEl.className).toContain('timeline--hover-preview')
 
     fireEvent.pointerLeave(timelineEl)
@@ -701,5 +710,66 @@ describe('Timeline 点段落只选中不跳转（P5）', () => {
     fireEvent.pointerDown(findTrack(root), pointerInit(250))
 
     expect(seekTo).toHaveBeenCalled()
+  })
+})
+
+/**
+ * v12 缩放与横滚：Ctrl/Cmd+滚轮以鼠标为锚点改比例尺（10%~800%），
+ * 普通竖向滚轮转成横向滚动。jsdom 没有真实滚动几何，这里手动给滚动容器补 scrollLeft/scrollWidth。
+ */
+describe('Timeline 缩放与横向滚动', () => {
+  function stubScroll(element: HTMLElement): { get: () => number } {
+    let scrollLeft = 0
+    Object.defineProperty(element, 'scrollLeft', {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => {
+        scrollLeft = value
+      }
+    })
+    Object.defineProperty(element, 'scrollWidth', { configurable: true, get: () => 100_000 })
+    return { get: () => scrollLeft }
+  }
+
+  it('Ctrl+滚轮放大：比例尺 ×1.15，且指针下的时刻留在原列', () => {
+    seed()
+    const root = renderTimeline(vi.fn())
+    const scroller = root.querySelector('.timeline__scroll') as HTMLElement
+    const scrollLeft = stubScroll(scroller)
+
+    // 100%：72px/s，指针 clientX=300 → 锚点时间 (0+300-56)/72 ≈ 3.389s
+    fireEvent.wheel(scroller, { deltaY: -120, ctrlKey: true, clientX: 300 })
+
+    expect(useUiStore.getState().timelineZoom).toBeCloseTo(1.15, 6)
+    expect(root.querySelector('.timeline__rows')!.getAttribute('data-px-per-sec')).toBe('82.8')
+    // 82.8px/s 下把 3.389s 放回第 300px 这一列：3.389×82.8 − 300 + 56 ≈ 36.6
+    expect(scrollLeft.get()).toBeCloseTo(36.6, 1)
+  })
+
+  it('缩放夹在 10%~800%：到顶到底再滚都不越界', () => {
+    seed()
+    const root = renderTimeline(vi.fn())
+    const scroller = root.querySelector('.timeline__scroll') as HTMLElement
+    stubScroll(scroller)
+
+    act(() => useUiStore.getState().setTimelineZoom(8))
+    fireEvent.wheel(scroller, { deltaY: -120, ctrlKey: true, clientX: 300 })
+    expect(useUiStore.getState().timelineZoom).toBe(8)
+
+    act(() => useUiStore.getState().setTimelineZoom(0.1))
+    fireEvent.wheel(scroller, { deltaY: 120, ctrlKey: true, clientX: 300 })
+    expect(useUiStore.getState().timelineZoom).toBe(0.1)
+  })
+
+  it('普通竖向滚轮只横滚，不动缩放', () => {
+    seed()
+    const root = renderTimeline(vi.fn())
+    const scroller = root.querySelector('.timeline__scroll') as HTMLElement
+    const scrollLeft = stubScroll(scroller)
+
+    fireEvent.wheel(scroller, { deltaY: 240, clientX: 300 })
+
+    expect(useUiStore.getState().timelineZoom).toBe(1)
+    expect(scrollLeft.get()).toBe(240)
   })
 })

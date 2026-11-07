@@ -1,8 +1,9 @@
 import { create } from 'zustand'
-import { DEFAULT_FPS, DEFAULT_RESOLUTION, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
+import { DEFAULT_FPS, DEFAULT_RESOLUTION, MAX_TRACK_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
 import { applyClipStyleToAll, createClip, createId, duplicateClip, normalizeProject, splitSubtitleClipAt } from '@shared/projectSchema'
-import { snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
-import { alignAfterOverlap, compactMediaClips, splitMediaClipAt } from '@shared/mediaClips'
+import { frameIntervalSec, snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
+import { compactMediaClips, mediaClipLayer, splitMediaClipAt } from '@shared/mediaClips'
+import { clampMoveToGap, clampTrimEnd, clampTrimStart, firstFreeStart, gapAround, type TimelineSpan } from '@shared/clipCollision'
 import { resolveTargetAt, findSelectedRef, type TargetRef, type TimelineSelection, type TimelineTracks } from '@shared/timelineTargets'
 import { useStabPreviewStore } from './stabPreviewStore'
 import type {
@@ -27,7 +28,7 @@ import { clipWithPresetDefaults, hasKeys } from '@shared/clipStyle'
 import { defaultMediaVideo, normalizeMediaVideo } from '@shared/mediaClipVideo'
 import { defaultMediaStab, normalizeMediaStab } from '@shared/mediaStab'
 import { defaultClipAudio, defaultClipSpeed, normalizeClipAudio, normalizeClipSpeed, speedValueOf } from '@shared/mediaClipAudio'
-import { IMAGE_STILL_SEC, applyAudioClipSpeed, inferMediaKind, makeAudioClip, moveAudioClip, normalizeLayer, sortAudioClips, splitAudioClipAt, trimAudioClip } from '@shared/audioClips'
+import { IMAGE_STILL_SEC, applyAudioClipSpeed, inferMediaKind, makeAudioClip, moveAudioClip as applyMoveAudioClip, normalizeLayer, sortAudioClips, splitAudioClipAt, trimAudioClip as applyTrimAudioClip } from '@shared/audioClips'
 
 /** 工程状态（规格 §4.6）。所有时间值在写入时已吸附到帧边界，存储仍为秒。 */
 
@@ -48,13 +49,22 @@ export interface ProjectState {
   /** 每次变更递增，驱动自动保存与预览重建 */
   revision: number
   currentPath: string | null
+  /** 当前工程在最近工程索引里的身份（'autosave' 或 p+hash）；未知/null 时自动保存写入草稿 */
+  currentEntryId: string | null
+  /** 是否有未落盘改动（保存成功后由 adoptSavedEntry 清零） */
+  isDirty: boolean
   /**
    * 工程被整体替换（打开工程文件 / 启动恢复自动存档）时自增。
    * 历史记账用它判「换工程了」——跨工程的撤销没有意义，看到它变化就清空整条历史。
    */
   projectEpoch: number
 
-  loadProject: (project: Project, path?: string) => void
+  loadProject: (project: Project, path?: string, entryId?: string | null) => void
+  /**
+   * 另存为 / 打开成功后接住主进程返回的新身份：
+   * 只更新路径与 entryId，不推 revision（内容已经在磁盘上，自动保存不需要重写一遍）。
+   */
+  adoptSavedEntry: (path: string, entryId: string) => void
   setName: (name: string) => void
   setResolution: (width: number, height: number) => void
   setFps: (fps: Fps) => void
@@ -220,6 +230,16 @@ function withClips(project: Project, clips: SubtitleClip[]): Project {
   return { ...project, clips: [...clips].sort((a, b) => a.startTime - b.startTime) }
 }
 
+/** 字幕条 → 夹取函数用的区间（它用 startTime/endTime，与另两轨字段名不同）。 */
+function subtitleSpan(clip: SubtitleClip): TimelineSpan {
+  return { startSec: clip.startTime, endSec: clip.endTime }
+}
+
+/** 媒体段 / 音频段 → 夹取函数用的区间。 */
+function trackSpan(clip: { timelineStartSec: number; timelineEndSec: number }): TimelineSpan {
+  return { startSec: clip.timelineStartSec, endSec: clip.timelineEndSec }
+}
+
 function withMediaClips(project: Project, mediaClips: MediaClip[]): Project {
   return { ...project, mediaClips: [...mediaClips].sort((a, b) => a.timelineStartSec - b.timelineStartSec) }
 }
@@ -298,12 +318,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   fonts: [],
   revision: 0,
   currentPath: null,
+  currentEntryId: null,
+  isDirty: false,
   projectEpoch: 0,
 
-  loadProject: (project, path) =>
+  loadProject: (project, path, entryId) =>
     set((state) => ({
       project,
       currentPath: path ?? null,
+      currentEntryId: entryId ?? null,
+      isDirty: false,
       selectedClipId: project.clips[0]?.id ?? null,
       selectedMediaClipId: project.mediaClips[0]?.id ?? null,
       selectedAudioClipId: project.audioClips?.[0]?.id ?? null,
@@ -312,6 +336,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       revision: state.revision + 1,
       projectEpoch: state.projectEpoch + 1
     })),
+
+  adoptSavedEntry: (path, entryId) =>
+    set({ currentPath: path, currentEntryId: entryId, isDirty: false }),
 
   setName: (name) =>
     set((state) => ({ project: { ...state.project, name }, revision: state.revision + 1 })),
@@ -451,8 +478,28 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setClipTimes: (id, startTime, endTime) => {
     const state = get()
     const fps = state.project.fps
-    const start = snapTimeToFrame(Math.max(0, startTime), fps)
+    const current = state.project.clips.find((clip) => clip.id === id)
+    if (!current) return
+    const minSec = frameIntervalSec(fps)
+    // 只在「自己当前所在的空档」里移动/伸缩：撞到邻居就贴住，不推开别人
+    const gap = gapAround(
+      subtitleSpan(current),
+      state.project.clips.filter((clip) => clip.id !== id).map(subtitleSpan)
+    )
+    let start = snapTimeToFrame(Math.max(0, startTime), fps)
     let end = snapTimeToFrame(Math.max(start + 0.001, endTime), fps)
+    const startMoved = Math.abs(start - current.startTime) > 1e-9
+    const endMoved = Math.abs(end - current.endTime) > 1e-9
+    if (startMoved && endMoved) {
+      // 整体拖拽：保持时长，夹在空档里
+      const length = Math.max(minSec, end - start)
+      start = clampMoveToGap(start, length, gap.startSec, gap.endSec)
+      end = snapTimeToFrame(start + length, fps)
+    } else if (startMoved) {
+      start = clampTrimStart(start, gap.startSec, current.endTime - minSec)
+    } else if (endMoved) {
+      end = clampTrimEnd(end, current.startTime + minSec, gap.endSec)
+    }
     if (timeToFrameAtOrAfter(end, fps) - timeToFrameAtOrAfter(start, fps) < 1) {
       end = snapTimeToFrame(start + 0.2, fps)
     }
@@ -574,7 +621,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const fps = state.project.fps
     const item = state.project.media.find((m) => m.id === input.mediaId)
     if (!item) return null
-    const start = snapTimeToFrame(Math.max(0, input.timelineStartSec), fps)
+    let start = snapTimeToFrame(Math.max(0, input.timelineStartSec), fps)
     const durationSec = Math.max(MIN_MEDIA_CLIP_SEC, input.durationSec ?? item.meta.durationSec)
     // 源入点后钳到最短时长，再向源尾部收：不足最短时长的落点拒收而不是静默截断
     const sourceIn = snapTimeToFrame(Math.max(0, input.sourceInSec ?? 0), fps)
@@ -583,6 +630,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     // 新建段一律 1x（无 speed 键），所以 `(sourceOut - sourceIn) / 1` 与旧写法逐字节一致
     let end = snapTimeToFrame(start + (sourceOut - sourceIn), fps)
     if (end - start < MIN_MEDIA_CLIP_SEC) end = snapTimeToFrame(start + MIN_MEDIA_CLIP_SEC, fps)
+    // 落点被占：顺延到后面的第一个空档（只选位置，不推动已有段）；一直放不下就拒收
+    const length = end - start
+    const placed = firstFreeStart(
+      start,
+      length,
+      state.project.mediaClips
+        .filter((other) => mediaClipLayer(other) === 0)
+        .map((other) => ({ startSec: other.timelineStartSec, endSec: other.timelineEndSec })),
+      MAX_TRACK_SEC
+    )
+    if (placed === null) return null
+    if (placed !== start) {
+      start = placed
+      end = snapTimeToFrame(start + length, fps)
+    }
     const clip = makeMediaClip({
       mediaId: item.id,
       timelineStartSec: start,
@@ -604,16 +666,33 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const current = state.project.mediaClips.find((c) => c.id === id)
     if (!current) return
     const length = current.timelineEndSec - current.timelineStartSec
-    const start = snapTimeToFrame(Math.max(0, timelineStartSec), fps)
+    // 只跟同层邻居抢空间：不同图层允许时间重叠
+    const others = state.project.mediaClips.filter(
+      (c) => c.id !== id && mediaClipLayer(c) === mediaClipLayer(current)
+    )
+    const gap = gapAround(trackSpan(current), others.map(trackSpan))
+    // 夹在空档里：撞到邻居就贴住，绝不推开别人（"挪不过去就卡在原地"）
+    const start = clampMoveToGap(
+      snapTimeToFrame(Math.max(0, timelineStartSec), fps),
+      length,
+      gap.startSec,
+      gap.endSec
+    )
     const moved: MediaClip = {
       ...current,
       timelineStartSec: start,
       timelineEndSec: snapTimeToFrame(start + length, fps)
     }
-    // 规则：拖拽落点与其它片段重叠时才把后续片段整体右移（保持各自时长）
-    const others = state.project.mediaClips.filter((c) => c.id !== id)
+    const merged = state.project.mediaClips.map((c) => (c.id === id ? moved : c))
+    // 空工程/已紧贴时不动工程，避免无意义地推高 revision（会触发自动保存）
+    if (
+      Math.abs(moved.timelineStartSec - current.timelineStartSec) < 1e-9 &&
+      Math.abs(moved.timelineEndSec - current.timelineEndSec) < 1e-9
+    ) {
+      return
+    }
     set({
-      project: withMediaClips(state.project, [moved, ...alignAfterOverlap(others, moved, fps)]),
+      project: withMediaClips(state.project, merged),
       selectedMediaClipId: id,
       revision: state.revision + 1
     })
@@ -628,10 +707,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const sourceDuration = item?.meta.durationSec ?? Number.POSITIVE_INFINITY
     // v9：拖边时时间轴位移与源位移之间差一个倍速（1x 时与旧写法逐字节一致）
     const speed = speedValueOf(current.speed)
+    // 同层邻居决定这段能伸到哪：撞到邻居就停，绝不挤开别人
+    const gap = gapAround(
+      trackSpan(current),
+      state.project.mediaClips
+        .filter((c) => c.id !== id && mediaClipLayer(c) === mediaClipLayer(current))
+        .map(trackSpan)
+    )
     let next = { ...current }
     if (patch.timelineStartSec !== undefined) {
       const start = snapTimeToFrame(
-        Math.max(0, Math.min(patch.timelineStartSec, current.timelineEndSec - MIN_MEDIA_CLIP_SEC)),
+        clampTrimStart(
+          Math.max(0, patch.timelineStartSec),
+          gap.startSec,
+          current.timelineEndSec - MIN_MEDIA_CLIP_SEC
+        ),
         fps
       )
       const delta = start - current.timelineStartSec
@@ -646,7 +736,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     if (patch.timelineEndSec !== undefined) {
       const end = snapTimeToFrame(
-        Math.max(next.timelineStartSec + MIN_MEDIA_CLIP_SEC, patch.timelineEndSec),
+        clampTrimEnd(patch.timelineEndSec, next.timelineStartSec + MIN_MEDIA_CLIP_SEC, gap.endSec),
         fps
       )
       const duration = end - next.timelineStartSec
@@ -909,29 +999,86 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       state.project.fps
     )
     if (!clip) return null
-    const audioClips = [...(state.project.audioClips ?? []), clip]
+    // 落点被占：顺延到同层后面的第一个空档（只选位置，不推动已有段）
+    const layer = normalizeLayer(input.layer)
+    const placed = firstFreeStart(
+      clip.timelineStartSec,
+      clip.timelineEndSec - clip.timelineStartSec,
+      (state.project.audioClips ?? [])
+        .filter((other) => normalizeLayer(other.layer) === layer)
+        .map((other) => ({ startSec: other.timelineStartSec, endSec: other.timelineEndSec })),
+      MAX_TRACK_SEC
+    )
+    if (placed === null) return null
+    const placedClip =
+      Math.abs(placed - clip.timelineStartSec) < 1e-9
+        ? clip
+        : applyMoveAudioClip(clip, placed, state.project.fps)
+    const audioClips = [...(state.project.audioClips ?? []), placedClip]
     set({
       project: withAudioClips(state.project, audioClips),
-      selectedAudioClipId: clip.id,
+      selectedAudioClipId: placedClip.id,
       revision: state.revision + 1
     })
-    return clip
+    return placedClip
   },
 
   moveAudioClip: (id, timelineStartSec) => {
     const state = get()
+    const current = (state.project.audioClips ?? []).find((clip) => clip.id === id)
+    if (!current) return
+    // 只跟同层邻居抢空间；撞到就贴住，不推开别人
+    const others = (state.project.audioClips ?? []).filter(
+      (clip) => clip.id !== id && normalizeLayer(clip.layer) === normalizeLayer(current.layer)
+    )
+    const gap = gapAround(trackSpan(current), others.map(trackSpan))
+    const length = current.timelineEndSec - current.timelineStartSec
+    const start = clampMoveToGap(
+      Math.max(0, timelineStartSec),
+      length,
+      gap.startSec,
+      gap.endSec
+    )
+    if (Math.abs(start - current.timelineStartSec) < 1e-9) return
     const audioClips = (state.project.audioClips ?? []).map((clip) =>
-      clip.id === id ? moveAudioClip(clip, timelineStartSec, state.project.fps) : clip
+      clip.id === id ? applyMoveAudioClip(clip, start, state.project.fps) : clip
     )
     set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
   },
 
   trimAudioClip: (id, patch) => {
     const state = get()
+    const current = (state.project.audioClips ?? []).find((clip) => clip.id === id)
+    if (!current) return
+    const others = (state.project.audioClips ?? []).filter(
+      (clip) => clip.id !== id && normalizeLayer(clip.layer) === normalizeLayer(current.layer)
+    )
+    const gap = gapAround(trackSpan(current), others.map(trackSpan))
+    const minSec = frameIntervalSec(state.project.fps)
+    const clamped: { timelineStartSec?: number; timelineEndSec?: number } = {}
+    if (patch.timelineStartSec !== undefined) {
+      clamped.timelineStartSec = clampTrimStart(
+        patch.timelineStartSec,
+        gap.startSec,
+        current.timelineEndSec - minSec
+      )
+    }
+    if (patch.timelineEndSec !== undefined) {
+      clamped.timelineEndSec = clampTrimEnd(
+        patch.timelineEndSec,
+        current.timelineStartSec + minSec,
+        gap.endSec
+      )
+    }
     const audioClips = (state.project.audioClips ?? []).map((clip) => {
       if (clip.id !== id) return clip
       const item = state.project.media.find((m) => m.id === clip.mediaId)
-      return trimAudioClip(clip, patch, state.project.fps, item?.meta.durationSec ?? Number.POSITIVE_INFINITY)
+      return applyTrimAudioClip(
+        clip,
+        clamped,
+        state.project.fps,
+        item?.meta.durationSec ?? Number.POSITIVE_INFINITY
+      )
     })
     set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
   },

@@ -18,7 +18,8 @@ import type {
   StabPreviewResult,
   VideoMeta
 } from '../shared/types'
-import type { EstimateInput, SmokeReport, WatermarkPickResult } from '../shared/api'
+import type { EstimateInput, SmokeReport, WatermarkPickResult, CoverCaptureRect, NewProjectResult, OpenProjectResult, SaveProjectResult } from '../shared/api'
+import type { RecentProjectCard } from '../shared/recentProjects'
 
 /**
  * preload：把主进程能力以最小面暴露给渲染进程（contextIsolation，零 Node 泄露）。
@@ -44,10 +45,33 @@ const api = {
     readFileDev: (filePath: string) => ipcRenderer.invoke(CHANNELS.devReadFile, filePath) as Promise<Uint8Array | null>
   },
   project: {
-    open: () => ipcRenderer.invoke(CHANNELS.projectOpen),
-    saveAs: (project: Project) => ipcRenderer.invoke(CHANNELS.projectSaveAs, project),
+    open: () => ipcRenderer.invoke(CHANNELS.projectOpen) as Promise<OpenProjectResult | null>,
+    saveAs: (project: Project) =>
+      ipcRenderer.invoke(CHANNELS.projectSaveAs, project) as Promise<SaveProjectResult | null>,
     autosaveRead: () => ipcRenderer.invoke(CHANNELS.projectAutosaveRead),
-    autosaveWrite: (project: Project) => ipcRenderer.invoke(CHANNELS.projectAutosaveWrite, project)
+    /**
+     * entryId 是当前工程在最近工程索引里的身份：
+     * - 文件工程传它的 entryId：这次自动保存把 modifiedAt 记到那条记录上；
+     * - 未另存的新工程传 null：主进程维护固定的 'autosave' 草稿卡片。
+     */
+    autosaveWrite: (project: Project, entryId?: string | null) =>
+      ipcRenderer.invoke(CHANNELS.projectAutosaveWrite, project, entryId ?? null),
+
+    /** 启动页：按最近使用倒序返回 */
+    recentList: () => ipcRenderer.invoke(CHANNELS.projectRecentList) as Promise<RecentProjectCard[]>,
+    /** 新建日期命名工程（同名自动加中文序号） */
+    createNew: () => ipcRenderer.invoke(CHANNELS.projectRecentCreate) as Promise<NewProjectResult>,
+    /** 按索引 id 打开（文件工程读文件，'autosave' 读自动存档） */
+    openRecent: (id: string) =>
+      ipcRenderer.invoke(CHANNELS.projectRecentOpen, id) as Promise<OpenProjectResult | null>,
+    /** 自定义名称：写回工程文件/自动存档，返回更新后的卡片 */
+    renameRecent: (id: string, name: string) =>
+      ipcRenderer.invoke(CHANNELS.projectRecentRename, id, name) as Promise<RecentProjectCard | null>,
+    /** 只移出最近列表（不删除工程文件；'autosave' 会连同草稿一起丢弃） */
+    removeRecent: (id: string) => ipcRenderer.invoke(CHANNELS.projectRecentRemove, id),
+    /** 把预览画面截成封面；成功返回 focusnews-cover:// 地址 */
+    captureCover: (id: string, rect: CoverCaptureRect) =>
+      ipcRenderer.invoke(CHANNELS.projectRecentCaptureCover, id, rect) as Promise<string | null>
   },
   fonts: {
     list: () => ipcRenderer.invoke(CHANNELS.fontsList) as Promise<FontRecord[]>,

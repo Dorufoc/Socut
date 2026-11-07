@@ -117,11 +117,7 @@ export async function importMediaWith(picked: PickedVideo): Promise<MediaImportO
   }
   const store = useProjectStore.getState()
   store.addMedia(item)
-  // 时间轴自动落一段覆盖全长的片段：保持 v1「导入即可见参考视频」的习惯；
-  // 素材库里再拖入同一枚时不会产生重叠（后续段由 moveMediaClip 的重叠规则负责右移）。
-  if (useMeta.durationSec > 0) {
-    store.insertMediaClip({ mediaId, timelineStartSec: 0, durationSec: useMeta.durationSec, sourceInSec: 0 })
-  }
+  // 导入只入素材池，不自动落时间轴；用户可拖到轨道或点「放到播放头」显式放置。
   // 缩略图异步抽帧（不阻塞导入流程；失败保持空串，卡片显示占位符）
   void window.focusnews.media
     .generateThumb(mediaId, usePath, Math.min(1, Math.max(0, useMeta.durationSec / 2)))

@@ -5,7 +5,8 @@ import { CHANNELS } from '../shared/ipcChannels'
 import { APP_NAME, WINDOW_TITLE } from '../shared/constants'
 import { validateAllPresets } from '../shared/presets'
 import type { AudioPeaksRequest, AudioPeaksResult, ExportRequest, Fps, MediaStripRequest, MediaStripResult, Project, StabPreviewRequest, StabPreviewResult, VideoMeta } from '../shared/types'
-import type { AppInfo, EstimateInput } from '../shared/api'
+import type { AppInfo, CoverCaptureRect, EstimateInput } from '../shared/api'
+import { AUTOSAVE_ENTRY_ID, RECENT_ENTRY_ID_PATTERN, recentEntryIdForPath } from '../shared/recentProjects'
 import { describeBinarySource, resolveFfmpegBinaries, userFontsDir } from './paths'
 import { ffmpegVersion } from './ffrun'
 import { log } from './log'
@@ -18,6 +19,18 @@ import {
   saveProjectAs
 } from './projectStore'
 import { pickAndProbeVideo, pickManyAndProbeVideos, probeVideo } from './videoImport'
+import {
+  createRecentProject,
+  listRecentProjects,
+  openRecentProject,
+  registerAutosaveProject,
+  registerFileProject,
+  removeRecentProject,
+  renameRecentProject,
+  saveRecentCover,
+  setAutosaveOwner,
+  updateEntryFromProject
+} from './recentProjectStore'
 import { pickAndProbeWatermark } from './watermark'
 import { createPreviewUrl } from './media'
 import { ensureThumbRegistered, generateThumbnail, removeThumbnail, thumbUrlFor } from './thumbProtocol'
@@ -34,6 +47,15 @@ import type { ExportEngine } from './export/engine'
 
 function senderWindow(event: Electron.IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(event.sender)
+}
+
+/** 封面裁剪矩形：四个分量都必须是有限数，宽高必须为正。 */
+function isCaptureRect(rect: unknown): rect is CoverCaptureRect {
+  if (typeof rect !== 'object' || rect === null) return false
+  const value = rect as Record<string, unknown>
+  const finite = (key: string): boolean => typeof value[key] === 'number' && Number.isFinite(value[key])
+  if (!finite('x') || !finite('y') || !finite('width') || !finite('height')) return false
+  return (value['width'] as number) > 0 && (value['height'] as number) > 0
 }
 
 /** 开发取证文件的统一路径约束：仅非打包、且必须落在仓库 spikes/ 下。 */
@@ -200,19 +222,101 @@ export function registerIpc(engine: ExportEngine): void {
   // ---------------------------------------------------------------- 工程
   ipcMain.handle(CHANNELS.projectOpen, async (event) => {
     const loaded = await openProjectDialog(senderWindow(event))
-    return loaded
+    if (!loaded) return null
+    // 历史登记失败不能阻断「打开工程」本身：退化为按路径即时算 id 返回
+    try {
+      const entry = await registerFileProject(loaded.path, loaded.project, { touchOpened: true })
+      return { ...loaded, entryId: entry.id }
+    } catch (error) {
+      console.warn(`[recent] 登记打开工程失败：${String(error)}`)
+      return { ...loaded, entryId: recentEntryIdForPath(loaded.path) }
+    }
   })
 
   ipcMain.handle(CHANNELS.projectSaveAs, async (event, project: Project) => {
     const savedPath = await saveProjectAs(senderWindow(event), project)
-    return savedPath ? { path: savedPath } : null
+    if (!savedPath) return null
+    try {
+      const entry = await registerFileProject(savedPath, project, { touchOpened: true })
+      return { path: savedPath, entryId: entry.id }
+    } catch (error) {
+      console.warn(`[recent] 登记另存工程失败：${String(error)}`)
+      return { path: savedPath, entryId: recentEntryIdForPath(savedPath) }
+    }
   })
 
   ipcMain.handle(CHANNELS.projectAutosaveRead, async () => autosaveRead())
 
-  ipcMain.handle(CHANNELS.projectAutosaveWrite, async (_event, project: Project) => {
+  ipcMain.handle(CHANNELS.projectAutosaveWrite, async (_event, project: Project, entryId?: string | null) => {
+    // 自动存档本身保持原有失败语义（渲染侧需要知道落盘失败）
     await autosaveWrite(project)
+    // 历史登记是附加能力：任何异常只记日志，绝不向渲染侧抛出
+    try {
+      await setAutosaveOwner(entryId ?? null)
+      if (entryId == null) {
+        await registerAutosaveProject(project)
+      } else if (entryId === AUTOSAVE_ENTRY_ID) {
+        await updateEntryFromProject(AUTOSAVE_ENTRY_ID, project, { touchModified: true })
+      } else {
+        await updateEntryFromProject(entryId, project, { touchModified: true })
+      }
+    } catch (error) {
+      console.warn(`[recent] 自动保存历史更新失败：${String(error)}`)
+    }
   })
+
+  // ---------------------------------------------------------------- 最近工程（启动页）
+  ipcMain.handle(CHANNELS.projectRecentList, async () => listRecentProjects())
+
+  ipcMain.handle(CHANNELS.projectRecentCreate, async () => createRecentProject())
+
+  ipcMain.handle(CHANNELS.projectRecentOpen, async (_event, id: string) =>
+    openRecentProject(String(id))
+  )
+
+  ipcMain.handle(CHANNELS.projectRecentRename, async (_event, id: string, name: string) =>
+    renameRecentProject(String(id), String(name))
+  )
+
+  ipcMain.handle(CHANNELS.projectRecentRemove, async (_event, id: string) => removeRecentProject(String(id)))
+
+  /**
+   * 拍封面：渲染侧量到预览画面矩形（CSS 像素 / DIP），主进程按内容区裁剪后
+   * 走 capturePage；任何裁剪越界都夹紧，过小/空白帧返回 null（拍封面是尽力而为）。
+   */
+  ipcMain.handle(
+    CHANNELS.projectRecentCaptureCover,
+    async (event, id: string, rect: CoverCaptureRect): Promise<string | null> => {
+      try {
+        if (typeof id !== 'string' || !RECENT_ENTRY_ID_PATTERN.test(id)) return null
+        if (!isCaptureRect(rect)) return null
+        const window = BrowserWindow.fromWebContents(event.sender)
+        if (!window) return null
+
+        const size = window.getContentSize()
+        const contentWidth = size[0] ?? 0
+        const contentHeight = size[1] ?? 0
+        if (contentWidth <= 0 || contentHeight <= 0) return null
+        const x = Math.max(0, Math.min(Math.floor(rect.x), contentWidth - 1))
+        const y = Math.max(0, Math.min(Math.floor(rect.y), contentHeight - 1))
+        const width = Math.min(Math.floor(rect.width), contentWidth - x)
+        const height = Math.min(Math.floor(rect.height), contentHeight - y)
+        if (width < 16 || height < 16) return null
+
+        const image = await window.webContents.capturePage({
+          x: Math.round(x),
+          y: Math.round(y),
+          width: Math.round(width),
+          height: Math.round(height)
+        })
+        if (image.isEmpty()) return null
+        return await saveRecentCover(id, new Uint8Array(image.toPNG()))
+      } catch (error) {
+        console.warn(`[recent] 封面截取失败：${String(error)}`)
+        return null
+      }
+    }
+  )
 
   // ---------------------------------------------------------------- 字体
   ipcMain.handle(CHANNELS.fontsList, async () => listFonts())

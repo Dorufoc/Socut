@@ -2,6 +2,7 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 import { app } from 'electron'
 import { TEMP_ROOT, USER_DATA_DIRS } from '../shared/constants'
+import { RECENT_ENTRY_ID_PATTERN } from '../shared/recentProjects'
 
 /**
  * 路径解析（规格 §8：FFmpeg 二进制必须位于 asar 外部）。
@@ -45,6 +46,23 @@ export function projectsDir(): string {
 
 export function logsDir(): string {
   return path.join(app.getPath('userData'), USER_DATA_DIRS.logs)
+}
+
+/** 启动页工程封面目录（userData/covers）。 */
+export function userCoversDir(): string {
+  return path.join(app.getPath('userData'), USER_DATA_DIRS.covers)
+}
+
+/**
+ * 启动页封面路径（userData/covers/<entryId>.png）。
+ * entryId 只接受最近工程索引里合法的两种形态（'autosave' 或 p+16 位十六进制），
+ * 其余一律抛错——封面协议与写盘都只走这一条路径，不给目录穿越留口子。
+ */
+export function userCoverPath(entryId: string): string {
+  if (!RECENT_ENTRY_ID_PATTERN.test(entryId)) {
+    throw new Error(`非法封面 id：${entryId}`)
+  }
+  return path.join(userCoversDir(), `${entryId}.png`)
 }
 
 /** v2：素材卡片缩略图落盘路径（userData/thumbs/<mediaId>.jpg）。mediaId 只允许安全字符，防目录穿越。 */

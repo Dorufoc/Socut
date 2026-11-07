@@ -23,7 +23,8 @@ function serialize(project: Project): string {
   return `${JSON.stringify(project, null, 2)}\n`
 }
 
-async function atomicWrite(file: string, content: string): Promise<void> {
+/** 原子写：先写 .tmp 再 rename（同盘 rename 在 Windows 上不会留下半截文件）。 */
+export async function atomicWrite(file: string, content: string): Promise<void> {
   const tmp = `${file}.tmp`
   await fs.writeFile(tmp, content, 'utf8')
   await fs.rename(tmp, file)
@@ -67,6 +68,11 @@ async function parseFile(file: string): Promise<Project | null> {
   } catch {
     return null
   }
+}
+
+/** 读取任意工程文件并归一（坏 JSON / 文件不存在 / 结构不可用一律返回 null）。 */
+export async function readProjectFile(file: string): Promise<Project | null> {
+  return parseFile(file)
 }
 
 export async function autosaveRead(): Promise<Project | null> {

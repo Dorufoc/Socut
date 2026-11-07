@@ -1,22 +1,22 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
 import { fpsToString } from '@shared/constants'
-import { MEDIA_GRADE_FILTER_ID, curveTableValues, defaultMediaVideo, mediaVideoFilter, mediaVideoTransform, needsChannelTable } from '@shared/mediaClipVideo'
-import { frameIntervalSec } from '@shared/fps'
-import { sourceTimeOf, topActiveMediaClip } from '@shared/mediaClips'
-import { stabProxyTimeOf } from '@shared/mediaStab'
+import { defaultMediaVideo } from '@shared/mediaClipVideo'
+import { topActiveMediaClip } from '@shared/mediaClips'
 import { activeAudioClips, mediaKindOf } from '@shared/audioClips'
 import { clipTimelineDurationSec, previewGainAt, previewPlaybackRate, previewPreservesPitch, sourceTimeAt } from '@shared/mediaClipAudio'
 import { attachPreviewAudio, elementLevelReader, setElementLevel, setPreservesPitch } from '../audio/previewAudioGraph'
 import { setPreviewLevelReader } from '../audio/previewLevel'
 import { computeWatermarkGeometry } from '@shared/ffmpegArgs'
-import type { AudioClip, MediaItem, RenderJobSpec } from '@shared/types'
+import type { AudioClip, MediaClip, MediaItem, RenderJobSpec } from '@shared/types'
 import { usePreviewLoop } from '../hooks/usePreviewLoop'
 import { containFrameRect, displayToNative, hitTestClips } from '../render/hitTest'
+import { selectPreviewCandidates, type PreviewCandidate } from '../render/previewCandidates'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 import { stabSignatureFor, useStabPreviewStore } from '../state/stabPreviewStore'
 import { FontLoadingOverlay } from '../dialog/FontLoadingOverlay'
+import { MediaPreviewLayer, type MediaPreviewHandle } from './MediaPreviewLayer'
 import { StageTransformOverlay } from './StageTransformOverlay'
 
 /**
@@ -38,8 +38,6 @@ import { StageTransformOverlay } from './StageTransformOverlay'
  * Canvas / 参考视频 / 水印 / 角标 / 提示语全部装进同一个 `.stage__frame` 容器：
  * 五者共用一个原点与一个缩放比，拖动分隔线时它们一起移动、一起缩放，不会谁落在黑边上。
  */
-
-type RefVideoState = 'idle' | 'loading' | 'ready' | 'failed'
 
 /** 稳定的空音频轨（避免选择器每次返回新数组引起重渲染） */
 const EMPTY_AUDIO_CLIPS: AudioClip[] = []
@@ -69,7 +67,7 @@ export interface PreviewStageProps {
 
 export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElement {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const layerRef = useRef<MediaPreviewHandle | null>(null)
   const playing = useUiStore((state) => state.playing)
   const setLiveClipId = useUiStore((state) => state.setLiveClipId)
   const showSafeArea = useUiStore((state) => state.showSafeArea)
@@ -86,95 +84,78 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   const legacyHasAudio = useProjectStore((state) => state.project.refVideo?.meta.audioCodec != null)
   const watermark = useProjectStore((state) => state.project.watermark)
 
-  /** 预览时间落在哪枚素材上（含源坐标）；多层时取**最上层**，段间空隙/空轨为 null。 */
-  const mediaSource = useMemo(() => {
-    if (mediaClips.length > 0) {
-      const at = topActiveMediaClip(mediaClips, Math.max(0, previewTime))
-      if (!at) return null
-      const item = mediaPool.find((m) => m.id === at.mediaId)
-      if (!item) return null
-      return {
-        mediaId: item.id,
-        path: item.path,
-        // v9：时间轴 1s 吃掉 speed 秒源内容（1x 时与旧写法逐字节一致）
-        sourceSec: sourceTimeAt(at, Math.max(0, previewTime)),
-        clip: at,
-        kind: mediaKindOf(item),
-        hasAudio: typeof item.meta.audioCodec === 'string' && item.meta.audioCodec.length > 0
-      }
-    }
-    if (legacyRefPath) {
-      return {
-        mediaId: 'legacy-ref',
-        path: legacyRefPath,
-        sourceSec: Math.max(0, previewTime),
-        clip: null,
-        kind: 'video' as const,
-        hasAudio: legacyHasAudio
-      }
-    }
-    return null
-  }, [mediaClips, mediaPool, legacyRefPath, legacyHasAudio, previewTime])
-
-  const [videoUrl, setVideoUrl] = useState<string | null>(null)
-  const [videoState, setVideoState] = useState<RefVideoState>('idle')
-
-  /**
-   * v8.1：防抖预览代理——当前片段有「签名仍新鲜」的已就绪代理时，换播稳定化后的代理文件；
-   * 否则（未应用/生成中/参数已改）继续播原片。代理内容 = 源区间 1:1，
-   * 目标时间改用 stabProxyTimeOf 换成代理坐标（减法口径只在 shared/mediaStab 里定义）。
-   */
   const projectFps = useProjectStore((state) => state.project.fps)
-  const stabApplied = useStabPreviewStore((state) => (mediaSource?.clip ? state.applied[mediaSource.clip.id] : undefined))
-  const stabProxyPath = useMemo(() => {
-    if (!mediaSource?.clip?.stab?.enabled) return null
-    const applied = stabApplied
-    if (!applied || !applied.path) return null
-    const signature = stabSignatureFor({
-      clip: mediaSource.clip,
-      stab: mediaSource.clip.stab,
-      sourcePath: mediaSource.path,
-      fps: projectFps,
-      hasAudio: mediaSource.hasAudio
-    })
-    return applied.signature === signature ? applied.path : null
-  }, [mediaSource, stabApplied, projectFps])
-  const useStabProxy = stabProxyPath !== null
-
-  // 源文件变化才重新申请可流式播放地址（主进程校验存在与扩展名后才放行）
-  const sourcePath = (useStabProxy ? stabProxyPath : mediaSource?.path) ?? null
-  useEffect(() => {
-    let cancelled = false
-    setVideoUrl(null)
-    setVideoState(sourcePath ? 'loading' : 'idle')
-    if (!sourcePath) return
-    void window.focusnews.video
-      .previewUrl(sourcePath)
-      .then((url) => {
-        if (cancelled) return
-        if (url) setVideoUrl(url)
-        else setVideoState('failed')
-      })
-      .catch(() => {
-        if (!cancelled) setVideoState('failed')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [sourcePath])
-
-  const videoReady = videoState === 'ready'
+  const stabApplied = useStabPreviewStore((state) => state.applied)
 
   /**
-   * 当前播放头所在媒体段的画面编辑（v6）：几何变换走 CSS transform、调色走 CSS filter，
-   * 曲线/曝光/冷暖走 SVG 曲线表。语义全部来自 shared/mediaClipVideo，导出层将来接同一条口径。
+   * 预览候选池：当前图层 + 刚结束的兜底段 + 前瞻窗口内的下一段。
+   * 路径在这里就解析成原片/防抖代理，DOM 层只负责挂载与同步。
    */
-  const videoEdit = mediaSource?.clip?.video
-  const videoStyle = useMemo((): CSSProperties => {
-    const transform = mediaVideoTransform(videoEdit)
-    const filter = mediaVideoFilter(videoEdit)
-    return { ...(transform !== 'none' ? { transform } : {}), ...(filter !== 'none' ? { filter } : {}) }
-  }, [videoEdit])
+  const candidates = useMemo((): PreviewCandidate[] => {
+    const out: PreviewCandidate[] = []
+    for (const clip of selectPreviewCandidates(mediaClips, Math.max(0, previewTime))) {
+      const item = mediaPool.find((media) => media.id === clip.mediaId)
+      if (!item) continue
+      const kind = mediaKindOf(item)
+      if (kind === 'audio') continue
+      const hasAudio = typeof item.meta.audioCodec === 'string' && item.meta.audioCodec.length > 0
+      let sourcePath = item.path
+      let useStabProxy = false
+      if (clip.stab?.enabled) {
+        const applied = stabApplied[clip.id]
+        if (applied?.path) {
+          const signature = stabSignatureFor({
+            clip,
+            stab: clip.stab,
+            sourcePath: item.path,
+            fps: projectFps,
+            hasAudio
+          })
+          if (applied.signature === signature) {
+            sourcePath = applied.path
+            useStabProxy = true
+          }
+        }
+      }
+      out.push({ clip, kind, hasAudio, sourcePath, useStabProxy })
+    }
+    // @deprecated v1 兼容：没有 mediaClips 时，旧 refVideo 也走同一条候选池
+    if (out.length === 0 && mediaClips.length === 0 && legacyRefPath) {
+      const clip: MediaClip = {
+        id: 'legacy-ref',
+        mediaId: 'legacy-ref',
+        timelineStartSec: 0,
+        timelineEndSec: 1e12,
+        sourceInSec: 0,
+        sourceOutSec: 1e12
+      }
+      out.push({ clip, kind: 'video', hasAudio: legacyHasAudio, sourcePath: legacyRefPath, useStabProxy: false })
+    }
+    return out
+  }, [mediaClips, mediaPool, previewTime, stabApplied, projectFps, legacyRefPath, legacyHasAudio])
+
+  const [mediaVisibleReady, setMediaVisibleReady] = useState(false)
+  /** 同一份可见性同时写进 ref：usePreviewLoop 在同一帧的 blit 里读它 */
+  const mediaVisibleRef = useRef(false)
+  const [failedClipIds, setFailedClipIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [audioRoute, setAudioRoute] = useState<{ element: HTMLVideoElement; clip: MediaClip } | null>(null)
+
+  const handleVisibleChange = useCallback((visible: boolean): void => {
+    mediaVisibleRef.current = visible
+    setMediaVisibleReady(visible)
+  }, [])
+
+  const handleAudioChange = useCallback((element: HTMLVideoElement | null, clip: MediaClip | null): void => {
+    setAudioRoute(element && clip ? { element, clip } : null)
+  }, [])
+
+  const handleFailure = useCallback((clipId: string): void => {
+    setFailedClipIds((previous) => (previous.has(clipId) ? previous : new Set(previous).add(clipId)))
+  }, [])
+
+  useEffect(() => {
+    setFailedClipIds(new Set())
+  }, [mediaClips])
 
   /**
    * 画面交互层只在「选中媒体段 + 打开交互开关 + 该段正处在**播放头**下」时出现：
@@ -257,9 +238,14 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     spec,
     playing,
     showSafeArea,
-    transparent: videoReady,
+    transparent: mediaVisibleReady,
+    transparentRef: mediaVisibleRef,
     overrideSec: hoverPreviewSec,
-    onDisplayTime: setDisplayTime
+    onDisplayTime: setDisplayTime,
+    onTick: (timelineSec, isPlaying) => {
+      // 悬停时按静态帧预览：媒体层暂停在悬停帧，不跟着播放时钟跑
+      layerRef.current?.tick(timelineSec, isPlaying && hoverPreviewSec === null)
+    }
   })
 
   useEffect(() => {
@@ -271,86 +257,25 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     })
   }, [handle, onHandle])
 
-  // 播放/暂停跟随预览时钟
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video || !videoReady) return
-    if (playing) void video.play().catch(() => undefined)
-    else video.pause()
-  }, [playing, videoReady])
-
-  // 时间对齐：目标始终是「本段源坐标」（播代理时是代理坐标）；暂停时精确吸附，播放中只在漂移超过阈值时纠正
-  const sourceSec = mediaSource?.sourceSec ?? null
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video || !videoReady || sourceSec === null) return
-    const clip = mediaSource?.clip
-    const target =
-      useStabProxy && clip?.stab?.enabled
-        ? stabProxyTimeOf(sourceSec, clip.sourceInSec, clip.sourceOutSec)
-        : sourceSec
-    const drift = Math.abs(video.currentTime - target)
-    // 播放中只在漂移超过 0.25s 时纠正；暂停时按「半帧」判定——
-    // 键盘逐帧跳转的偏移正好是一帧，用固定的 0.04s 会在 25/30fps 下把这一帧当噪声放过，
-    // 画面就不动了。小于半帧的残差是解码器自己的量化，再下 seek 也不会更好。
-    if (drift <= (playing ? 0.25 : frameIntervalSec(projectFps) / 2)) return
-    const duration = Number.isFinite(video.duration) ? video.duration : target
-    try {
-      video.currentTime = Math.min(target, Math.max(0, duration - 0.001))
-    } catch {
-      // 元数据尚未就绪时忽略，loadedmetadata 会再对齐一次
-    }
-  }, [sourceSec, playing, videoReady, useStabProxy, mediaSource, projectFps])
-
   /**
-   * v9：媒体段原声的预览输出（音量 / 渐入渐出 / 变速）。
-   *
-   * 只在**播放时**出声（暂停就维持静音，跟旧行为一样不会“seek 一下乱响”），
-   * 增益走 `shared/mediaClipAudio` 的同一个包络函数，所以面板拉渐变滑杆
-   * 听到的斜边与导出 `afade` 的形状、时间轴频谱条的斜角是同一回事。
+   * 媒体原声只接**当前出声的那一路**：增益图与分析节点都挂在这一路，
+   * 时间轴频谱条读到的就是它。切段时图层会先把旧路 gain 归零，再通知新路。
    */
-  const sourceClip = mediaSource?.clip ?? null
-  const audible = playing && mediaSource?.kind === 'video' && mediaSource.hasAudio
   useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    if (!sourceClip) {
-      setElementLevel(video, 1)
+    if (!audioRoute) {
+      setLiveClipId(null)
+      setPreviewLevelReader(null)
       return
     }
-    const outLen = clipTimelineDurationSec(sourceClip)
-    const local = Math.max(0, Math.min(outLen, Math.max(0, displayTime) - sourceClip.timelineStartSec))
-    setElementLevel(video, previewGainAt(sourceClip.audio, local, outLen))
-  }, [sourceClip, displayTime, audible])
-
-  /** 倍速与音高：`playbackRate` + `preservesPitch`（与导出 `atempo`/`asetrate` 同一开关）。 */
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    const speed = sourceClip?.speed
-    const rate = previewPlaybackRate(speed)
-    if (Math.abs(video.playbackRate - rate) > 1e-3) {
-      video.playbackRate = rate
-      video.defaultPlaybackRate = rate
-    }
-    setPreservesPitch(video, previewPreservesPitch(speed))
-  }, [sourceClip, videoReady, playing])
-
-  /**
-   * 实时频谱：播放时把这一路接进增益图（分析节点顺带给出电平），
-   * 并把「现在谁在出声」告知时间轴（只有那一条卡片会起伏）。
-   */
-  useEffect(() => {
-    const video = videoRef.current
-    const clipId = audible && sourceClip ? sourceClip.id : null
-    if (audible && video) attachPreviewAudio(video)
-    setLiveClipId(clipId)
-    setPreviewLevelReader(clipId && video ? elementLevelReader(video) : null)
+    const { element, clip } = audioRoute
+    attachPreviewAudio(element, 0)
+    setLiveClipId(clip.id)
+    setPreviewLevelReader(elementLevelReader(element))
     return () => {
       setLiveClipId(null)
       setPreviewLevelReader(null)
     }
-  }, [audible, sourceClip, setLiveClipId])
+  }, [audioRoute, setLiveClipId])
 
   /**
    * 点击预览选中片段：先按「显示矩形 → 目标分辨率」换算成原生像素，
@@ -374,60 +299,14 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     <div className="stage__canvas-wrap" ref={wrapRef}>
       {/* 画面框：唯一与目标分辨率同比例的矩形，里面所有层共用同一原点与缩放比 */}
       <div className="stage__frame" style={frameStyle}>
-        {/* 曲线 / 曝光 / 冷暖的按通道查找表（与 CSS filter 的 url(#id) 同源） */}
-        {videoEdit && needsChannelTable(videoEdit) ? (
-          <svg className="stage__filters" aria-hidden="true" focusable="false">
-            <defs>
-              <filter id={MEDIA_GRADE_FILTER_ID} colorInterpolationFilters="sRGB">
-                <feComponentTransfer>
-                  <feFuncR type="table" tableValues={curveTableValues(videoEdit, 'r')} />
-                  <feFuncG type="table" tableValues={curveTableValues(videoEdit, 'g')} />
-                  <feFuncB type="table" tableValues={curveTableValues(videoEdit, 'b')} />
-                </feComponentTransfer>
-              </filter>
-            </defs>
-          </svg>
-        ) : null}
-        {videoUrl && mediaSource?.kind === 'image' ? (
-          <img
-            className={`stage__ref-video${videoReady ? ' stage__ref-video--ready' : ''}`}
-            src={videoUrl}
-            style={videoStyle}
-            alt=""
-            draggable={false}
-            onLoad={() => setVideoState('ready')}
-            onError={() => setVideoState('failed')}
-          />
-        ) : null}
-        {videoUrl && mediaSource?.kind !== 'image' ? (
-          <video
-            ref={videoRef}
-            className={`stage__ref-video${videoReady ? ' stage__ref-video--ready' : ''}`}
-            src={videoUrl}
-            style={videoStyle}
-            muted={!audible}
-            playsInline
-            preload="auto"
-            aria-label="参考视频预览"
-            onLoadedMetadata={() => {
-              const video = videoRef.current
-              if (video) {
-                const store = useUiStore.getState()
-                const at = sourceTimeOf(useProjectStore.getState().project.mediaClips, Math.max(0, store.displayTimeSec))
-                const sourceSec0 = Math.max(0, at?.sourceSec ?? store.displayTimeSec)
-                // 本 <video> 的 src 就是代理（useStabProxy 已经签名校验）时才换成代理坐标
-                const clip = mediaSource?.clip
-                video.currentTime =
-                  useStabProxy && clip?.stab?.enabled
-                    ? stabProxyTimeOf(sourceSec0, clip.sourceInSec, clip.sourceOutSec)
-                    : sourceSec0
-                if (!store.playing) video.pause()
-              }
-              setVideoState('ready')
-            }}
-            onError={() => setVideoState('failed')}
-          />
-        ) : null}
+        <MediaPreviewLayer
+          ref={layerRef}
+          candidates={candidates}
+          fps={projectFps}
+          onVisibleChange={handleVisibleChange}
+          onAudioChange={handleAudioChange}
+          onFailure={handleFailure}
+        />
 
         <canvas
           ref={canvasRef}
@@ -458,9 +337,9 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
               {spec.width}×{spec.height} · {fpsToString(spec.fps)} · {MODE_LABEL[spec.aspectMode] ?? spec.aspectMode}
             </span>
           ) : null}
-          {videoReady ? <span className="chip chip--ok">媒体叠加</span> : null}
+          {mediaVisibleReady ? <span className="chip chip--ok">媒体叠加</span> : null}
           {watermarkStyle ? <span className="chip chip--ok">水印叠加</span> : null}
-          {videoState === 'failed' ? <span className="chip chip--warn">参考视频不可预览</span> : null}
+          {failedClipIds.size > 0 ? <span className="chip chip--warn">参考视频不可预览</span> : null}
         </div>
       </div>
 

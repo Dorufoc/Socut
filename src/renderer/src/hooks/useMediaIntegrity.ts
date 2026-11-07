@@ -60,7 +60,7 @@ export function useMediaIntegrity(): void {
         }
         const outcome = await importMediaWith(picked)
         if (cancelled || outcome.cancelled || !outcome.mediaId) continue
-        // 换源不换轨：新条目替换旧 id 的路径/元数据，导入时自动铺的那段随即删掉
+        // 换源不换轨：新条目替换旧 id 的路径/元数据，临时导入项随即从池中删掉
         const latest = useProjectStore.getState()
         const fresh = latest.project.media.find((m) => m.id === outcome.mediaId)
         if (fresh) {

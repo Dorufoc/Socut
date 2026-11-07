@@ -140,22 +140,72 @@ describe('媒体轨动作', () => {
     expect(useProjectStore.getState().insertMediaClip({ mediaId: 'nope', timelineStartSec: 0 })).toBeNull()
   })
 
-  it('moveMediaClip：仅重叠才把后续片段整体右移，各自时长与源坐标不变', () => {
+  it('moveMediaClip：只能在空档里滑动，撞到邻居就贴住，绝不推动它', () => {
     const store = useProjectStore.getState()
     const id = store.addMedia(seedItem())
     const a = store.insertMediaClip({ mediaId: id, timelineStartSec: 0, durationSec: 4 })!
     const b = store.insertMediaClip({ mediaId: id, timelineStartSec: 5, durationSec: 3 })!
-    // 把 a 拖到 4s：与 b（5–8）重叠 4–? a 变为 4–8，b 应被右移到 8–11
+    // 把 a 拖到 4s：a 与 b（5–8）之间的空档只容得下 [0,5]，所以 a 停在 1s 贴住 b 的左缘
     useProjectStore.getState().moveMediaClip(a.id, 4)
     const after = useProjectStore.getState().project.mediaClips
     const movedA = after.find((c) => c.id === a.id)!
     const movedB = after.find((c) => c.id === b.id)!
-    expect(movedA.timelineStartSec).toBe(4)
-    expect(movedB.timelineStartSec).toBe(8)
+    expect(movedA.timelineStartSec).toBe(1)
+    expect(movedA.timelineEndSec).toBe(5)
+    // b 一动不动（时长与源坐标也不变）
+    expect(movedB.timelineStartSec).toBe(5)
+    expect(movedB.timelineEndSec).toBe(8)
     expect(movedB.timelineEndSec - movedB.timelineStartSec).toBeCloseTo(3, 6)
     expect(movedB.sourceInSec).toBe(b.sourceInSec)
     expect(movedB.sourceOutSec).toBe(b.sourceOutSec)
   })
+
+  it('moveMediaClip：拖到后半段时，起点更早但**不重叠**的片段原地不动', () => {
+    const store = useProjectStore.getState()
+    const id = store.addMedia(seedItem({ meta: baseMeta({ durationSec: 10 }) }))
+    // 前段 C[0,1]，被拖的 A[3,7]
+    const c = store.insertMediaClip({ mediaId: id, timelineStartSec: 0, durationSec: 1 })!
+    const a = store.insertMediaClip({ mediaId: id, timelineStartSec: 3, durationSec: 4 })!
+    // A 拖到 2s（[2,6]）：与 C 完全不相交，C 必须留在 0
+    useProjectStore.getState().moveMediaClip(a.id, 2)
+    const after = useProjectStore.getState().project.mediaClips
+    expect(after.find((clip) => clip.id === a.id)!.timelineStartSec).toBe(2)
+    expect(after.find((clip) => clip.id === c.id)!.timelineStartSec).toBe(0)
+    expect(after.find((clip) => clip.id === c.id)!.timelineEndSec).toBe(1)
+  })
+
+  it('moveMediaClip：不同图层的片段互不推挤', () => {
+    const store = useProjectStore.getState()
+    const id = store.addMedia(seedItem({ meta: baseMeta({ durationSec: 10 }) }))
+    const a = store.insertMediaClip({ mediaId: id, timelineStartSec: 3, durationSec: 4 })!
+    const b = store.insertMediaClip({ mediaId: id, timelineStartSec: 8, durationSec: 1 })!
+    useProjectStore.getState().setMediaClipLayer(b.id, 1)
+    // B 从 8s 拖到 4s：与 0 层的 A[3,7] 重叠，但 B 在 1 层，不能把 A 顶走
+    useProjectStore.getState().moveMediaClip(b.id, 4)
+    const after = useProjectStore.getState().project.mediaClips
+    expect(after.find((clip) => clip.id === b.id)!.timelineStartSec).toBe(4)
+    expect(after.find((clip) => clip.id === a.id)!.timelineStartSec).toBe(3)
+    expect(after.find((clip) => clip.id === a.id)!.timelineEndSec).toBe(7)
+  })
+
+  it('moveMediaClip：压住多段时也只贴住最近的那段，不推动任何邻居', () => {
+    const store = useProjectStore.getState()
+    const id = store.addMedia(seedItem({ meta: baseMeta({ durationSec: 10 }) }))
+    const a = store.insertMediaClip({ mediaId: id, timelineStartSec: 0, durationSec: 4 })!
+    const b = store.insertMediaClip({ mediaId: id, timelineStartSec: 5, durationSec: 1 })!
+    const c = store.insertMediaClip({ mediaId: id, timelineStartSec: 6.5, durationSec: 0.5 })!
+    // A 想拖到 5s：空档 [0,5] 只放得下 4s，A 停在 1s，B/C 原地不动
+    useProjectStore.getState().moveMediaClip(a.id, 5)
+    const after = useProjectStore.getState().project.mediaClips
+    const movedA = after.find((clip) => clip.id === a.id)!
+    const movedB = after.find((clip) => clip.id === b.id)!
+    const movedC = after.find((clip) => clip.id === c.id)!
+    expect(movedA.timelineStartSec).toBe(1)
+    expect(movedA.timelineEndSec).toBe(5)
+    expect(movedB.timelineStartSec).toBe(5)
+    expect(movedC.timelineStartSec).toBe(6.5)
+  })
+
 
   it('trimMediaClip：入/出点与源坐标同幅度平移，恒等式不破坏', () => {
     const store = useProjectStore.getState()
@@ -533,9 +583,12 @@ describe('v9 片段音频与变速动作', () => {
   it('变速不推挤其他段，也不改它们的参数', () => {
     const first = seedClipAt0()
     const mediaId = useProjectStore.getState().project.media[0]!.id
+    // 落点被占：第二段顺延到第一段后面的空档（10s 起），不叠在 0s
     const second = useProjectStore.getState().insertMediaClip({ mediaId, timelineStartSec: 0 })!.id
+    expect(mediaClipOf(second).timelineStartSec).toBeCloseTo(10, 6)
     useProjectStore.getState().updateMediaClipSpeed(first, { speed: 2 })
-    expect(mediaClipOf(second).timelineEndSec).toBeCloseTo(10, 6)
+    expect(mediaClipOf(second).timelineStartSec).toBeCloseTo(10, 6)
+    expect(mediaClipOf(second).timelineEndSec).toBeCloseTo(20, 6)
     expect(mediaClipOf(second).speed).toBeUndefined()
   })
 

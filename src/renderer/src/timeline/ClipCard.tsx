@@ -6,6 +6,7 @@ import { TEXT } from '@shared/i18n'
 import { secondsToTimecode } from '@shared/timecode'
 import type { Fps, SubtitleClip } from '@shared/types'
 import { secToPx } from './ruler'
+import { laneBoxFromCard, secAtClientX } from './lane'
 
 /**
  * 时间轴字幕轨的**示意条**（v4）：
@@ -26,9 +27,20 @@ export interface ClipCardProps {
   playheadSec: number
   onSelect: (id: string) => void
   onChangeTimes: (startTime: number, endTime: number) => void
+  /** 按下时回调：上层在这一刻快照吸附候选边缘，拖拽途中不再重算 */
+  onDragStart?: () => void
+  onCommit?: () => void
 }
 
 type Edge = 'in' | 'out' | 'move'
+
+interface DragState {
+  edge: Edge
+  /** 按下时指针相对示意条左缘的偏移 */
+  grabOffsetPx: number
+  start: number
+  end: number
+}
 
 export function ClipCard({
   clip,
@@ -38,39 +50,57 @@ export function ClipCard({
   selected,
   playheadSec,
   onSelect,
-  onChangeTimes
+  onChangeTimes,
+  onDragStart,
+  onCommit
 }: ClipCardProps): ReactElement {
-  const dragRef = useRef<{ edge: Edge; pointerX: number; start: number; end: number } | null>(null)
+  const dragRef = useRef<DragState | null>(null)
+  const cardRef = useRef<HTMLDivElement | null>(null)
   const preset = getPreset(clip.presetId)
 
   const left = secToPx(clip.startTime, durationSec, widthPx)
   const right = secToPx(clip.endTime, durationSec, widthPx)
 
   const begin = (edge: Edge) => (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const card = cardRef.current
+    if (!card) return
+    const rect = card.getBoundingClientRect()
+    if (rect.width <= 0) return
     onSelect(clip.id)
-    dragRef.current = { edge, pointerX: event.clientX, start: clip.startTime, end: clip.endTime }
+    dragRef.current = {
+      edge,
+      grabOffsetPx: event.clientX - rect.left,
+      start: clip.startTime,
+      end: clip.endTime
+    }
     event.currentTarget.setPointerCapture(event.pointerId)
     event.stopPropagation()
+    onDragStart?.()
   }
 
   const onMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
     const drag = dragRef.current
     if (!drag) return
-    const deltaSec = ((event.clientX - drag.pointerX) / Math.max(1, widthPx)) * durationSec
+    // 绝对换算（与媒体段同口径）：每次都用示意条当前位置反推车道原点，滚动后也不会偏
+    const box = laneBoxFromCard(cardRef.current, widthPx)
+    if (!box) return
     if (drag.edge === 'move') {
       const length = drag.end - drag.start
-      let start = snapTimeToFrame(Math.max(0, drag.start + deltaSec), fps)
-      if (start + length > durationSec) start = snapTimeToFrame(durationSec - length, fps)
+      const grabSec = secAtClientX(event.clientX - drag.grabOffsetPx, box, durationSec)
+      const start = snapTimeToFrame(Math.min(grabSec, Math.max(0, durationSec - length)), fps)
       onChangeTimes(start, snapTimeToFrame(start + length, fps))
       return
     }
     if (drag.edge === 'in') {
-      const start = snapTimeToFrame(Math.min(drag.end - MIN_CLIP_DURATION_SEC, Math.max(0, drag.start + deltaSec)), fps)
+      const start = snapTimeToFrame(
+        Math.min(drag.end - MIN_CLIP_DURATION_SEC, secAtClientX(event.clientX, box, durationSec)),
+        fps
+      )
       onChangeTimes(start, drag.end)
       return
     }
     const end = snapTimeToFrame(
-      Math.max(drag.start + MIN_CLIP_DURATION_SEC, Math.min(durationSec, drag.end + deltaSec)),
+      Math.max(drag.start + MIN_CLIP_DURATION_SEC, secAtClientX(event.clientX, box, durationSec)),
       fps
     )
     onChangeTimes(drag.start, end)
@@ -79,7 +109,10 @@ export function ClipCard({
   const end = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (!dragRef.current) return
     dragRef.current = null
-    event.currentTarget.releasePointerCapture(event.pointerId)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    onCommit?.()
   }
 
   const barWidth = Math.max(24, right - left)
@@ -94,6 +127,8 @@ export function ClipCard({
 
   return (
     <div
+        ref={cardRef}
+        data-clip-id={clip.id}
       className={`clip-card${selected ? ' clip-card--selected' : ''}${onAir ? ' clip-card--onair' : ''}`}
       style={{ left, width: barWidth }}
       onPointerDown={(event) => {

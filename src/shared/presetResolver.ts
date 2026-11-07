@@ -92,6 +92,21 @@ export interface PlanInput {
   forceCompact?: boolean
 }
 
+/**
+ * 时间轴内容的真实末尾（秒）：字幕 / 媒体 / 音频三轨取并集包络，空工程 = 0。
+ *
+ * 只给 UI 用（播放头与蓝线上限、轨道长度）：它**不夹最小值**，所以「空工程」时
+ * 播放头只能停在 0s，而不是旧实现里那个凭空的 5s / MIN_CLIP_DURATION_SEC。
+ * 导出长度仍走 `projectDurationSec`（见下），两者语义不同，不要合并。
+ */
+export function timelineContentEndSec(project: Project): number {
+  let endSec = 0
+  for (const clip of project.clips) endSec = Math.max(endSec, clip.endTime)
+  for (const clip of project.mediaClips) endSec = Math.max(endSec, clip.timelineEndSec)
+  for (const clip of project.audioClips ?? []) endSec = Math.max(endSec, clip.timelineEndSec)
+  return Math.max(0, endSec)
+}
+
 /** 时间轴覆盖时长（秒）：字幕轨与媒体轨取并集包络（v2）。 */
 export function projectDurationSec(project: Project): number {
   const maxClipEnd = project.clips.reduce((acc, clip) => Math.max(acc, clip.endTime), 0)

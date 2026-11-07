@@ -50,6 +50,14 @@ export function IconTrash({ size = 14, strokeWidth = 1.8 }: IconProps): ReactEle
   ])
 }
 
+/** 铅笔（素材库紧凑卡片上的「重命名」入口） */
+export function IconPencil({ size = 14, strokeWidth = 1.8 }: IconProps): ReactElement {
+  return frame(size, [
+    <path key="body" d="M4 20l4.6-1.1L18.8 8.7a2.3 2.3 0 0 0-3.2-3.2L5.4 15.7 4 20Z" strokeWidth={strokeWidth} />,
+    <line key="tip" x1="13.9" y1="7.2" x2="16.8" y2="10.1" strokeWidth={strokeWidth} />
+  ])
+}
+
 export function IconUndo({ size = 14, strokeWidth = 1.8 }: IconProps): ReactElement {
   return frame(size, [
     <path key="tail" d="M4 9h10.5a4.5 4.5 0 0 1 0 9H9" strokeWidth={strokeWidth} />,

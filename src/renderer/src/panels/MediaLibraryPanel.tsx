@@ -1,4 +1,11 @@
-import { useEffect, useState, type DragEvent as ReactDragEvent, type ReactElement } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type DragEvent as ReactDragEvent,
+  type ReactElement
+} from 'react'
 import { detectCompat } from '@shared/probe'
 import { mediaKindOf } from '@shared/audioClips'
 import { formatDuration } from '@shared/timecode'
@@ -7,13 +14,22 @@ import { useProjectStore } from '../state/projectStore'
 import { mediaGateState, useUiStore } from '../state/uiStore'
 import { useVideoImport } from '../hooks/useVideoImport'
 import { Expander } from '../components/ui/Expander'
+import { IconPencil, IconPlus, IconTrash } from '../components/ui/Icon'
+import { nextMediaTileSize, readMediaTileSize, writeMediaTileSize } from './mediaTileSize'
 
 /**
  * 素材库面板（v2 阶段 3）：多文件批量导入、缩略图卡片、枚级门禁角标。
  * 卡片可拖拽到时间轴媒体轨（dataTransfer 携带 mediaId），也可一键放到播放头。
+ *
+ * v11：参照剪映导入面板改成紧凑网格——固定列宽、缩略图为主、操作收进悬停浮层；
+ * Ctrl + 滚轮改 `--media-tile-size`，列数与卡片大小随之变化（尺寸写本机 localStorage）。
+ * 56px 起即可用：字体、角标与浮层按钮都按卡片尺寸用 clamp 收缩，不会溢出。
  */
 
 const DRAG_MEDIA_MIME = 'application/x-focusnews-media'
+
+/** 网格容器的内联样式：只暴露一个卡片尺寸变量，具体列数交给 CSS 的 auto-fill */
+type MediaGridStyle = CSSProperties & Record<'--media-tile-size', string>
 
 function baseName(target: string): string {
   return target.split(/[\\/]/).pop() || target
@@ -32,6 +48,30 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
   const { importMedia } = useVideoImport()
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [tileSize, setTileSize] = useState(() => readMediaTileSize())
+  const panelRef = useRef<HTMLElement | null>(null)
+
+  // 尺寸偏好写回本机（与工程无关）；拖动滚轮时会连续触发，localStorage 写入很便宜
+  useEffect(() => {
+    writeMediaTileSize(tileSize)
+  }, [tileSize])
+
+  /**
+   * Ctrl + 滚轮缩放卡片：必须用原生监听才能 preventDefault（React 的 onWheel 在
+   * 根节点上是 passive 的，拦不住也就会让侧栏跟着滚动甚至触发放大页面）。
+   * 只改一个自定义属性，列数由 CSS auto-fill 重新计算。
+   */
+  useEffect(() => {
+    const panel = panelRef.current
+    if (!panel) return
+    const onWheel = (event: WheelEvent): void => {
+      if (!event.ctrlKey && !event.metaKey) return
+      event.preventDefault()
+      setTileSize((current) => nextMediaTileSize(current, event.deltaY))
+    }
+    panel.addEventListener('wheel', onWheel, { passive: false })
+    return () => panel.removeEventListener('wheel', onWheel)
+  }, [])
 
   // 工程载入后：主进程重启让 thumbnailUrl 失效，逐枚重新登记（文件还在就能立刻恢复显示）
   useEffect(() => {
@@ -66,10 +106,13 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
   }
 
   return (
-    <section className="group">
+    <section className="group" ref={panelRef}>
       <div className="group__head">
         <span className="group__title">素材库</span>
-        <span className={`chip${media.length > 0 ? ' chip--ok' : ''}`}>{media.length} 枚</span>
+        <span className="media-grid__tools">
+          <span className="group__hint">Ctrl+滚轮 缩放</span>
+          <span className={`chip${media.length > 0 ? ' chip--ok' : ''}`}>{media.length} 枚</span>
+        </span>
       </div>
 
       <button
@@ -97,11 +140,12 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
         </div>
       ) : null}
 
-      <div className="media-grid">
+      <div className="media-grid" style={{ '--media-tile-size': `${tileSize}px` } as MediaGridStyle}>
         {media.map((item) => {
           const flags = detectCompat(item.meta)
           const gate = mediaGateState(item)
           const missing = missingMediaIds.includes(item.id)
+          const displayName = item.name || baseName(item.path)
           return (
             <div
               key={item.id}
@@ -118,10 +162,44 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
                     {mediaKindOf(item) === 'audio' ? '♪' : mediaKindOf(item) === 'image' ? '▣' : '▶'}
                   </span>
                 )}
+                <span className="media-tile__duration mono">{formatDuration(item.meta.durationSec)}</span>
                 {missing ? <span className="media-tile__badge media-tile__badge--danger">文件缺失</span> : null}
                 {!missing && gate.blocked ? (
                   <span className="media-tile__badge media-tile__badge--warn">{gate.reason?.replace(`《${item.name}》`, '') ?? '待确认'}</span>
                 ) : null}
+                {/* 悬停/键盘聚焦才出现的操作浮层：卡片本身留给缩略图，保持剪映式网格的密度 */}
+                <div className="media-tile__overlay">
+                  {onPlaceAtPlayhead ? (
+                    <button
+                      type="button"
+                      className="media-tile__overlay-btn"
+                      disabled={missing}
+                      onClick={() => onPlaceAtPlayhead(item.id)}
+                      title="整段放入播放头处"
+                      aria-label={`放到播放头：${displayName}`}
+                    >
+                      <IconPlus size={13} />
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="media-tile__overlay-btn"
+                    onClick={() => startRename(item)}
+                    title="重命名"
+                    aria-label={`重命名：${displayName}`}
+                  >
+                    <IconPencil size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    className="media-tile__overlay-btn media-tile__overlay-btn--danger"
+                    onClick={() => removeItem(item)}
+                    title="移出素材库"
+                    aria-label={`移出素材库：${displayName}`}
+                  >
+                    <IconTrash size={13} />
+                  </button>
+                </div>
               </div>
               <div className="media-tile__body">
                 {renamingId === item.id ? (
@@ -138,31 +216,12 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
                   />
                 ) : (
                   <span className="media-tile__name" onDoubleClick={() => startRename(item)} title="双击重命名">
-                    {item.name || baseName(item.path)}
+                    {displayName}
                   </span>
                 )}
                 <span className="media-tile__meta mono">
-                  {item.meta.width}×{item.meta.height} · {formatDuration(item.meta.durationSec)}
+                  {item.meta.width}×{item.meta.height}
                 </span>
-                <div className="media-tile__actions">
-                  {onPlaceAtPlayhead ? (
-                    <button
-                      type="button"
-                      className="btn btn--sm"
-                      disabled={missing}
-                      onClick={() => onPlaceAtPlayhead(item.id)}
-                      title="整段放入播放头处"
-                    >
-                      放到播放头
-                    </button>
-                  ) : null}
-                  <button type="button" className="btn btn--sm btn--subtle" onClick={() => startRename(item)}>
-                    重命名
-                  </button>
-                  <button type="button" className="btn btn--sm btn--danger" onClick={() => removeItem(item)}>
-                    移出
-                  </button>
-                </div>
               </div>
               {uiMode === 'advanced' ? (
                 <Expander title="素材参数" summary={`${item.meta.videoCodec}${flags.vfr ? ' · VFR' : ''}`}>

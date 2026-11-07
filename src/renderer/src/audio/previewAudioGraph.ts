@@ -45,8 +45,13 @@ function createContext(): AudioContext | null {
   }
 }
 
-/** 把元素的音频接进增益图；不可用时返回 null（调用方自行退回 element.volume）。 */
-export function attachPreviewAudio(element: HTMLMediaElement): PreviewAudioNode | null {
+/**
+ * 把元素的音频接进增益图；不可用时返回 null（调用方自行退回 element.volume）。
+ *
+ * `initialGain` 给切段场景用：新元素第一次出声时先以 0 挂图，再由下一 tick
+ * 用 `setTargetAtTime` 升到目标增益，避免从默认 1.0 直接跳到 2.0 的爆音。
+ */
+export function attachPreviewAudio(element: HTMLMediaElement, initialGain = 1): PreviewAudioNode | null {
   const existing = attached.get(element)
   if (existing) return existing
   if (!sharedContext) sharedContext = createContext()
@@ -59,7 +64,7 @@ export function attachPreviewAudio(element: HTMLMediaElement): PreviewAudioNode 
     // fftSize 512 ≈ 每帧 11ms（48k）：电平起伏够跟手，又不必逐样本扫描
     analyser.fftSize = 512
     analyser.smoothingTimeConstant = 0.55
-    gain.gain.value = 1
+    gain.gain.value = Number.isFinite(initialGain) ? Math.max(0, initialGain) : 1
     source.connect(gain)
     gain.connect(analyser)
     analyser.connect(context.destination)

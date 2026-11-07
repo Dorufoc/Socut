@@ -19,6 +19,7 @@ import type {
   VideoMeta,
   VideoProbeResult
 } from './types'
+import type { RecentProjectCard } from './recentProjects'
 
 /** preload 暴露给渲染进程的唯一 API 面（contextIsolation，零 Node 泄露）。 */
 
@@ -157,6 +158,26 @@ export interface GateOutcome {
 export interface OpenProjectResult {
   path: string
   project: Project
+  /** 最近工程索引里的稳定 id（打开后自动保存与封面都按它记账） */
+  entryId: string
+}
+
+export interface SaveProjectResult {
+  path: string
+  entryId: string
+}
+
+export interface NewProjectResult {
+  entry: RecentProjectCard
+  project: Project
+}
+
+/** 截取预览画面作为封面时，渲染进程量到的 .stage__frame 矩形（CSS 像素 / DIP） */
+export interface CoverCaptureRect {
+  x: number
+  y: number
+  width: number
+  height: number
 }
 
 export interface PickVideoResult {
@@ -205,9 +226,27 @@ export interface FocusNewsApi {
   }
   project: {
     open(): Promise<OpenProjectResult | null>
-    saveAs(project: Project): Promise<{ path: string } | null>
+    saveAs(project: Project): Promise<SaveProjectResult | null>
     autosaveRead(): Promise<Project | null>
-    autosaveWrite(project: Project): Promise<void>
+    /**
+     * entryId 是「当前工程在最近工程索引里的身份」：
+     * - 文件工程传它的 entryId：这次自动保存把 modifiedAt 记到那条记录上；
+     * - 未另存的新工程传 null：主进程维护固定的 'autosave' 草稿卡片。
+     */
+    autosaveWrite(project: Project, entryId?: string | null): Promise<void>
+
+    /** 启动页数据：按最近使用倒序返回（渲染层可再按名称排序） */
+    recentList(): Promise<RecentProjectCard[]>
+    /** 新建日期命名工程（同名自动加「（一）」「（二）」），并写入 userData/projects */
+    createNew(): Promise<NewProjectResult>
+    /** 按索引 id 打开（文件工程读文件，'autosave' 读自动存档） */
+    openRecent(id: string): Promise<OpenProjectResult | null>
+    /** 自定义名称：同时写回工程文件/自动存档，返回更新后的卡片 */
+    renameRecent(id: string, name: string): Promise<RecentProjectCard | null>
+    /** 只移出最近列表（不删除工程文件；'autosave' 会连同草稿一起丢弃） */
+    removeRecent(id: string): Promise<void>
+    /** 把预览画面截成封面；成功返回 focusnews-cover:// 地址 */
+    captureCover(id: string, rect: CoverCaptureRect): Promise<string | null>
   }
   fonts: {
     list(): Promise<FontRecord[]>

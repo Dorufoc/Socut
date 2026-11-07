@@ -7,6 +7,7 @@ import { spectrumBarHeights } from '@shared/audioPeaks'
 import { secondsToTimecode } from '@shared/timecode'
 import { TEXT } from '@shared/i18n'
 import type { Fps, MediaClip, MediaItem } from '@shared/types'
+import { laneBoxFromCard, pxPerSecOf, secAtClientX } from './lane'
 import { secToPx } from './ruler'
 import { useMediaStrip } from './useMediaStrips'
 import { useMediaSpectrum } from './useMediaPeaks'
@@ -45,8 +46,10 @@ export interface MediaClipCardProps {
   onSelect: (id: string) => void
   onMove: (timelineStartSec: number) => void
   onTrim: (patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
-  /** 一次拖拽结束时回调（上层用它做「主轨对齐」重排；不传则什么都不做） */
+  /** 一次拖拽结束时的回调（上层用它做「主轨对齐」重排；不传则什么都不做） */
   onCommit?: () => void
+  /** 按下时的回调：上层在这一刻快照吸附候选边缘，拖拽途中不再重算 */
+  onDragStart?: () => void
   /** v7：本条轨道的叠放层数（>1 时按层号切分高度，叠层可见） */
   layers?: number
 }
@@ -55,7 +58,8 @@ type Edge = 'in' | 'out' | 'move'
 
 interface DragState {
   edge: Edge
-  pointerX: number
+  /** 按下时指针相对卡片左缘的偏移：整段平移时靠它保持「按住哪就跟到哪」 */
+  grabOffsetPx: number
   start: number
   end: number
 }
@@ -71,6 +75,7 @@ export function MediaClipCard({
   onMove,
   onTrim,
   onCommit,
+  onDragStart,
   layers = 1
 }: MediaClipCardProps): ReactElement {
   const dragRef = useRef<DragState | null>(null)
@@ -79,8 +84,10 @@ export function MediaClipCard({
   const spectrumRef = useRef<HTMLDivElement | null>(null)
   const [hovering, setHovering] = useState(false)
 
-  const strip = useMediaStrip({ clip, item, widthPx, fps })
-  const spectrum = useMediaSpectrum({ clip, item, widthPx })
+  // 缩略图/波形的采样密度只跟卡片自己有多宽有关：按整条轨道宽（最长 1 小时）算会瞬间吃满上限
+  const cardWidthPx = Math.max(0, clipTimelineDurationSec(clip) * pxPerSecOf(durationSec, widthPx))
+  const strip = useMediaStrip({ clip, item, widthPx: cardWidthPx, fps })
+  const spectrum = useMediaSpectrum({ clip, item, widthPx: cardWidthPx })
   // 柱高把音频参数算进去：拖动音量/渐变滑杆时条子当场变形（预览即反馈）
   const bars = spectrumBarHeights(spectrum.peaks, clip.audio, clipTimelineDurationSec(clip))
   useSpectrumLive(spectrumRef, clip.id, bars.length > 0)
@@ -119,10 +126,20 @@ export function MediaClipCard({
   }
 
   const begin = (edge: Edge) => (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const card = cardRef.current
+    if (!card) return
+    const rect = card.getBoundingClientRect()
+    if (rect.width <= 0) return
     onSelect(clip.id)
-    dragRef.current = { edge, pointerX: event.clientX, start: clip.timelineStartSec, end: clip.timelineEndSec }
+    dragRef.current = {
+      edge,
+      grabOffsetPx: event.clientX - rect.left,
+      start: clip.timelineStartSec,
+      end: clip.timelineEndSec
+    }
     event.currentTarget.setPointerCapture(event.pointerId)
     event.stopPropagation()
+    onDragStart?.()
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
@@ -135,21 +152,26 @@ export function MediaClipCard({
     }
     // 拖拽中：读数没有意义（位置正在变），收起
     setHovering((previous) => (previous ? false : previous))
-    const deltaSec = ((event.clientX - drag.pointerX) / Math.max(1, widthPx)) * durationSec
+    // 绝对换算：每次移动都用卡片**当前**位置反推车道原点。
+    // 不能用按下时的快照——轨道横向滚动后车道会跟着 scrollLeft 移动，快照会整体偏移。
+    const box = laneBoxFromCard(cardRef.current, widthPx)
+    if (!box) return
     if (drag.edge === 'move') {
       const length = drag.end - drag.start
-      let start = snapTimeToFrame(Math.max(0, drag.start + deltaSec), fps)
-      if (start + length > durationSec) start = snapTimeToFrame(durationSec - length, fps)
-      onMove(start)
+      const grabSec = secAtClientX(event.clientX - drag.grabOffsetPx, box, durationSec)
+      onMove(snapTimeToFrame(Math.min(grabSec, Math.max(0, durationSec - length)), fps))
       return
     }
     if (drag.edge === 'in') {
-      const candidate = snapTimeToFrame(Math.min(drag.end - MIN_MEDIA_CLIP_SEC, Math.max(0, drag.start + deltaSec)), fps)
+      const candidate = snapTimeToFrame(
+        Math.min(drag.end - MIN_MEDIA_CLIP_SEC, secAtClientX(event.clientX, box, durationSec)),
+        fps
+      )
       if (candidate !== drag.start) onTrim({ timelineStartSec: candidate })
       return
     }
     const candidate = snapTimeToFrame(
-      Math.max(drag.start + MIN_MEDIA_CLIP_SEC, Math.min(durationSec, drag.end + deltaSec)),
+      Math.max(drag.start + MIN_MEDIA_CLIP_SEC, secAtClientX(event.clientX, box, durationSec)),
       fps
     )
     if (candidate !== drag.end) onTrim({ timelineEndSec: candidate })
@@ -171,7 +193,8 @@ export function MediaClipCard({
 
   return (
     <div
-      ref={cardRef}
+          ref={cardRef}
+          data-clip-id={clip.id}
       className={`media-clip-card${selected ? ' media-clip-card--selected' : ''}${item ? '' : ' media-clip-card--orphan'}${
         stripReady ? ' media-clip-card--strip' : ''
       }${layers > 1 ? ' media-clip-card--layered' : ''}${bars.length > 0 ? ' media-clip-card--spectrum' : ''}`}

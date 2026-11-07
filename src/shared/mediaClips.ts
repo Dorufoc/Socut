@@ -49,29 +49,55 @@ export function mediaClipsOverlap(a: MediaClip, b: MediaClip): boolean {
 }
 
 /**
- * 「仅重叠才右移」的对齐：把 `tracks` 里 id 不等于 `anchorId` 且与新版右段重叠的片段起点推到锚段末尾，
- * 保持其时长不变；无重叠则原样返回。拆分与拖拽排序共用此函数。
+ * 「仅重叠才右移」的对齐：把 `tracks` 里与锚段**真正重叠**且**同层**的片段依次推到锚段末尾，
+ * 保持时长不变；不重叠、异层、以及锚段自身都原样返回。拆分与拖拽共用此函数。
+ *
+ * 这里必须逐条判定重叠，不能只看「锚段末尾 > 片段起点」：
+ * 那样会把所有起点更早的片段（包括完全不重叠的前置段、其他图层的段）全部按到锚段末尾，
+ * 表现为「拖一段，别的段集体跳到同一位置、总时长突然变长、整条轴被重新缩放」。
  */
 export function alignAfterOverlap(
   tracks: MediaClip[],
   anchor: MediaClip,
   fps: Fps
 ): MediaClip[] {
-  return tracks.map((item) => {
-    if (item.id === anchor.id) return item
-    if (anchor.timelineEndSec <= item.timelineStartSec + 1e-9) return item
+  const anchorLayer = mediaClipLayer(anchor)
+  // 只处理锚段所在图层里真正被压住的片段，并按起点顺序依次后移，避免它们全部堆到同一起点
+  const pushed = tracks
+    .filter(
+      (item) =>
+        item.id !== anchor.id &&
+        mediaClipLayer(item) === anchorLayer &&
+        mediaClipsOverlap(item, anchor)
+    )
+    .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
+
+  if (pushed.length === 0) return tracks
+
+  const shifted = new Map<string, MediaClip>()
+  let cursorSec = anchor.timelineEndSec
+  for (const item of pushed) {
     const length = item.timelineEndSec - item.timelineStartSec
-    const newStart = snapTimeToFrame(anchor.timelineEndSec, fps)
+    const newStart = snapTimeToFrame(cursorSec, fps)
     const newEnd = snapTimeToFrame(newStart + length, fps)
-    return {
+    shifted.set(item.id, {
       ...item,
       timelineStartSec: newStart,
       timelineEndSec: newEnd,
       // 源入出点与时间轴位移无关（时长不变），保持原值
       sourceInSec: item.sourceInSec,
       sourceOutSec: item.sourceOutSec
-    }
-  })
+    })
+    cursorSec = newEnd
+  }
+
+  return tracks.map((item) => shifted.get(item.id) ?? item)
+}
+
+/** 图层次号（缺省 0，与 `normalizeLayer` 同口径但避免跨模块依赖）。 */
+export function mediaClipLayer(clip: MediaClip): number {
+  const raw = clip.layer
+  return typeof raw === 'number' && Number.isFinite(raw) ? Math.round(raw) : 0
 }
 
 /**

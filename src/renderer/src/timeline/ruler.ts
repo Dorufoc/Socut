@@ -9,27 +9,48 @@ export interface Tick {
   major: boolean
 }
 
-const CANDIDATE_STEPS = [0.2, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60]
+const CANDIDATE_STEPS = [0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]
 
-export function pickStep(durationSec: number, widthPx: number): number {
-  // 目标：刻度间距不小于 72px
-  const minStep = (durationSec * 72) / Math.max(1, widthPx)
+/**
+ * 主刻度间隔（秒）：保证刻度间距不小于 72px。
+ * 直接按比例尺（px/秒）算，与「轨道到底渲染多长」解耦——缩放时刻度密度只跟缩放走。
+ */
+export function pickStep(pxPerSec: number): number {
+  const minStep = 72 / Math.max(1e-6, pxPerSec)
   for (const step of CANDIDATE_STEPS) {
     if (step >= minStep) return step
   }
-  return CANDIDATE_STEPS[CANDIDATE_STEPS.length - 1] ?? 60
+  return CANDIDATE_STEPS[CANDIDATE_STEPS.length - 1] ?? 3600
 }
 
-export function buildTicks(durationSec: number, fps: Fps, stepSec: number): Tick[] {
+/** 刻度标签：1 分钟内用 `12s`/`2.50`，超过 1 分钟用 `1:30`（1 小时轨道不出现 6 位数）。 */
+function tickLabel(sec: number, isSecond: boolean): string {
+  if (!isSecond) return sec.toFixed(2)
+  const whole = Math.round(sec)
+  if (whole < 60) return `${whole}s`
+  const minutes = Math.floor(whole / 60)
+  const rest = whole % 60
+  return `${minutes}:${String(rest).padStart(2, '0')}`
+}
+
+/**
+ * 只生成 `[fromSec, toSec]` 窗口内的刻度：轨道可以渲染到 1 小时，
+ * 但 DOM 里永远只有视口附近这几十个节点（整条轨道全量渲染会到上万个绝对定位元素）。
+ */
+export function buildTicks(fromSec: number, toSec: number, fps: Fps, stepSec: number): Tick[] {
   const ticks: Tick[] = []
   // 用帧数推进（整数运算），避免浮点累加漂移
   const stepFrames = Math.max(1, Math.round((stepSec * fps.num) / fps.den))
-  const totalFrames = Math.ceil(durationSec / frameIntervalSec(fps))
-  for (let frame = 0; frame <= totalFrames; frame += stepFrames) {
+  const frameSec = frameIntervalSec(fps)
+  const firstFrame = Math.max(0, Math.floor(Math.max(0, fromSec) / frameSec))
+  // 对齐到刻度网格：从窗口前第一个整刻度开始，避免滚动时刻度整体跳动
+  const startFrame = Math.floor(firstFrame / stepFrames) * stepFrames
+  const lastFrame = Math.ceil(Math.max(fromSec, toSec) / frameSec)
+  for (let frame = startFrame; frame <= lastFrame; frame += stepFrames) {
     const sec = (frame * fps.den) / fps.num
-    if (sec > durationSec + frameIntervalSec(fps)) break
+    if (sec > toSec + frameSec) break
     const isSecond = Math.abs(sec - Math.round(sec)) < 1e-6
-    ticks.push({ sec, label: isSecond ? `${Math.round(sec)}s` : sec.toFixed(2), major: isSecond })
+    ticks.push({ sec, label: tickLabel(sec, isSecond), major: isSecond })
   }
   return ticks
 }
