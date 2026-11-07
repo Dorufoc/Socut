@@ -330,7 +330,7 @@ describe('音频轨', () => {
       project: {
         ...project,
         audioClips: [
-          { id: 'a1', mediaId: 'media-1', timelineStartSec: 2, timelineEndSec: 10, sourceInSec: 0, sourceOutSec: 8 }
+          { id: 'a1', mediaId: 'media-1', trackId: 'track-audio-0', timelineStartSec: 2, timelineEndSec: 10, sourceInSec: 0, sourceOutSec: 8 }
         ]
       },
       selectedAudioClipId: null,
@@ -471,8 +471,8 @@ function seedTools(): void {
   subtitle.endTime = 30
   project.clips = [subtitle]
   project.mediaClips = [
-    { id: 'a', mediaId: item.id, timelineStartSec: 0, timelineEndSec: 2, sourceInSec: 0, sourceOutSec: 2 },
-    { id: 'b', mediaId: item.id, timelineStartSec: 5, timelineEndSec: 7, sourceInSec: 0, sourceOutSec: 2 }
+    { id: 'a', mediaId: item.id, trackId: 'track-media-0', timelineStartSec: 0, timelineEndSec: 2, sourceInSec: 0, sourceOutSec: 2 },
+    { id: 'b', mediaId: item.id, trackId: 'track-media-0', timelineStartSec: 5, timelineEndSec: 7, sourceInSec: 0, sourceOutSec: 2 }
   ]
   useProjectStore.setState({ project, selectedClipId: null, selectedMediaClipId: null, fonts: [] })
 }
@@ -687,7 +687,7 @@ describe('Timeline 点段落只选中不跳转（P5）', () => {
       useProjectStore.setState({
         project: {
           ...project,
-          audioClips: [{ id: 'a1', mediaId: 'media-1', timelineStartSec: 5, timelineEndSec: 7, sourceInSec: 0, sourceOutSec: 2 }]
+          audioClips: [{ id: 'a1', mediaId: 'media-1', trackId: 'track-audio-0', timelineStartSec: 5, timelineEndSec: 7, sourceInSec: 0, sourceOutSec: 2 }]
         }
       })
     })
@@ -771,5 +771,98 @@ describe('Timeline 缩放与横向滚动', () => {
 
     expect(useUiStore.getState().timelineZoom).toBe(1)
     expect(scrollLeft.get()).toBe(240)
+  })
+})
+
+/**
+ * v3 多轨：行序、增删轨道、锁定轨道不拖拽、跨轨拖拽命中。
+ * 行序约定：媒体轨数组反向（新加的在上）→ 字幕（固定一条）→ 音频轨同样反向。
+ */
+describe('Timeline v3 多轨', () => {
+  const groupButton = (root: HTMLElement, label: string): HTMLButtonElement =>
+    Array.from(root.querySelectorAll('.timeline__group-actions button')).find(
+      (button) => button.textContent === label
+    ) as HTMLButtonElement
+
+  const rowKinds = (root: HTMLElement): string[] =>
+    Array.from(root.querySelectorAll('.timeline__track')).map((row) =>
+      row.classList.contains('timeline__track--media')
+        ? 'media'
+        : row.classList.contains('timeline__track--audio')
+          ? 'audio'
+          : 'subtitle'
+    )
+
+  it('新增媒体/音频轨后行序为「媒体反向 → 字幕 → 音频反向」', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+
+    fireEvent.click(groupButton(root, '+ 媒体轨'))
+    fireEvent.click(groupButton(root, '+ 音频轨'))
+
+    expect(rowKinds(root)).toEqual(['media', 'media', 'subtitle', 'audio', 'audio'])
+    const [newMedia, baseMedia] = Array.from(root.querySelectorAll('.timeline__track--media'))
+    expect((newMedia as HTMLElement).dataset.trackId).toBe('track-media-1')
+    expect((baseMedia as HTMLElement).dataset.trackId).toBe('track-media-0')
+  })
+
+  it('轨道头按钮按类型裁剪：字幕轨只有 隐/锁，且最后一条轨道不能删', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+
+    const subtitleActions = Array.from(
+      root.querySelectorAll('.timeline__track--subtitle [data-action]')
+    ).map((element) => (element as HTMLElement).dataset.action)
+    expect(subtitleActions).toEqual(['name', 'hide', 'lock'])
+
+    const deleteBtn = root.querySelector('.timeline__track--media [data-action="delete"]') as HTMLButtonElement
+    expect(deleteBtn.disabled).toBe(true)
+
+    fireEvent.click(groupButton(root, '+ 媒体轨'))
+    expect(useProjectStore.getState().project.mediaTracks).toHaveLength(2)
+    const enabledDelete = root.querySelector('.timeline__track--media [data-action="delete"]') as HTMLButtonElement
+    expect(enabledDelete.disabled).toBe(false)
+
+    fireEvent.click(enabledDelete)
+    expect(useProjectStore.getState().project.mediaTracks).toHaveLength(1)
+  })
+
+  it('锁定轨道：片段仍可选中，但不开始拖拽、不接管播放头', () => {
+    seedTools()
+    const seekTo = vi.fn()
+    const root = renderTimeline(seekTo)
+
+    fireEvent.click(root.querySelector('.timeline__track--media [data-action="lock"]') as Element)
+    expect(useProjectStore.getState().project.mediaTracks[0]!.locked).toBe(true)
+
+    const card = root.querySelector('.media-clip-card') as HTMLElement
+    fireEvent.pointerDown(card, pointerInit(0))
+    fireEvent.pointerMove(card, { ...pointerInit(200), clientY: 0 })
+
+    expect(mediaClip('a').timelineStartSec).toBe(0)
+    expect(useProjectStore.getState().selectedMediaClipId).toBe('a')
+    expect(seekTo).not.toHaveBeenCalled()
+    expect(findTrack(root).className).not.toContain('timeline__track--scrubbing')
+  })
+
+  it('纵向拖到另一条媒体轨：按指针 Y 命中目标轨道并提交 trackId', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+    fireEvent.click(groupButton(root, '+ 媒体轨'))
+    const newTrackId = useProjectStore.getState().project.mediaTracks[1]!.id
+
+    const rows = Array.from(root.querySelectorAll<HTMLElement>('.timeline__track--media'))
+    expect(rows).toHaveLength(2)
+    const rect = (top: number) =>
+      ({ top, bottom: top + 40, left: 0, right: TRACK_WIDTH, width: TRACK_WIDTH, height: 40, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+    // 行序：新轨（track-media-1）在上，原轨在下
+    rows[0]!.getBoundingClientRect = () => rect(0)
+    rows[1]!.getBoundingClientRect = () => rect(40)
+
+    const card = root.querySelector('.media-clip-card') as HTMLElement
+    fireEvent.pointerDown(card, pointerInit(0))
+    fireEvent.pointerMove(card, { ...pointerInit(0), clientY: 20 })
+
+    expect(mediaClip('a').trackId).toBe(newTrackId)
   })
 })

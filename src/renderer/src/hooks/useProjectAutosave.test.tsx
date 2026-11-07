@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, renderHook } from '@testing-library/react'
-import { AUTOSAVE_DEBOUNCE_MS } from '@shared/constants'
+import { AUTOSAVE_DEBOUNCE_MS, DEFAULT_AUDIO_TRACK_ID, DEFAULT_MEDIA_TRACK_ID } from '@shared/constants'
 import { createDefaultProject, createClip } from '@shared/projectSchema'
 import type { Project, WatermarkSettings } from '@shared/types'
 import { useProjectAutosave } from './useProjectAutosave'
@@ -140,6 +140,7 @@ describe('hasRestoreProgress（启动自动恢复判据）', () => {
         {
           id: 'mclip-1',
           mediaId: 'media-1',
+          trackId: DEFAULT_MEDIA_TRACK_ID,
           timelineStartSec: 0,
           timelineEndSec: 4,
           sourceInSec: 0,
@@ -154,6 +155,7 @@ describe('hasRestoreProgress（启动自动恢复判据）', () => {
         {
           id: 'aclip-1',
           mediaId: 'media-1',
+          trackId: DEFAULT_AUDIO_TRACK_ID,
           timelineStartSec: 0,
           timelineEndSec: 4,
           sourceInSec: 0,

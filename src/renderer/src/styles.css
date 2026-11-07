@@ -3938,3 +3938,484 @@ input[type='color']:disabled {
     animation: none;
   }
 }
+
+/* ===== Settings page ===== */
+/* 与启动页同构的左栏 + 主区，主区可滚动；配色/圆角全部走现有变量。 */
+
+.settings {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(900px 520px at 12% -8%, var(--accent-soft), transparent 62%),
+    radial-gradient(760px 440px at 96% 0%, rgba(255, 255, 255, 0.035), transparent 60%),
+    var(--bg-window);
+  color: var(--text-primary);
+}
+
+.settings__sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-height: 0;
+  padding: 22px 16px 16px;
+  background: linear-gradient(180deg, rgba(20, 20, 20, 0.92), rgba(24, 24, 24, 0.86));
+  border-right: 1px solid var(--divider);
+}
+
+.settings__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+
+.settings__main {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 30px 30px 40px;
+  scrollbar-gutter: stable;
+}
+
+.settings__header {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings__back {
+  align-self: flex-start;
+}
+
+.settings__title {
+  margin: 0;
+  font-size: 23px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  line-height: 1.25;
+}
+
+.settings__subtitle {
+  margin: 5px 0 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.settings__section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 860px;
+  padding: 18px 20px 20px;
+  border: 1px solid var(--stroke-card);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+
+.settings__section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings__section-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.settings__hint {
+  margin: 0;
+  max-width: 640px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.settings__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.settings__row-label {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.settings__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 单张显卡：左侧名称/厂商/驱动，右侧状态与类型芯片 */
+.gpu-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--stroke-control);
+  border-radius: var(--radius-card);
+  background: var(--bg-input);
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.gpu-card--active {
+  border-color: var(--accent-ring);
+  background:
+    linear-gradient(135deg, var(--accent-soft), transparent 68%),
+    var(--bg-input);
+}
+
+.gpu-card__main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.gpu-card__name {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.gpu-card__meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  word-break: break-word;
+}
+
+.gpu-card__chips {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: none;
+}
+
+/* 当前编码器读数：虚线框，强调它是主进程算出来的结果 */
+.settings__encoder {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px dashed var(--stroke-control);
+  border-radius: var(--radius-control);
+  background: var(--bg-input);
+}
+
+.settings__encoder-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings__encoder-value {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+/* 诊断信息：紧凑的两列定义表 */
+.settings__diagnostics {
+  display: grid;
+  grid-template-columns: minmax(150px, max-content) minmax(0, 1fr);
+  gap: 8px 20px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.settings__diagnostics dt {
+  color: var(--text-tertiary);
+}
+
+.settings__diagnostics dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.settings__diagnostics dd.mono {
+  font-family: var(--font-mono);
+}
+
+.settings__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 26px 18px;
+  text-align: center;
+  border: 1px dashed var(--stroke-control);
+  border-radius: var(--radius-card);
+  background: var(--bg-input);
+}
+
+.settings__empty-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings__empty-hint {
+  margin: 0;
+  max-width: 400px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 900px) {
+  .settings {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .settings__sidebar {
+    flex-direction: row;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 16px;
+    border-right: none;
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .settings__sidebar .launcher__brand {
+    flex: none;
+  }
+
+  .settings__sidebar .launcher__brand-text {
+    display: none;
+  }
+
+  .settings__nav {
+    flex-direction: row;
+  }
+
+  .settings__nav .launcher__nav-item {
+    width: auto;
+    padding: 0 12px;
+  }
+
+  .settings__sidebar-footer {
+    margin-top: 0;
+    margin-left: auto;
+    padding: 0;
+    border-top: none;
+  }
+
+  .settings__main {
+    padding: 20px 16px 32px;
+  }
+
+  .settings__diagnostics {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .settings__diagnostics dd {
+    margin-bottom: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gpu-card {
+    transition: none;
+  }
+}
+
+/* ------------------------------------------------------------------ v3 多轨时间轴 */
+
+/*
+ * 多行轨道：行高固定，行数多了纵向滚动；横向滚动仍由同一个容器负责。
+ * `.timeline__rows` 高度改为跟随内容（不再 100% 硬撑），播放头 top/bottom 仍跨全部行。
+ */
+.timeline__scroll {
+  overflow-y: auto;
+}
+
+.timeline__rows {
+  height: auto;
+  min-height: 100%;
+}
+
+/* 组动作条：媒体轨组 / 音频轨组上方的新增按钮；横向滚动时钉在左槽 */
+.timeline__group-actions {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  padding: 2px 8px;
+}
+
+.timeline__group-count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.timeline__track {
+  flex: 0 0 64px;
+  min-height: 64px;
+}
+
+/* 轨道头：名字 + 紧凑按钮网格（56px 槽位内放得下静/隐/锁/↑/↓/删） */
+.timeline__track-header {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  align-self: stretch;
+  width: 56px;
+  padding: 3px 3px 2px;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--bg-input);
+  border-right: 1px solid var(--divider);
+  cursor: pointer;
+}
+
+.timeline__track--media .timeline__track-header {
+  background: #1c2226;
+}
+
+.timeline__track--audio .timeline__track-header {
+  background: #1b2422;
+}
+
+.timeline__track--subtitle {
+  background-color: #201d1a;
+}
+
+.timeline__track--subtitle .timeline__track-header {
+  background: #201d1a;
+}
+
+.timeline__track-header--selected {
+  box-shadow: inset 0 0 0 1px var(--accent-ring);
+}
+
+.timeline__track--media .timeline__track-header--selected {
+  background: #24313a;
+}
+
+.timeline__track--audio .timeline__track-header--selected {
+  background: #1f3330;
+}
+
+.timeline__track-header--hidden .timeline__track-name {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.timeline__track-header--muted .timeline__track-name {
+  color: var(--text-tertiary);
+}
+
+.timeline__track-name {
+  display: block;
+  max-width: 100%;
+  font-size: 10px;
+  line-height: 1.3;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.timeline__track-name-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0 2px;
+  font-size: 10px;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  border: 1px solid var(--accent-ring);
+  border-radius: 3px;
+}
+
+.timeline__track-controls {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+}
+
+.timeline__track-controls button {
+  min-width: 0;
+  padding: 1px 0;
+  font-size: 9px;
+  line-height: 1.2;
+  color: var(--text-tertiary);
+  background: rgba(255, 255, 255, 0.05);
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.timeline__track-controls button:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.timeline__track-controls button[aria-pressed='true'] {
+  color: var(--accent);
+  background: rgba(76, 194, 255, 0.16);
+}
+
+.timeline__track-controls button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* 整行状态：选中描边、隐藏变淡、锁定光标 */
+.timeline__track--selected {
+  box-shadow: inset 0 0 0 1px var(--accent-ring);
+}
+
+.timeline__track--hidden .timeline__lane {
+  opacity: 0.35;
+}
+
+.timeline__track--locked .timeline__lane {
+  cursor: not-allowed;
+}
+
+/* 卡片填满所在行：旧的 layer 切分（top/height 百分比）已删除 */
+.timeline__track .media-clip-card,
+.timeline__track .audio-clip-card {
+  top: 4px;
+  bottom: 4px;
+  height: auto;
+}
+
+.timeline__track .media-clip-card--locked,
+.timeline__track .audio-clip-card--locked {
+  cursor: not-allowed;
+}

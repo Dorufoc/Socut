@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defaultMediaStab } from '@shared/mediaStab'
+import { DEFAULT_MEDIA_TRACK_ID } from '@shared/constants'
 import type { JobResult, MediaClip, StabPreviewRequest, StabPreviewResult } from '@shared/types'
 import { stabSignatureFor, useStabPreviewStore } from './stabPreviewStore'
 
@@ -13,6 +14,7 @@ import { stabSignatureFor, useStabPreviewStore } from './stabPreviewStore'
 const clip: MediaClip = {
   id: 'mclip-1',
   mediaId: 'm1',
+  trackId: DEFAULT_MEDIA_TRACK_ID,
   timelineStartSec: 0,
   timelineEndSec: 4,
   sourceInSec: 2,

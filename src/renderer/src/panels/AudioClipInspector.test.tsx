@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { FPS_30 } from '@shared/constants'
+import { DEFAULT_AUDIO_TRACK_ID, DEFAULT_MEDIA_TRACK_ID, FPS_30 } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import type { AudioClip, MediaItem, VideoMeta } from '@shared/types'
@@ -71,6 +71,7 @@ function seed(): { audioClipId: string; mediaClipId: string; subtitleClipId: str
   const audioClip: AudioClip = {
     id: 'aclip-1',
     mediaId: item.id,
+    trackId: DEFAULT_AUDIO_TRACK_ID,
     timelineStartSec: 0,
     timelineEndSec: 4,
     sourceInSec: 0,
@@ -79,6 +80,7 @@ function seed(): { audioClipId: string; mediaClipId: string; subtitleClipId: str
   const mediaClip = {
     id: 'mclip-1',
     mediaId: videoItem.id,
+    trackId: DEFAULT_MEDIA_TRACK_ID,
     timelineStartSec: 0,
     timelineEndSec: 8,
     sourceInSec: 0,

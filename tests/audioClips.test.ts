@@ -1,16 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { FPS_30 } from '@shared/constants'
+import { DEFAULT_AUDIO_TRACK_ID, FPS_30 } from '@shared/constants'
 import {
-  MAX_CLIP_LAYER,
   MIN_AUDIO_CLIP_SEC,
   activeAudioClips,
   applyAudioClipSpeed,
   audioClipsEndSec,
-  layerOccupied,
   makeAudioClip,
   moveAudioClip,
-  normalizeLayer,
   sortAudioClips,
+  trackOccupied,
   trimAudioClip
 } from '@shared/audioClips'
 import { createDefaultProject, normalizeProject } from '@shared/projectSchema'
@@ -26,6 +24,7 @@ import type { AudioClip, VideoMeta } from '@shared/types'
 const clip = (over: Partial<AudioClip> = {}): AudioClip => ({
   id: 'a1',
   mediaId: 'm1',
+  trackId: over.trackId ?? DEFAULT_AUDIO_TRACK_ID,
   timelineStartSec: 0,
   timelineEndSec: 4,
   sourceInSec: 0,
@@ -33,19 +32,12 @@ const clip = (over: Partial<AudioClip> = {}): AudioClip => ({
   ...over
 })
 
-describe('叠放层', () => {
-  it('层号夹在 0..MAX，脏值归零', () => {
-    expect(normalizeLayer(undefined)).toBe(0)
-    expect(normalizeLayer(-3)).toBe(0)
-    expect(normalizeLayer(2.4)).toBe(2)
-    expect(normalizeLayer(99)).toBe(MAX_CLIP_LAYER)
-  })
-
-  it('同层占用可判定（用于提示，不自动让位）', () => {
-    const clips = [clip(), clip({ id: 'a2', layer: 1 })]
-    expect(layerOccupied(clips, 1)).toBe(true)
-    expect(layerOccupied(clips, 1, 'a2')).toBe(false)
-    expect(layerOccupied(clips, 3)).toBe(false)
+describe('轨道占用', () => {
+  it('同轨占用可判定（用于提示，不自动让位）', () => {
+    const clips = [clip(), clip({ id: 'a2', trackId: 'track-audio-1' })]
+    expect(trackOccupied(clips, DEFAULT_AUDIO_TRACK_ID)).toBe(true)
+    expect(trackOccupied(clips, DEFAULT_AUDIO_TRACK_ID, 'a1')).toBe(false)
+    expect(trackOccupied(clips, 'track-audio-9')).toBe(false)
   })
 })
 
@@ -64,11 +56,14 @@ describe('建段（makeAudioClip）', () => {
     expect(makeAudioClip({ id: 'n', mediaId: 'm', timelineStartSec: 0, durationSec: 5, sourceDurationSec: 0.05 }, FPS_30)).toBeNull()
   })
 
-  it('0 层不落盘，>0 才写 layer', () => {
+  it('缺省落到第一条音频轨，显式 trackId 原样保留', () => {
     const plain = makeAudioClip({ id: 'n1', mediaId: 'm', timelineStartSec: 0, durationSec: 2 }, FPS_30)!
-    expect('layer' in plain).toBe(false)
-    const stacked = makeAudioClip({ id: 'n2', mediaId: 'm', timelineStartSec: 0, durationSec: 2, layer: 2 }, FPS_30)!
-    expect(stacked.layer).toBe(2)
+    expect(plain.trackId).toBe(DEFAULT_AUDIO_TRACK_ID)
+    const stacked = makeAudioClip(
+      { id: 'n2', mediaId: 'm', timelineStartSec: 0, durationSec: 2, trackId: 'track-audio-2' },
+      FPS_30
+    )!
+    expect(stacked.trackId).toBe('track-audio-2')
   })
 })
 
@@ -151,9 +146,9 @@ describe('音频段变速（v9）', () => {
 })
 
 describe('取当前段（混音语义）', () => {
-  it('返回播放头处全部片段，按层号升序（底层先混）', () => {
+  it('返回播放头处全部片段，按时间 + trackId 排序（底层先混）', () => {
     const clips = [
-      clip({ id: 'top', layer: 2, timelineEndSec: 6 }),
+      clip({ id: 'top', trackId: 'track-audio-2', timelineEndSec: 6 }),
       clip({ id: 'base', timelineEndSec: 6 }),
       clip({ id: 'later', timelineStartSec: 5, timelineEndSec: 9 })
     ]
@@ -237,17 +232,25 @@ describe('工程归一化（旧工程零影响）', () => {
     expect('kind' in normalized.media.find((m) => m.id === 'v1')!).toBe(false)
   })
 
-  it('媒体段的叠放层：>0 保留、越界夹到上限、0 不写', () => {
+  it('媒体段的轨道：合法 trackId 保留，旧 layer 投影到 deterministic 轨道，缺省落到第一条媒体轨', () => {
     const raw = {
       ...createDefaultProject('x'),
+      mediaTracks: [
+        { id: 'track-media-0', kind: 'media', name: '媒体 1', muted: false, hidden: false, locked: false },
+        { id: 'track-media-1', kind: 'media', name: '媒体 2', muted: false, hidden: false, locked: false }
+      ],
       media: [item('v1', 1920)],
       mediaClips: [
-        { id: 'c1', mediaId: 'v1', timelineStartSec: 0, timelineEndSec: 2, sourceInSec: 0, layer: 9 },
-        { id: 'c2', mediaId: 'v1', timelineStartSec: 2, timelineEndSec: 4, sourceInSec: 0, layer: 0 }
+        { id: 'c1', mediaId: 'v1', timelineStartSec: 0, timelineEndSec: 2, sourceInSec: 0, trackId: 'track-media-1' },
+        { id: 'c2', mediaId: 'v1', timelineStartSec: 2, timelineEndSec: 4, sourceInSec: 0, layer: 1 },
+        { id: 'c3', mediaId: 'v1', timelineStartSec: 4, timelineEndSec: 6, sourceInSec: 0 }
       ]
     }
     const normalized = normalizeProject(raw)!
-    expect(normalized.mediaClips.find((c) => c.id === 'c1')!.layer).toBe(MAX_CLIP_LAYER)
+    expect(normalized.mediaClips.find((c) => c.id === 'c1')!.trackId).toBe('track-media-1')
+    expect(normalized.mediaClips.find((c) => c.id === 'c2')!.trackId).toBe('track-media-1')
+    expect(normalized.mediaClips.find((c) => c.id === 'c3')!.trackId).toBe('track-media-0')
+    // 旧 layer 键不再写回
     expect('layer' in normalized.mediaClips.find((c) => c.id === 'c2')!).toBe(false)
   })
 })

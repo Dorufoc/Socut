@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { act } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { defaultMediaVideo, mediaVideoCorners } from '@shared/mediaClipVideo'
+import { DEFAULT_MEDIA_TRACK_ID } from '@shared/constants'
 import type { MediaClip, MediaClipVideo } from '@shared/types'
 import { StageTransformOverlay } from './StageTransformOverlay'
 import { useProjectStore } from '../state/projectStore'
@@ -24,6 +25,7 @@ function seedClip(video?: MediaClipVideo): string {
   const clip: MediaClip = {
     id: 'mclip-1',
     mediaId: 'media-1',
+    trackId: DEFAULT_MEDIA_TRACK_ID,
     timelineStartSec: 0,
     timelineEndSec: 8,
     sourceInSec: 0,

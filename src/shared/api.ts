@@ -20,6 +20,7 @@ import type {
   VideoProbeResult
 } from './types'
 import type { RecentProjectCard } from './recentProjects'
+import type { GpuDiagnostics, GpuPreference, RenderSettings, VideoEncoderMode } from './gpu'
 
 /** preload 暴露给渲染进程的唯一 API 面（contextIsolation，零 Node 泄露）。 */
 
@@ -279,6 +280,18 @@ export interface FocusNewsApi {
   watermark: {
     /** 选一张本机图片作水印并探测原图尺寸；用户取消 null，尺寸不可读时报错 */
     pick(): Promise<WatermarkPickResult | null>
+  }
+  /**
+   * 渲染显卡（v11）：枚举核显/独显、选择预览渲染设备（Chromium 开关，重启生效）
+   * 与导出编码器模式（硬件 NVENC/QSV/AMF，失败自动回退 libx264）。
+   */
+  gpu: {
+    /** 本机显卡清单 + 当前实际使用 + FFmpeg 可用硬件编码器 */
+    diagnostics(): Promise<GpuDiagnostics>
+    /** 保存偏好；restartRequired=true 表示需要重启应用才会切换渲染显卡 */
+    setPreference(preference: GpuPreference): Promise<{ settings: RenderSettings; restartRequired: boolean }>
+    /** 保存导出编码模式（立即生效于下一个导出任务） */
+    setEncoder(mode: VideoEncoderMode): Promise<RenderSettings>
   }
   media: {
     /** v2：主进程 ffmpeg 抽帧生成素材卡片缩略图，返回 focusnews-thumb://<mediaId>（失败 null） */

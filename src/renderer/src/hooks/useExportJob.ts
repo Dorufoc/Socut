@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 import { detectCompat } from '@shared/probe'
-import { resolveVisibleMediaClips } from '@shared/mediaClips'
+import { activeMediaClipSpans } from '@shared/mediaClips'
+import { audibleAudioTracks, clipsOnMediaTrack, mediaTrackOrder, visibleMediaTracks } from '@shared/tracks'
 import { mediaKindOf } from '@shared/audioClips'
 import { speedValueOf } from '@shared/mediaClipAudio'
 import { createId } from '@shared/projectSchema'
@@ -9,6 +10,7 @@ import { nearestFps } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { formatBytes } from '@shared/sizeEstimate'
 import type {
+  AudioMixClipRequest,
   ExportKind,
   ExportRequest,
   FrameSpec,
@@ -88,25 +90,36 @@ export interface OverlayBase {
 
 function buildOverlayBase(project: Project): OverlayBase | null {
   const pool = new Map<string, MediaItem>(project.media.map((item) => [item.id, item]))
-  // v7 多层：先按层号把重叠段解开（上层盖下层），再交给“不重叠 + concat”的基座链
-  let clips = resolveVisibleMediaClips(project.mediaClips).map((clip) => {
-    const item = pool.get(clip.mediaId)
-    return {
-      refVideoPath: item?.path ?? '',
-      timelineStartSec: clip.timelineStartSec,
-      timelineEndSec: clip.timelineEndSec,
-      sourceInSec: clip.sourceInSec,
-      sourceOutSec: clip.sourceOutSec,
-      // v8：只把「开着防抖」的段带进导出请求；缺键 = 主进程行为与现状逐字节一致
-      ...(clip.stab?.enabled === true ? { stab: clip.stab } : {}),
-      // v9：音量/渐变/变速同样只在「动过」时带键（全默认时 argv 与旧版逐字节一致）
-      ...(clip.audio ? { audio: clip.audio } : {}),
-      ...(clip.speed ? { speed: clip.speed } : {}),
-      isImage: item ? mediaKindOf(item) === 'image' : false,
-      meta: item?.meta ?? null,
-      vfrRaw: item?.vfrPolicy === 'raw'
+  // v3 多轨：不再把轨道压成一条。按「底层→顶层」逐轨输出段，导出层按 trackIndex 分层合成。
+  // 隐藏轨不导出；静音轨仍出画面，但 hasAudio=false（导出层补静音，且不混它的原声）。
+  const order = mediaTrackOrder(project.mediaTracks)
+  let clips: (OverlaySegment & { meta: VideoMeta | null; vfrRaw: boolean })[] = []
+  for (const track of visibleMediaTracks(project.mediaTracks)) {
+    const trackIndex = order.get(track.id) ?? 0
+    for (const clip of clipsOnMediaTrack(project.mediaClips, track.id)) {
+      const item = pool.get(clip.mediaId)
+      clips.push({
+        refVideoPath: item?.path ?? '',
+        timelineStartSec: clip.timelineStartSec,
+        timelineEndSec: clip.timelineEndSec,
+        sourceInSec: clip.sourceInSec,
+        sourceOutSec: clip.sourceOutSec,
+        trackIndex,
+        hasAudio: !track.muted && item?.meta.audioCodec != null && mediaKindOf(item) !== 'image',
+        ...(track.muted ? { muted: true } : {}),
+        // v8：只把「开着防抖」的段带进导出请求；缺键 = 主进程行为与现状逐字节一致
+        ...(clip.stab?.enabled === true ? { stab: clip.stab } : {}),
+        // v9：音量/渐变/变速同样只在「动过」时带键（全默认时 argv 与旧版逐字节一致）
+        ...(clip.audio ? { audio: clip.audio } : {}),
+        ...(clip.speed ? { speed: clip.speed } : {}),
+        // v6：调色/变换参数原样透传，不能在多轨改造里丢掉（导出暂未烧录，见验收文档）
+        ...(clip.video ? { video: clip.video } : {}),
+        isImage: item ? mediaKindOf(item) === 'image' : false,
+        meta: item?.meta ?? null,
+        vfrRaw: item?.vfrPolicy === 'raw'
+      })
     }
-  })
+  }
   if (project.mediaClips.length === 0 && project.media[0]) {
     // v2 过渡：有素材但尚未排轨 → 按旧习惯把第一枚素材整段作为基座
     const item = project.media[0]
@@ -117,6 +130,8 @@ function buildOverlayBase(project: Project): OverlayBase | null {
         timelineEndSec: item.meta.durationSec,
         sourceInSec: 0,
         sourceOutSec: item.meta.durationSec,
+        trackIndex: 0,
+        hasAudio: mediaKindOf(item) !== 'image' && item.meta.audioCodec != null,
         isImage: mediaKindOf(item) === 'image',
         meta: item.meta,
         vfrRaw: item.vfrPolicy === 'raw'
@@ -132,6 +147,8 @@ function buildOverlayBase(project: Project): OverlayBase | null {
         timelineEndSec: ref.meta.durationSec,
         sourceInSec: 0,
         sourceOutSec: ref.meta.durationSec,
+        trackIndex: 0,
+        hasAudio: ref.meta.audioCodec != null,
         isImage: false,
         meta: ref.meta,
         vfrRaw: ref.vfrPolicy === 'raw'
@@ -139,7 +156,9 @@ function buildOverlayBase(project: Project): OverlayBase | null {
     ]
   }
   if (clips.length === 0) return null
-  clips.sort((a, b) => a.timelineStartSec - b.timelineStartSec)
+  // 底层轨道优先：primaryMeta（导出分辨率/帧率基准）必须来自最底层有内容的媒体轨，
+  // 不能因为上层片段开始得更早就让整片尺寸跟着上层素材跑。
+  clips.sort((a, b) => (a.trackIndex ?? 0) - (b.trackIndex ?? 0) || a.timelineStartSec - b.timelineStartSec)
   const first = clips[0]
   const primaryMeta = first?.meta ?? null
   if (!primaryMeta) return null
@@ -155,7 +174,10 @@ function buildOverlayBase(project: Project): OverlayBase | null {
     (first?.sourceInSec ?? 0) > 1e-6 ||
     (first?.timelineStartSec ?? 0) > 1e-6 ||
     // 图像段要求多输入路径（单输入 builder 不支持 `-loop 1`）
-    clips.some((clip) => clip.isImage)
+    clips.some((clip) => clip.isImage) ||
+    // v3：上层轨道必须分层合成；静音轨必须走 trim 链补静音
+    clips.some((clip) => (clip.trackIndex ?? 0) > 0) ||
+    clips.some((clip) => clip.muted === true)
   return {
     segments: clips.map(({ meta, vfrRaw, ...seg }) => {
       void meta
@@ -164,7 +186,7 @@ function buildOverlayBase(project: Project): OverlayBase | null {
     }),
     multi,
     primaryMeta,
-    anyNoAudio: clips.some((clip) => clip.meta?.audioCodec == null),
+    anyNoAudio: clips.some((clip) => clip.hasAudio === false),
     anyVfrRaw: clips.some((clip) => clip.vfrRaw),
     audioTranscodeNeeded: clips.some((clip) => (clip.meta ? detectCompat(clip.meta).audioTranscodeNeeded : false))
   }
@@ -306,30 +328,68 @@ export function useExportJob() {
      */
     const spanStart = frameTimeSec(spec.startFrame, fps)
     const spanEnd = frameTimeSec(spec.endFrame, fps)
-    const audioMix =
+    // v3：静音音频轨上的片段必须从混音里剔除（否则静音开关只影响画面不影响声音）。
+    const externalAudio =
       kind === 'pngSequence'
         ? []
-        : (project.audioClips ?? [])
-            .map((clip) => {
-              const item = project.media.find((m) => m.id === clip.mediaId)
-              if (!item) return null
-              const start = Math.max(clip.timelineStartSec, spanStart)
-              const end = Math.min(clip.timelineEndSec, spanEnd)
-              if (end - start <= 1e-3) return null
-              const speed = speedValueOf(clip.speed)
-              const sourceIn = clip.sourceInSec + (start - clip.timelineStartSec) * speed
-              return {
-                path: item.path,
-                timelineStartSec: start,
-                timelineEndSec: end,
-                sourceInSec: sourceIn,
-                sourceOutSec: sourceIn + (end - start) * speed,
-                ...(clip.audio ? { audio: clip.audio } : {}),
-                ...(clip.speed ? { speed: clip.speed } : {})
-              }
-            })
-            .filter((clip): clip is NonNullable<typeof clip> => clip !== null)
+        : (() => {
+            const audibleAudioIds = new Set(audibleAudioTracks(project.audioTracks).map((track) => track.id))
+            return (project.audioClips ?? [])
+              .filter((clip) => audibleAudioIds.has(clip.trackId))
+              .map((clip) => {
+                const item = project.media.find((m) => m.id === clip.mediaId)
+                if (!item) return null
+                const start = Math.max(clip.timelineStartSec, spanStart)
+                const end = Math.min(clip.timelineEndSec, spanEnd)
+                if (end - start <= 1e-3) return null
+                const speed = speedValueOf(clip.speed)
+                const sourceIn = clip.sourceInSec + (start - clip.timelineStartSec) * speed
+                return {
+                  path: item.path,
+                  timelineStartSec: start,
+                  timelineEndSec: end,
+                  sourceInSec: sourceIn,
+                  sourceOutSec: sourceIn + (end - start) * speed,
+                  ...(clip.audio ? { audio: clip.audio } : {}),
+                  ...(clip.speed ? { speed: clip.speed } : {})
+                }
+              })
+              .filter((clip): clip is NonNullable<typeof clip> => clip !== null)
+          })()
 
+    /**
+     * v3 多轨内嵌原声：按「当前时刻最上层、可见且未静音」的片段压平。
+     * 单轨工程不走这里（旧 trim+concat 链已经在段内混过原声，再混会双声）。
+     */
+    const multiTrack = isOverlay && (base?.segments.some((seg) => (seg.trackIndex ?? 0) > 0) ?? false)
+    const embeddedAudio: AudioMixClipRequest[] =
+      multiTrack && kind !== 'pngSequence'
+        ? (() => {
+            const order = mediaTrackOrder(project.mediaTracks)
+            const audibleTrackIds = new Set(
+              visibleMediaTracks(project.mediaTracks)
+                .filter((track) => !track.muted)
+                .map((track) => track.id)
+            )
+            const audibleClips = project.mediaClips.filter((clip) => audibleTrackIds.has(clip.trackId))
+            return activeMediaClipSpans(audibleClips, order, spanStart, spanEnd).flatMap((span) => {
+              const item = project.media.find((media) => media.id === span.clip.mediaId)
+              if (!item || item.meta.audioCodec == null || mediaKindOf(item) === 'image') return []
+              return [
+                {
+                  path: item.path,
+                  timelineStartSec: span.timelineStartSec,
+                  timelineEndSec: span.timelineEndSec,
+                  sourceInSec: span.sourceInSec,
+                  sourceOutSec: span.sourceOutSec,
+                  ...(span.clip.audio ? { audio: span.clip.audio } : {}),
+                  ...(span.clip.speed ? { speed: span.clip.speed } : {})
+                }
+              ]
+            })
+          })()
+        : []
+    const audioMix = [...externalAudio, ...embeddedAudio]
 
     const request: ExportRequest = {
       jobId,

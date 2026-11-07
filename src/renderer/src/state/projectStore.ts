@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { DEFAULT_FPS, DEFAULT_RESOLUTION, MAX_TRACK_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
 import { applyClipStyleToAll, createClip, createId, duplicateClip, normalizeProject, splitSubtitleClipAt } from '@shared/projectSchema'
 import { frameIntervalSec, snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
-import { compactMediaClips, mediaClipLayer, splitMediaClipAt } from '@shared/mediaClips'
+import { compactMediaClips, splitMediaClipAt } from '@shared/mediaClips'
 import { clampMoveToGap, clampTrimEnd, clampTrimStart, firstFreeStart, gapAround, type TimelineSpan } from '@shared/clipCollision'
 import { resolveTargetAt, findSelectedRef, type TargetRef, type TimelineSelection, type TimelineTracks } from '@shared/timelineTargets'
 import { useStabPreviewStore } from './stabPreviewStore'
@@ -28,7 +28,19 @@ import { clipWithPresetDefaults, hasKeys } from '@shared/clipStyle'
 import { defaultMediaVideo, normalizeMediaVideo } from '@shared/mediaClipVideo'
 import { defaultMediaStab, normalizeMediaStab } from '@shared/mediaStab'
 import { defaultClipAudio, defaultClipSpeed, normalizeClipAudio, normalizeClipSpeed, speedValueOf } from '@shared/mediaClipAudio'
-import { IMAGE_STILL_SEC, applyAudioClipSpeed, inferMediaKind, makeAudioClip, moveAudioClip as applyMoveAudioClip, normalizeLayer, sortAudioClips, splitAudioClipAt, trimAudioClip as applyTrimAudioClip } from '@shared/audioClips'
+import { IMAGE_STILL_SEC, applyAudioClipSpeed, inferMediaKind, makeAudioClip, moveAudioClip as applyMoveAudioClip, sortAudioClips, splitAudioClipAt, trimAudioClip as applyTrimAudioClip } from '@shared/audioClips'
+import {
+  addAudioTrack as appendAudioTrack,
+  addMediaTrack as appendMediaTrack,
+  isTrackLocked,
+  moveTrack as moveTrackIn,
+  removeTrack as removeTrackIn,
+  renameTrack as renameTrackIn,
+  setTrackHidden as setTrackHiddenIn,
+  setTrackLocked as setTrackLockedIn,
+  setTrackMuted as setTrackMutedIn,
+  trackById
+} from '@shared/tracks'
 
 /** 工程状态（规格 §4.6）。所有时间值在写入时已吸附到帧边界，存储仍为秒。 */
 
@@ -42,6 +54,8 @@ export interface ProjectState {
   selectedMediaClipId: string | null
   /** v7：音频轨上选中的片段 */
   selectedAudioClipId: string | null
+  /** v3：当前选中的轨道 id（时间轴行高亮 / 新片段默认落点）；不持久化 */
+  selectedTrackId: string | null
   /** v6：最后一次点选的类型——决定右侧检查器渲染字幕编辑器还是视频编辑器 */
   selectionKind: SelectionKind
   /** 字体库（内置 + 用户导入） */
@@ -124,9 +138,16 @@ export interface ProjectState {
    * 把素材放入时间轴 [timelineStartSec, timelineStartSec + durationSec]。
    * 源入出点吸附后不足最短时长时向内收；返回新片段（null = 素材不存在或区间退化）。
    */
-  insertMediaClip: (input: { mediaId: string; timelineStartSec: number; durationSec?: number; sourceInSec?: number }) => MediaClip | null
-  /** 整段平移：与「仅重叠才右移后续片段」规则共用 alignAfterOverlap。 */
-  moveMediaClip: (id: string, timelineStartSec: number) => void
+  insertMediaClip: (input: {
+    mediaId: string
+    timelineStartSec: number
+    durationSec?: number
+    sourceInSec?: number
+    /** v3：落点轨道；缺省 = 当前选中媒体轨，再缺省 = 第一条媒体轨 */
+    trackId?: string
+  }) => MediaClip | null
+  /** 整段平移（可跨轨）；与「仅重叠才右移后续片段」规则共用 alignAfterOverlap。 */
+  moveMediaClip: (id: string, timelineStartSec: number, trackId?: string) => void
   /** 拖入/出点：时间轴与源坐标同幅度平移，保持时长恒等式。 */
   trimMediaClip: (id: string, patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
   /** 删除一段（不动素材池；素材库卡片仍在）。 */
@@ -178,17 +199,39 @@ export interface ProjectState {
     timelineStartSec: number
     durationSec?: number
     sourceInSec?: number
-    layer?: number
+    /** v3：落点音频轨；缺省 = 当前选中音频轨，再缺省 = 第一条音频轨 */
+    trackId?: string
   }) => AudioClip | null
-  /** 整段平移（音频允许互相重叠，不与其它段推挤） */
-  moveAudioClip: (id: string, timelineStartSec: number) => void
+  /** 整段平移（可跨轨；音频允许互相重叠，不与其它段推挤） */
+  moveAudioClip: (id: string, timelineStartSec: number, trackId?: string) => void
   /** 拖入点 / 出点（保持时长恒等式） */
   trimAudioClip: (id: string, patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
   removeAudioClip: (id: string) => void
-  /** v7：把媒体段放到第 n 层（0 = 底层，上层盖下层；clamp 0..4） */
-  setMediaClipLayer: (id: string, layer: number) => void
-  /** v7：把音频段放到第 n 层（同时发声的多轨靠它叠起来） */
-  setAudioClipLayer: (id: string, layer: number) => void
+  /** v3：把媒体段换到另一条媒体轨（时间不变；目标轨同段有冲突时拒绝） */
+  setMediaClipTrack: (id: string, trackId: string) => void
+  /** v3：把音频段换到另一条音频轨 */
+  setAudioClipTrack: (id: string, trackId: string) => void
+
+  // ---------------------------------------------------------------- v3 轨道管理
+  /** 选中轨道（时间轴行高亮 / 新片段默认落点） */
+  selectTrack: (id: string | null) => void
+  /** 在最上层新增媒体轨；达到上限返回 null */
+  addMediaTrack: () => string | null
+  /** 在最上层新增音频轨；达到上限返回 null */
+  addAudioTrack: () => string | null
+  /** 删除媒体轨（连同其上的片段）；最后一条轨不允许删 */
+  removeMediaTrack: (id: string) => void
+  /** 删除音频轨（连同其上的片段）；最后一条轨不允许删 */
+  removeAudioTrack: (id: string) => void
+  /** 调整媒体轨层级（0 = 最底层） */
+  moveMediaTrack: (id: string, toIndex: number) => void
+  /** 调整音频轨层级（0 = 最底层） */
+  moveAudioTrack: (id: string, toIndex: number) => void
+  /** 重命名轨道（媒体/音频/字幕三类都走它） */
+  renameTrack: (id: string, name: string) => void
+  setTrackMuted: (id: string, muted: boolean) => void
+  setTrackHidden: (id: string, hidden: boolean) => void
+  setTrackLocked: (id: string, locked: boolean) => void
 
   // ---------------------------------------------------------------- 时间轴工具
   /**
@@ -267,7 +310,12 @@ function withAudioClips(project: Project, audioClips: AudioClip[]): Project {
 
 /** P3：拆分/删除的目标解析要看的三条轨。 */
 function tracksOf(project: Project): TimelineTracks {
-  return { clips: project.clips, mediaClips: project.mediaClips, audioClips: project.audioClips ?? [] }
+  return {
+    clips: project.clips,
+    mediaClips: project.mediaClips,
+    audioClips: project.audioClips ?? [],
+    mediaTracks: project.mediaTracks
+  }
 }
 
 /**
@@ -290,10 +338,57 @@ function removeTargetRef(store: ProjectState, target: TargetRef): void {
   else store.removeMediaClip(target.id)
 }
 
+/** v3：落点轨道解析——显式指定优先，其次当前选中轨，最后第一条同类轨道。 */
+function pickMediaTrackId(project: Project, preferred: string | null | undefined): string {
+  if (preferred && project.mediaTracks.some((track) => track.id === preferred)) return preferred
+  return project.mediaTracks[0]!.id
+}
+
+function pickAudioTrackId(project: Project, preferred: string | null | undefined): string {
+  if (preferred && project.audioTracks.some((track) => track.id === preferred)) return preferred
+  return project.audioTracks[0]!.id
+}
+
+function spansOverlap(a: TimelineSpan, b: TimelineSpan): boolean {
+  return a.startSec < b.endSec - 1e-9 && b.startSec < a.endSec - 1e-9
+}
+
+/** 三个开关分别写三类轨道（媒体/音频/字幕），找不到轨就原样返回。 */
+function withTrackMuted(project: Project, id: string, muted: boolean): Project {
+  const mediaTracks = setTrackMutedIn(project.mediaTracks, id, muted)
+  if (mediaTracks !== project.mediaTracks) return { ...project, mediaTracks }
+  const audioTracks = setTrackMutedIn(project.audioTracks, id, muted)
+  if (audioTracks !== project.audioTracks) return { ...project, audioTracks }
+  const [subtitleTrack] = setTrackMutedIn([project.subtitleTrack], id, muted)
+  if (subtitleTrack && subtitleTrack !== project.subtitleTrack) return { ...project, subtitleTrack }
+  return project
+}
+
+function withTrackHidden(project: Project, id: string, hidden: boolean): Project {
+  const mediaTracks = setTrackHiddenIn(project.mediaTracks, id, hidden)
+  if (mediaTracks !== project.mediaTracks) return { ...project, mediaTracks }
+  const audioTracks = setTrackHiddenIn(project.audioTracks, id, hidden)
+  if (audioTracks !== project.audioTracks) return { ...project, audioTracks }
+  const [subtitleTrack] = setTrackHiddenIn([project.subtitleTrack], id, hidden)
+  if (subtitleTrack && subtitleTrack !== project.subtitleTrack) return { ...project, subtitleTrack }
+  return project
+}
+
+function withTrackLocked(project: Project, id: string, locked: boolean): Project {
+  const mediaTracks = setTrackLockedIn(project.mediaTracks, id, locked)
+  if (mediaTracks !== project.mediaTracks) return { ...project, mediaTracks }
+  const audioTracks = setTrackLockedIn(project.audioTracks, id, locked)
+  if (audioTracks !== project.audioTracks) return { ...project, audioTracks }
+  const [subtitleTrack] = setTrackLockedIn([project.subtitleTrack], id, locked)
+  if (subtitleTrack && subtitleTrack !== project.subtitleTrack) return { ...project, subtitleTrack }
+  return project
+}
+
 /** 时长恒等式（timelineEnd - timelineStart === sourceOut - sourceIn）的唯一写入口。 */
 function makeMediaClip(input: {
   id?: string
   mediaId: string
+  trackId: string
   timelineStartSec: number
   timelineEndSec: number
   sourceInSec: number
@@ -302,6 +397,7 @@ function makeMediaClip(input: {
   return {
     id: input.id ?? createId('mclip'),
     mediaId: input.mediaId,
+    trackId: input.trackId,
     timelineStartSec: input.timelineStartSec,
     timelineEndSec: input.timelineEndSec,
     sourceInSec: input.sourceInSec,
@@ -314,6 +410,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   selectedClipId: null,
   selectedMediaClipId: null,
   selectedAudioClipId: null,
+  selectedTrackId: null,
   selectionKind: 'subtitle',
   fonts: [],
   revision: 0,
@@ -331,6 +428,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       selectedClipId: project.clips[0]?.id ?? null,
       selectedMediaClipId: project.mediaClips[0]?.id ?? null,
       selectedAudioClipId: project.audioClips?.[0]?.id ?? null,
+      selectedTrackId: null,
       // 打开工程默认先看字幕（这是主任务）；没有字幕条时才落到视频编辑器
       selectionKind: project.clips.length > 0 ? 'subtitle' : 'media',
       revision: state.revision + 1,
@@ -630,13 +728,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     // 新建段一律 1x（无 speed 键），所以 `(sourceOut - sourceIn) / 1` 与旧写法逐字节一致
     let end = snapTimeToFrame(start + (sourceOut - sourceIn), fps)
     if (end - start < MIN_MEDIA_CLIP_SEC) end = snapTimeToFrame(start + MIN_MEDIA_CLIP_SEC, fps)
-    // 落点被占：顺延到后面的第一个空档（只选位置，不推动已有段）；一直放不下就拒收
+    // v3：落点轨道（选中轨优先；轨道锁定则拒收）
+    const trackId = pickMediaTrackId(state.project, input.trackId ?? state.selectedTrackId)
+    if (isTrackLocked(trackById(state.project.mediaTracks, trackId))) return null
+    // 落点被占：顺延到同一轨道后面的第一个空档（只选位置，不推动已有段）；一直放不下就拒收
     const length = end - start
     const placed = firstFreeStart(
       start,
       length,
       state.project.mediaClips
-        .filter((other) => mediaClipLayer(other) === 0)
+        .filter((other) => other.trackId === trackId)
         .map((other) => ({ startSec: other.timelineStartSec, endSec: other.timelineEndSec })),
       MAX_TRACK_SEC
     )
@@ -647,6 +748,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     const clip = makeMediaClip({
       mediaId: item.id,
+      trackId,
       timelineStartSec: start,
       timelineEndSec: end,
       sourceInSec: sourceIn,
@@ -660,32 +762,43 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     return clip
   },
 
-  moveMediaClip: (id, timelineStartSec) => {
+  moveMediaClip: (id, timelineStartSec, trackId) => {
     const state = get()
     const fps = state.project.fps
     const current = state.project.mediaClips.find((c) => c.id === id)
     if (!current) return
+    if (isTrackLocked(trackById(state.project.mediaTracks, current.trackId))) return
+    const targetTrackId = pickMediaTrackId(state.project, trackId ?? current.trackId)
+    if (isTrackLocked(trackById(state.project.mediaTracks, targetTrackId))) return
     const length = current.timelineEndSec - current.timelineStartSec
-    // 只跟同层邻居抢空间：不同图层允许时间重叠
+    // 只跟**同一目标轨道**的邻居抢空间：不同轨道允许时间重叠
     const others = state.project.mediaClips.filter(
-      (c) => c.id !== id && mediaClipLayer(c) === mediaClipLayer(current)
+      (c) => c.id !== id && c.trackId === targetTrackId
     )
-    const gap = gapAround(trackSpan(current), others.map(trackSpan))
-    // 夹在空档里：撞到邻居就贴住，绝不推开别人（"挪不过去就卡在原地"）
-    const start = clampMoveToGap(
-      snapTimeToFrame(Math.max(0, timelineStartSec), fps),
-      length,
-      gap.startSec,
-      gap.endSec
-    )
+    // 跨轨落点若压住目标轨已有片段：直接拒绝（不做静默覆盖/推挤）
+    const requestedStart = snapTimeToFrame(Math.max(0, timelineStartSec), fps)
+    let start: number
+    if (targetTrackId !== current.trackId) {
+      const requestedEnd = snapTimeToFrame(requestedStart + length, fps)
+      if (others.some((other) => spansOverlap(trackSpan(other), { startSec: requestedStart, endSec: requestedEnd }))) {
+        return
+      }
+      start = requestedStart
+    } else {
+      const gap = gapAround(trackSpan(current), others.map(trackSpan))
+      // 夹在空档里：撞到邻居就贴住，绝不推开别人（"挪不过去就卡在原地"）
+      start = clampMoveToGap(requestedStart, length, gap.startSec, gap.endSec)
+    }
     const moved: MediaClip = {
       ...current,
+      trackId: targetTrackId,
       timelineStartSec: start,
       timelineEndSec: snapTimeToFrame(start + length, fps)
     }
     const merged = state.project.mediaClips.map((c) => (c.id === id ? moved : c))
     // 空工程/已紧贴时不动工程，避免无意义地推高 revision（会触发自动保存）
     if (
+      moved.trackId === current.trackId &&
       Math.abs(moved.timelineStartSec - current.timelineStartSec) < 1e-9 &&
       Math.abs(moved.timelineEndSec - current.timelineEndSec) < 1e-9
     ) {
@@ -703,6 +816,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const fps = state.project.fps
     const current = state.project.mediaClips.find((c) => c.id === id)
     if (!current) return
+    if (isTrackLocked(trackById(state.project.mediaTracks, current.trackId))) return
     const item = state.project.media.find((m) => m.id === current.mediaId)
     const sourceDuration = item?.meta.durationSec ?? Number.POSITIVE_INFINITY
     // v9：拖边时时间轴位移与源位移之间差一个倍速（1x 时与旧写法逐字节一致）
@@ -711,7 +825,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const gap = gapAround(
       trackSpan(current),
       state.project.mediaClips
-        .filter((c) => c.id !== id && mediaClipLayer(c) === mediaClipLayer(current))
+        .filter((c) => c.id !== id && c.trackId === current.trackId)
         .map(trackSpan)
     )
     let next = { ...current }
@@ -761,6 +875,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   removeMediaClip: (id) => {
     const state = get()
+    const current = state.project.mediaClips.find((c) => c.id === id)
+    if (!current) return
+    if (isTrackLocked(trackById(state.project.mediaTracks, current.trackId))) return
     const mediaClips = state.project.mediaClips.filter((c) => c.id !== id)
     const removedSelected = state.selectedMediaClipId === id
     const selectedMediaClipId = removedSelected ? (mediaClips[0]?.id ?? null) : state.selectedMediaClipId
@@ -782,6 +899,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!target) return null
 
     if (target.kind === 'subtitle') {
+      if (state.project.subtitleTrack.locked) return null
       const clip = state.project.clips.find((item) => item.id === target.id)
       if (!clip) return null
       const result = splitSubtitleClipAt(clip, atSec, fps, () => createId('clip'))
@@ -799,6 +917,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (target.kind === 'audio') {
       const clip = (state.project.audioClips ?? []).find((item) => item.id === target.id)
       if (!clip) return null
+      if (isTrackLocked(trackById(state.project.audioTracks, clip.trackId))) return null
       const result = splitAudioClipAt(clip, atSec, fps, () => createId('aclip'))
       if (!result) return null
       const audioClips = (state.project.audioClips ?? []).filter((item) => item.id !== clip.id).concat(result.left, result.right)
@@ -813,6 +932,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     const clip = state.project.mediaClips.find((item) => item.id === target.id)
     if (!clip) return null
+    if (isTrackLocked(trackById(state.project.mediaTracks, clip.trackId))) return null
     const result = splitMediaClipAt(clip, atSec, fps, () => createId('mclip'))
     if (!result) return null
     const mediaClips = state.project.mediaClips.filter((item) => item.id !== clip.id).concat(result.left, result.right)
@@ -986,26 +1106,28 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const state = get()
     const item = state.project.media.find((m) => m.id === input.mediaId)
     if (!item) return null
+    // v3：落点轨道（选中轨优先；轨道锁定则拒收）
+    const trackId = pickAudioTrackId(state.project, input.trackId ?? state.selectedTrackId)
+    if (isTrackLocked(trackById(state.project.audioTracks, trackId))) return null
     const clip = makeAudioClip(
       {
         id: createId('aclip'),
         mediaId: input.mediaId,
+        trackId,
         timelineStartSec: input.timelineStartSec,
         durationSec: input.durationSec ?? item.meta.durationSec,
         sourceInSec: input.sourceInSec ?? 0,
-        layer: input.layer,
         sourceDurationSec: item.meta.durationSec
       },
       state.project.fps
     )
     if (!clip) return null
-    // 落点被占：顺延到同层后面的第一个空档（只选位置，不推动已有段）
-    const layer = normalizeLayer(input.layer)
+    // 落点被占：顺延到同一轨道后面的第一个空档（只选位置，不推动已有段）
     const placed = firstFreeStart(
       clip.timelineStartSec,
       clip.timelineEndSec - clip.timelineStartSec,
       (state.project.audioClips ?? [])
-        .filter((other) => normalizeLayer(other.layer) === layer)
+        .filter((other) => other.trackId === trackId)
         .map((other) => ({ startSec: other.timelineStartSec, endSec: other.timelineEndSec })),
       MAX_TRACK_SEC
     )
@@ -1023,25 +1145,34 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     return placedClip
   },
 
-  moveAudioClip: (id, timelineStartSec) => {
+  moveAudioClip: (id, timelineStartSec, trackId) => {
     const state = get()
     const current = (state.project.audioClips ?? []).find((clip) => clip.id === id)
     if (!current) return
-    // 只跟同层邻居抢空间；撞到就贴住，不推开别人
+    if (isTrackLocked(trackById(state.project.audioTracks, current.trackId))) return
+    const targetTrackId = pickAudioTrackId(state.project, trackId ?? current.trackId)
+    if (isTrackLocked(trackById(state.project.audioTracks, targetTrackId))) return
+    // 只跟同一目标轨道的邻居抢空间；撞到就贴住，不推开别人
     const others = (state.project.audioClips ?? []).filter(
-      (clip) => clip.id !== id && normalizeLayer(clip.layer) === normalizeLayer(current.layer)
+      (clip) => clip.id !== id && clip.trackId === targetTrackId
     )
-    const gap = gapAround(trackSpan(current), others.map(trackSpan))
+    // 跨轨落点若压住目标轨已有片段：直接拒绝（不做静默覆盖）
     const length = current.timelineEndSec - current.timelineStartSec
-    const start = clampMoveToGap(
-      Math.max(0, timelineStartSec),
-      length,
-      gap.startSec,
-      gap.endSec
-    )
-    if (Math.abs(start - current.timelineStartSec) < 1e-9) return
+    const requestedStart = snapTimeToFrame(Math.max(0, timelineStartSec), state.project.fps)
+    let start: number
+    if (targetTrackId !== current.trackId) {
+      const requestedEnd = snapTimeToFrame(requestedStart + length, state.project.fps)
+      if (others.some((other) => spansOverlap(trackSpan(other), { startSec: requestedStart, endSec: requestedEnd }))) {
+        return
+      }
+      start = requestedStart
+    } else {
+      const gap = gapAround(trackSpan(current), others.map(trackSpan))
+      start = clampMoveToGap(requestedStart, length, gap.startSec, gap.endSec)
+    }
+    if (targetTrackId === current.trackId && Math.abs(start - current.timelineStartSec) < 1e-9) return
     const audioClips = (state.project.audioClips ?? []).map((clip) =>
-      clip.id === id ? applyMoveAudioClip(clip, start, state.project.fps) : clip
+      clip.id === id ? { ...applyMoveAudioClip(clip, start, state.project.fps), trackId: targetTrackId } : clip
     )
     set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
   },
@@ -1050,8 +1181,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const state = get()
     const current = (state.project.audioClips ?? []).find((clip) => clip.id === id)
     if (!current) return
+    if (isTrackLocked(trackById(state.project.audioTracks, current.trackId))) return
     const others = (state.project.audioClips ?? []).filter(
-      (clip) => clip.id !== id && normalizeLayer(clip.layer) === normalizeLayer(current.layer)
+      (clip) => clip.id !== id && clip.trackId === current.trackId
     )
     const gap = gapAround(trackSpan(current), others.map(trackSpan))
     const minSec = frameIntervalSec(state.project.fps)
@@ -1085,6 +1217,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   removeAudioClip: (id) => {
     const state = get()
+    const current = (state.project.audioClips ?? []).find((clip) => clip.id === id)
+    if (!current) return
+    if (isTrackLocked(trackById(state.project.audioTracks, current.trackId))) return
     const audioClips = (state.project.audioClips ?? []).filter((clip) => clip.id !== id)
     const removedSelected = state.selectedAudioClipId === id
     const selectedAudioClipId = removedSelected ? (audioClips[0]?.id ?? null) : state.selectedAudioClipId
@@ -1099,31 +1234,165 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     })
   },
 
-  // ---------------------------------------------------------------- v7 叠层
+  // ---------------------------------------------------------------- v3 轨道
 
-  setMediaClipLayer: (id, layer) => {
+  selectTrack: (id) => set({ selectedTrackId: id }),
+
+  addMediaTrack: () => {
     const state = get()
-    const next = normalizeLayer(layer)
-    const mediaClips = state.project.mediaClips.map((clip) => {
-      if (clip.id !== id) return clip
-      const updated: MediaClip = { ...clip }
-      if (next > 0) updated.layer = next
-      else delete updated.layer
-      return updated
+    const mediaTracks = appendMediaTrack(state.project.mediaTracks)
+    if (mediaTracks === state.project.mediaTracks) return null
+    const added = mediaTracks[mediaTracks.length - 1]!
+    set({
+      project: { ...state.project, mediaTracks },
+      selectedTrackId: added.id,
+      revision: state.revision + 1
     })
+    return added.id
+  },
+
+  addAudioTrack: () => {
+    const state = get()
+    const audioTracks = appendAudioTrack(state.project.audioTracks)
+    if (audioTracks === state.project.audioTracks) return null
+    const added = audioTracks[audioTracks.length - 1]!
+    set({
+      project: { ...state.project, audioTracks },
+      selectedTrackId: added.id,
+      revision: state.revision + 1
+    })
+    return added.id
+  },
+
+  removeMediaTrack: (id) => {
+    const state = get()
+    const { mediaTracks, mediaClips } = state.project
+    if (!mediaTracks.some((track) => track.id === id)) return
+    const nextTracks = removeTrackIn(mediaTracks, id)
+    if (nextTracks === mediaTracks) return
+    const removed = mediaClips.filter((clip) => clip.trackId === id)
+    const removedIds = new Set(removed.map((clip) => clip.id))
+    set({
+      project: {
+        ...state.project,
+        mediaTracks: nextTracks,
+        mediaClips: mediaClips.filter((clip) => clip.trackId !== id)
+      },
+      ...(state.selectedMediaClipId && removedIds.has(state.selectedMediaClipId)
+        ? { selectedMediaClipId: null }
+        : {}),
+      ...(state.selectedTrackId === id ? { selectedTrackId: nextTracks[0]?.id ?? null } : {}),
+      revision: state.revision + 1
+    })
+  },
+
+  removeAudioTrack: (id) => {
+    const state = get()
+    const { audioTracks } = state.project
+    if (!audioTracks.some((track) => track.id === id)) return
+    const nextTracks = removeTrackIn(audioTracks, id)
+    if (nextTracks === audioTracks) return
+    const kept = (state.project.audioClips ?? []).filter((clip) => clip.trackId !== id)
+    const removedIds = new Set(
+      (state.project.audioClips ?? []).filter((clip) => clip.trackId === id).map((clip) => clip.id)
+    )
+    const project: Project = { ...state.project, audioTracks: nextTracks }
+    if (kept.length > 0) project.audioClips = sortAudioClips(kept)
+    else delete project.audioClips
+    set({
+      project,
+      ...(state.selectedAudioClipId && removedIds.has(state.selectedAudioClipId)
+        ? { selectedAudioClipId: null }
+        : {}),
+      ...(state.selectedTrackId === id ? { selectedTrackId: nextTracks[0]?.id ?? null } : {}),
+      revision: state.revision + 1
+    })
+  },
+
+  moveMediaTrack: (id, toIndex) => {
+    const state = get()
+    const mediaTracks = moveTrackIn(state.project.mediaTracks, id, toIndex)
+    if (mediaTracks === state.project.mediaTracks) return
+    set({ project: { ...state.project, mediaTracks }, revision: state.revision + 1 })
+  },
+
+  moveAudioTrack: (id, toIndex) => {
+    const state = get()
+    const audioTracks = moveTrackIn(state.project.audioTracks, id, toIndex)
+    if (audioTracks === state.project.audioTracks) return
+    set({ project: { ...state.project, audioTracks }, revision: state.revision + 1 })
+  },
+
+  renameTrack: (id, name) => {
+    const state = get()
+    const project = state.project
+    const mediaTracks = renameTrackIn(project.mediaTracks, id, name)
+    if (mediaTracks !== project.mediaTracks) {
+      set({ project: { ...project, mediaTracks }, revision: state.revision + 1 })
+      return
+    }
+    const audioTracks = renameTrackIn(project.audioTracks, id, name)
+    if (audioTracks !== project.audioTracks) {
+      set({ project: { ...project, audioTracks }, revision: state.revision + 1 })
+      return
+    }
+    const [subtitleTrack] = renameTrackIn([project.subtitleTrack], id, name)
+    if (subtitleTrack && subtitleTrack !== project.subtitleTrack) {
+      set({ project: { ...project, subtitleTrack }, revision: state.revision + 1 })
+    }
+  },
+
+  setTrackMuted: (id, muted) => {
+    const state = get()
+    const project = withTrackMuted(state.project, id, muted)
+    if (project !== state.project) set({ project, revision: state.revision + 1 })
+  },
+
+  setTrackHidden: (id, hidden) => {
+    const state = get()
+    const project = withTrackHidden(state.project, id, hidden)
+    if (project !== state.project) set({ project, revision: state.revision + 1 })
+  },
+
+  setTrackLocked: (id, locked) => {
+    const state = get()
+    const project = withTrackLocked(state.project, id, locked)
+    if (project !== state.project) set({ project, revision: state.revision + 1 })
+  },
+
+  setMediaClipTrack: (id, trackId) => {
+    const state = get()
+    const current = state.project.mediaClips.find((clip) => clip.id === id)
+    if (!current || current.trackId === trackId) return
+    if (!state.project.mediaTracks.some((track) => track.id === trackId)) return
+    if (isTrackLocked(trackById(state.project.mediaTracks, current.trackId))) return
+    if (isTrackLocked(trackById(state.project.mediaTracks, trackId))) return
+    const conflict = state.project.mediaClips.some(
+      (other) =>
+        other.id !== id && other.trackId === trackId && spansOverlap(trackSpan(other), trackSpan(current))
+    )
+    if (conflict) return
+    const mediaClips = state.project.mediaClips.map((clip) =>
+      clip.id === id ? { ...clip, trackId } : clip
+    )
     set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
   },
 
-  setAudioClipLayer: (id, layer) => {
+  setAudioClipTrack: (id, trackId) => {
     const state = get()
-    const next = normalizeLayer(layer)
-    const audioClips = (state.project.audioClips ?? []).map((clip) => {
-      if (clip.id !== id) return clip
-      const updated: AudioClip = { ...clip }
-      if (next > 0) updated.layer = next
-      else delete updated.layer
-      return updated
-    })
+    const current = (state.project.audioClips ?? []).find((clip) => clip.id === id)
+    if (!current || current.trackId === trackId) return
+    if (!state.project.audioTracks.some((track) => track.id === trackId)) return
+    if (isTrackLocked(trackById(state.project.audioTracks, current.trackId))) return
+    if (isTrackLocked(trackById(state.project.audioTracks, trackId))) return
+    const conflict = (state.project.audioClips ?? []).some(
+      (other) =>
+        other.id !== id && other.trackId === trackId && spansOverlap(trackSpan(other), trackSpan(current))
+    )
+    if (conflict) return
+    const audioClips = (state.project.audioClips ?? []).map((clip) =>
+      clip.id === id ? { ...clip, trackId } : clip
+    )
     set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
   },
 

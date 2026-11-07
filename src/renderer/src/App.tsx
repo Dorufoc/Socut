@@ -31,6 +31,7 @@ import { runVisualCheck } from './smoke/runVisualCheck'
 import { ensureFontRegistered } from './hooks/useFontLoader'
 import { PreviewStage, type StageSeekHandle } from './components/PreviewStage'
 import { RecentProjectsPage } from './launcher/RecentProjectsPage'
+import { SettingsPage } from './settings/SettingsPage'
 import { captureCurrentCover } from './launcher/cover'
 import { useRecentProjectsStore } from './state/recentProjectsStore'
 import { InfoBar } from './components/ui/InfoBar'
@@ -486,12 +487,15 @@ export function App(): ReactElement {
 
   return (
     <>
-      {view === 'launcher' ? (
+      {view === 'settings' ? (
+        <SettingsPage onBack={() => setView('launcher')} appVersion={appInfo?.version ?? ''} />
+      ) : view === 'launcher' ? (
         <RecentProjectsPage
           appVersion={appInfo?.version ?? ''}
           onOpen={handleOpenRecent}
           onCreate={handleCreate}
           onBrowse={handleBrowse}
+          onOpenSettings={() => setView('settings')}
         />
       ) : (
         <div className="app">

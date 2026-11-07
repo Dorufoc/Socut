@@ -1,5 +1,5 @@
 import type { AudioClip, ClipSpeed, Fps, MediaItem, MediaKind, VideoMeta } from './types'
-import { IMPORTABLE_IMAGE_EXTENSIONS } from './constants'
+import { DEFAULT_AUDIO_TRACK_ID, IMPORTABLE_IMAGE_EXTENSIONS } from './constants'
 import { snapTimeToFrame } from './fps'
 import { speedValueOf } from './mediaClipAudio'
 
@@ -39,19 +39,25 @@ export function inferMediaKind(path: string, meta: VideoMeta): MediaKind {
  * 混在一起会让两边都变难懂。
  */
 
-/** 同一条音频轨最多叠多少层（超过就夹到上限，避免层高被压成 1px） */
+/**
+ * @deprecated v3 之前每个片段带 `layer` 层号，层高由轨道按最大层数均分。
+ * 现在片段直接挂 `trackId`，这个常量只留给旧工程迁移与旧测试。
+ */
 export const MAX_CLIP_LAYER = 4
 
 /** 最短音频段（秒）：与媒体段同一量级，避免拖成一条看不见的线 */
 export const MIN_AUDIO_CLIP_SEC = 0.2
 
+/** @deprecated 仅用于读取旧工程的 `layer` 字段；新代码请用 `clip.trackId`。 */
 export function normalizeLayer(raw: unknown): number {
   const value = typeof raw === 'number' && Number.isFinite(raw) ? Math.round(raw) : 0
   return Math.min(MAX_CLIP_LAYER, Math.max(0, value))
 }
 
 export function sortAudioClips(clips: AudioClip[]): AudioClip[] {
-  return [...clips].sort((a, b) => a.timelineStartSec - b.timelineStartSec || normalizeLayer(a.layer) - normalizeLayer(b.layer))
+  return [...clips].sort(
+    (a, b) => a.timelineStartSec - b.timelineStartSec || a.trackId.localeCompare(b.trackId)
+  )
 }
 
 /** 播放头处的全部音频段（按层号升序：底层先混，便于排查） */
@@ -64,9 +70,9 @@ export function audioClipsEndSec(clips: AudioClip[]): number {
   return clips.reduce((acc, clip) => Math.max(acc, clip.timelineEndSec), 0)
 }
 
-/** 该层是否已被同层其它片段占用（叠放层不做自动让位，只做提示性判定） */
-export function layerOccupied(clips: AudioClip[], layer: number, excludeId?: string): boolean {
-  return clips.some((clip) => clip.id !== excludeId && normalizeLayer(clip.layer) === layer)
+/** 该轨道是否已被片段占用（同轨不自动让位，只做提示性判定） */
+export function trackOccupied(clips: AudioClip[], trackId: string, excludeId?: string): boolean {
+  return clips.some((clip) => clip.id !== excludeId && clip.trackId === trackId)
 }
 
 export interface InsertAudioInput {
@@ -74,7 +80,8 @@ export interface InsertAudioInput {
   timelineStartSec: number
   durationSec: number
   sourceInSec?: number
-  layer?: number
+  /** v3：落点轨道 id（缺省 = 第一条音频轨） */
+  trackId?: string
   /** 源文件总长（裁剪用；缺省视为足够长） */
   sourceDurationSec?: number
   /** v9：创建时的倍速（缺省 1x；>1x 时同一段源内容在时间轴上更短） */
@@ -104,7 +111,7 @@ export function makeAudioClip(input: InsertAudioInput, fps: Fps): AudioClip | nu
     timelineEndSec: end,
     sourceInSec: sourceIn,
     sourceOutSec: snapTimeToFrame(sourceIn + (end - start) * speed, fps),
-    ...(normalizeLayer(input.layer) > 0 ? { layer: normalizeLayer(input.layer) } : {})
+    trackId: input.trackId ?? DEFAULT_AUDIO_TRACK_ID
   }
 }
 

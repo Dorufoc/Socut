@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MIN_CLIP_DURATION_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
-import { FPS_30 } from '@shared/constants'
+import { DEFAULT_MEDIA_TRACK_ID, FPS_30, MIN_CLIP_DURATION_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
 import { snapTimeToFrame } from '@shared/fps'
 import {
   alignAfterOverlap,
@@ -23,6 +22,7 @@ function clip(over: Partial<MediaClip> = {}): MediaClip {
     ...over,
     id: over.id ?? 'mclip-a',
     mediaId: over.mediaId ?? 'media-1',
+    trackId: over.trackId ?? DEFAULT_MEDIA_TRACK_ID,
     timelineStartSec: over.timelineStartSec ?? 0,
     timelineEndSec: over.timelineEndSec ?? 4,
     sourceInSec: over.sourceInSec ?? 1,
@@ -173,10 +173,16 @@ describe('mediaClips 变速段的时间换算（v9）', () => {
     expect(sourceTimeOf([clip({ timelineStartSec: 0, timelineEndSec: 4, sourceInSec: 10, sourceOutSec: 14 })], 1.5)!.sourceSec).toBeCloseTo(11.5, 6)
   })
 
-  it('层号取上层：被遮蔽后的源窗口按倍速投影', () => {
-    const top = clip({ id: 'top', timelineStartSec: 0, timelineEndSec: 4, sourceInSec: 0, sourceOutSec: 8, layer: 1, speed: { speed: 2, maintainPitch: true } })
-    const bottom = clip({ id: 'bottom', mediaId: 'media-2', timelineStartSec: 2, timelineEndSec: 6, sourceInSec: 20, sourceOutSec: 28, speed: { speed: 2, maintainPitch: true } })
-    const visible = resolveVisibleMediaClips([top, bottom])
+  it('轨道取上层：被遮蔽后的源窗口按倍速投影', () => {
+    const top = clip({ id: 'top', trackId: 'track-media-1', timelineStartSec: 0, timelineEndSec: 4, sourceInSec: 0, sourceOutSec: 8, speed: { speed: 2, maintainPitch: true } })
+    const bottom = clip({ id: 'bottom', mediaId: 'media-2', trackId: 'track-media-0', timelineStartSec: 2, timelineEndSec: 6, sourceInSec: 20, sourceOutSec: 28, speed: { speed: 2, maintainPitch: true } })
+    const visible = resolveVisibleMediaClips(
+      [top, bottom],
+      new Map([
+        ['track-media-0', 0],
+        ['track-media-1', 1]
+      ])
+    )
     expect(visible.map((c) => [c.id, c.timelineStartSec, c.timelineEndSec])).toEqual([
       ['top', 0, 4],
       ['bottom', 4, 6]

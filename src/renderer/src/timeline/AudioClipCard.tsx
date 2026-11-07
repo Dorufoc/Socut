@@ -1,30 +1,33 @@
 import { useRef, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react'
 import { snapTimeToFrame } from '@shared/fps'
-import { MIN_AUDIO_CLIP_SEC, normalizeLayer } from '@shared/audioClips'
+import { MIN_AUDIO_CLIP_SEC } from '@shared/audioClips'
 import { secToPx } from './ruler'
 import { laneBoxFromCard, secAtClientX } from './lane'
 import type { AudioClip, Fps, MediaItem } from '@shared/types'
 
 /**
- * 音频轨上的片段卡（v7.1）。
+ * 音频轨上的片段卡（v3 多轨）。
  *
  * 与媒体段卡同一套拖拽手感（整段平移 / 拖入出点），但**不画缩略图**：
  * 音频没有画面，这里用「时长指示条」——底纹是等距竖条的波形示意，
  * 宽度即片段在时间轴上的占比，长度读数和名称放同一行。
- * 叠放层用 `top/height` 百分比切分，轨道被拖矮时各层等比压缩。
+ * 卡片直接填满所在轨道行（不再按 layer 切分高度）。
  */
 
 export interface AudioClipCardProps {
   clip: AudioClip
+  /** v3：片段所属音频轨（卡片填满整行） */
+  trackId: string
   item: MediaItem | null
   durationSec: number
   widthPx: number
   fps: Fps
   selected: boolean
-  /** 该轨道的叠放层数（>=1），用于把卡片高度切成 N 份 */
-  layers: number
+  /** 轨道锁定：不开始拖动/修剪（仍可选中查看） */
+  locked?: boolean
   onSelect: (id: string) => void
-  onMove: (timelineStartSec: number) => void
+  /** 第二个参数是指针 Y：上层据此命中另一条轨道实现跨轨拖拽 */
+  onMove: (timelineStartSec: number, clientY: number) => void
   onTrim: (patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
   /** 按下时回调：上层在这一刻快照吸附候选边缘，拖拽途中不再重算 */
   onDragStart?: () => void
@@ -43,12 +46,13 @@ interface DragState {
 
 export function AudioClipCard({
   clip,
+  trackId,
   item,
   durationSec,
   widthPx,
   fps,
   selected,
-  layers,
+  locked = false,
   onSelect,
   onMove,
   onTrim,
@@ -57,8 +61,6 @@ export function AudioClipCard({
 }: AudioClipCardProps): ReactElement {
   const dragRef = useRef<DragState | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
-  const lane = Math.max(1, layers)
-  const layer = Math.min(normalizeLayer(clip.layer), lane - 1)
   const left = secToPx(clip.timelineStartSec, durationSec, widthPx)
   const right = secToPx(clip.timelineEndSec, durationSec, widthPx)
   const name = item?.name ?? '（素材已移出）'
@@ -69,6 +71,11 @@ export function AudioClipCard({
     const rect = card.getBoundingClientRect()
     if (rect.width <= 0) return
     onSelect(clip.id)
+    // 锁定轨道：只允许选中，不开始拖拽/修剪；仍要吞掉事件，避免触发轨道刮擦
+    if (locked) {
+      event.stopPropagation()
+      return
+    }
     dragRef.current = {
       edge,
       grabOffsetPx: event.clientX - rect.left,
@@ -88,7 +95,10 @@ export function AudioClipCard({
     const box = laneBoxFromCard(cardRef.current, widthPx)
     if (!box) return
     if (drag.edge === 'move') {
-      onMove(snapTimeToFrame(secAtClientX(event.clientX - drag.grabOffsetPx, box, durationSec), fps))
+      onMove(
+        snapTimeToFrame(secAtClientX(event.clientX - drag.grabOffsetPx, box, durationSec), fps),
+        event.clientY
+      )
       return
     }
     if (drag.edge === 'in') {
@@ -119,14 +129,15 @@ export function AudioClipCard({
 
   return (
     <div
-        ref={cardRef}
-        data-clip-id={clip.id}
-      className={`audio-clip-card${selected ? ' audio-clip-card--selected' : ''}${item ? '' : ' audio-clip-card--orphan'}`}
+      ref={cardRef}
+      data-clip-id={clip.id}
+      data-track-id={trackId}
+      className={`audio-clip-card${selected ? ' audio-clip-card--selected' : ''}${item ? '' : ' audio-clip-card--orphan'}${
+        locked ? ' audio-clip-card--locked' : ''
+      }`}
       style={{
         left,
-        width: Math.max(24, right - left),
-        top: `${(layer * 100) / lane}%`,
-        height: `${100 / lane}%`
+        width: Math.max(24, right - left)
       }}
       title={`${name} · ${(clip.timelineEndSec - clip.timelineStartSec).toFixed(2)}s`}
       onPointerDown={begin('move')}

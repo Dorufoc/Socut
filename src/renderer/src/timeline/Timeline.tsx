@@ -9,6 +9,8 @@ import {
 } from 'react'
 import {
   LANE_GUTTER_PX,
+  MAX_AUDIO_TRACKS,
+  MAX_MEDIA_TRACKS,
   MAX_TRACK_SEC,
   TIMELINE_BASE_PX_PER_SEC,
   TIMELINE_MAX_ZOOM,
@@ -21,6 +23,8 @@ import { collectSnapEdges, snapEdge, snapMove, snapWindowSec } from '@shared/tim
 import { secondsToTimecode } from '@shared/timecode'
 import { TEXT } from '@shared/i18n'
 import { timelineContentEndSec } from '@shared/presetResolver'
+import { clipsOnAudioTrack, clipsOnMediaTrack, isTrackLocked } from '@shared/tracks'
+import type { AudioTrack, MediaTrack } from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
 import { useHistoryStore } from '../state/projectHistory'
 import { useUiStore } from '../state/uiStore'
@@ -28,20 +32,21 @@ import { IconRedo, IconUndo } from '../components/ui/Icon'
 import { ClipCard } from './ClipCard'
 import { MediaClipCard } from './MediaClipCard'
 import { AudioClipCard } from './AudioClipCard'
-import { mediaKindOf, normalizeLayer } from '@shared/audioClips'
+import { TrackHeader } from './TrackHeader'
+import { mediaKindOf } from '@shared/audioClips'
 import { MEDIA_DRAG_MIME } from '../panels/MediaLibraryPanel'
 import { buildTicks, pickStep, secToPx } from './ruler'
 import { laneBoxOf, secAtClientX } from './lane'
 
 /**
- * 时间轴（v12 滚动 / 缩放重构）：
- * - 尺规与三条轨道放进**同一个横向滚动容器**，轨道长度由「内容末尾 + 余量」推导，
- *   最多 1 小时（MAX_TRACK_SEC）；滚到接近右端时自动再加一屏，视觉上近似无限；
- * - 轨道标签用 sticky 固定在左侧 56px 槽里，横向滚动时永远可见；
- * - Ctrl/Cmd + 滚轮以鼠标下的时间点为锚缩放比例尺（10%~800%），纵向滚轮转成横向滚动；
- * - 蓝线（播放头）上限 = 最后一个媒体/字幕/音频段的末尾（timelineContentEndSec），
- *   轨道本身可以比内容更宽，方便往后面拖新段；
- * - 拖拽任何段都只夹取自己（store 的间隙夹取），永远不推挤别的段。
+ * 时间轴（v3 多轨）：
+ * - 行序：媒体轨（数组反向，索引越大越靠上）→ 字幕轨（固定一条）→ 音频轨（同样反向）；
+ * - 每条轨道自己的轨道头：重命名 / 静音 / 隐藏 / 锁定 / 上下移 / 删除（字幕轨只有隐藏与锁定）；
+ * - 片段拖拽既能横向改时间，也能跨行落到另一条同类轨道（目标轨道由指针 Y 命中）；
+ * - 锁定轨道上的片段不开始拖拽/修剪；
+ * - 尺规与轨道放进同一个横向滚动容器，比例尺由「内容末尾 + 余量」推导（最多 1 小时），
+ *   Ctrl/Cmd + 滚轮以鼠标下的时间点为锚缩放，普通竖向滚轮转成横向滚动；
+ * - 蓝线（播放头）上限 = 最后一个媒体/字幕/音频段的末尾（timelineContentEndSec）。
  */
 
 type ScrubElement = HTMLDivElement
@@ -55,11 +60,32 @@ const TICK_OVERSCAN_PX = 320
 const AUTO_EXTEND_PX = 240
 /** Ctrl+滚轮每档的缩放倍率（剪映式逐格缩放） */
 const ZOOM_STEP = 1.15
-/** v7 叠层上限（UI 侧，只影响按钮置灰） */
-const MAX_LAYER_UI = 4
+/** 跨轨命中查询用的属性选择器 */
+const MEDIA_ROW_SELECTOR = '.timeline__track--media[data-track-id]'
+const AUDIO_ROW_SELECTOR = '.timeline__track--audio[data-track-id]'
 
 export interface TimelineProps {
   seekTo: (sec: number) => void
+}
+
+/** 轨道元素里的车道（真正按时间换算 X 的矩形）。 */
+function laneOf(trackEl: Element | null): HTMLElement | null {
+  return trackEl?.querySelector<HTMLElement>('.timeline__lane') ?? null
+}
+
+/**
+ * 指针 Y 命中的轨道 id：卡片在拖拽时被 pointer capture 住，
+ * 事件仍会带着真实 clientY，所以按每条轨道行的屏幕矩形做一次命中即可。
+ * 没有命中（指针在轨道外）时返回 null，调用方保持原轨道。
+ */
+function trackIdAtClientY(container: Element | null, selector: string, clientY: number): string | null {
+  if (!container || !Number.isFinite(clientY)) return null
+  const rows = container.querySelectorAll<HTMLElement>(selector)
+  for (const row of rows) {
+    const rect = row.getBoundingClientRect()
+    if (clientY >= rect.top && clientY <= rect.bottom) return row.dataset.trackId ?? null
+  }
+  return null
 }
 
 export function Timeline({ seekTo }: TimelineProps): ReactElement {
@@ -77,12 +103,22 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const audioClips = useProjectStore((state) => state.project.audioClips) ?? EMPTY_AUDIO_CLIPS
   const selectedAudioClipId = useProjectStore((state) => state.selectedAudioClipId)
   const selectAudioClip = useProjectStore((state) => state.selectAudioClip)
-  const setMediaClipLayer = useProjectStore((state) => state.setMediaClipLayer)
-  const setAudioClipLayer = useProjectStore((state) => state.setAudioClipLayer)
   const insertAudioClip = useProjectStore((state) => state.insertAudioClip)
   const moveAudioClip = useProjectStore((state) => state.moveAudioClip)
   const trimAudioClip = useProjectStore((state) => state.trimAudioClip)
   const compactTimeline = useProjectStore((state) => state.compactTimeline)
+  const selectedTrackId = useProjectStore((state) => state.selectedTrackId)
+  const selectTrack = useProjectStore((state) => state.selectTrack)
+  const addMediaTrack = useProjectStore((state) => state.addMediaTrack)
+  const addAudioTrack = useProjectStore((state) => state.addAudioTrack)
+  const removeMediaTrack = useProjectStore((state) => state.removeMediaTrack)
+  const removeAudioTrack = useProjectStore((state) => state.removeAudioTrack)
+  const moveMediaTrack = useProjectStore((state) => state.moveMediaTrack)
+  const moveAudioTrack = useProjectStore((state) => state.moveAudioTrack)
+  const renameTrack = useProjectStore((state) => state.renameTrack)
+  const setTrackMuted = useProjectStore((state) => state.setTrackMuted)
+  const setTrackHidden = useProjectStore((state) => state.setTrackHidden)
+  const setTrackLocked = useProjectStore((state) => state.setTrackLocked)
   const displayTime = useUiStore((state) => state.displayTimeSec)
   const playing = useUiStore((state) => state.playing)
   const setPlaying = useUiStore((state) => state.setPlaying)
@@ -96,13 +132,9 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const undo = useHistoryStore((state) => state.undo)
   const redo = useHistoryStore((state) => state.redo)
 
-  // 车道（`.timeline__lane`）：卡片、刻度、落点、吸附线的坐标原点都在这块矩形上。
-  // 轨道去掉 1px 边框（改用 inset box-shadow），车道左缘才与播放头、sticky 标签严格对齐。
+  // 尺规的车道：预览轴/落点换算都按它与轨道共用的同一块矩形来算。
   const rulerLaneRef = useRef<HTMLDivElement | null>(null)
-  const mediaLaneRef = useRef<HTMLDivElement | null>(null)
-  const audioLaneRef = useRef<HTMLDivElement | null>(null)
-  const subtitleLaneRef = useRef<HTMLDivElement | null>(null)
-  /** 横向滚动容器：滚轮横滚、缩放锚点、自动延长都挂在它身上 */
+  /** 横向滚动容器：滚轮横滚、缩放锚点、自动延长、跨轨命中都挂在它身上 */
   const scrollRef = useRef<HTMLDivElement | null>(null)
   /** 视口读数（宽度 + scrollLeft）：刻度按它做窗口化渲染 */
   const [viewport, setViewport] = useState({ width: 0, scrollLeft: 0 })
@@ -111,8 +143,8 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   // 刮擦中的车道元素：capture 后 pointermove 始终以该元素（实时）矩形换算位置
   const scrubLaneRef = useRef<HTMLElement | null>(null)
   const [scrubbing, setScrubbing] = useState(false)
-  // 素材拖入：拖拽悬停的吸附落点（秒），null 表示当前不在轨道上拖拽
-  const [dropSec, setDropSec] = useState<number | null>(null)
+  // 素材拖入：当前悬停的轨道与吸附落点（秒），null = 不在任何轨道上拖拽
+  const [drop, setDrop] = useState<{ kind: 'media' | 'audio'; trackId: string; sec: number } | null>(null)
   // 自动吸附命中的目标边缘（秒），画高亮竖线用；null = 当前没有吸附反馈
   const [snapGuideSec, setSnapGuideSec] = useState<number | null>(null)
   // 按下时快照的吸附候选边缘：拖拽途中片段自己在动，实时重算会让邻居变成新的磁铁
@@ -151,6 +183,10 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const tickFromSec = Math.max(0, (viewport.scrollLeft - TICK_OVERSCAN_PX) / pxPerSec)
   const tickToSec = Math.min(spanSec, (viewport.scrollLeft + Math.max(viewport.width, 640) + TICK_OVERSCAN_PX) / pxPerSec)
   const ticks = buildTicks(tickFromSec, tickToSec, project.fps, step)
+
+  // 行序：媒体轨反向（最高索引 = 最上面一行）→ 字幕 → 音频轨反向
+  const mediaRows = [...project.mediaTracks].reverse()
+  const audioRows = [...project.audioTracks].reverse()
 
   // 滚动：同步视口读数（刻度窗口）；滚到接近右端时自动延长一屏
   useEffect(() => {
@@ -234,19 +270,18 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     seekTo(snapTimeToFrame(sec, project.fps))
   }
 
-  const beginScrub =
-    (laneRef: React.RefObject<HTMLDivElement | null>) =>
-    (event: ReactPointerEvent<ScrubElement>): void => {
-      // 只响应主键；片段卡片的 pointerdown 已 stopPropagation，不会走到这里
-      if (event.button !== 0) return
-      if (!laneRef.current) return
-      scrubLaneRef.current = laneRef.current
-      event.currentTarget.setPointerCapture(event.pointerId)
-      // 刮擦接管播放头：先暂停，否则时钟会继续前进、覆盖拖拽定位
-      if (playing) setPlaying(false)
-      setScrubbing(true)
-      seekFromScrub(event.clientX)
-    }
+  const beginScrub = (event: ReactPointerEvent<ScrubElement>): void => {
+    // 只响应主键；片段卡片的 pointerdown 已 stopPropagation，不会走到这里
+    if (event.button !== 0) return
+    const lane = laneOf(event.currentTarget)
+    if (!lane) return
+    scrubLaneRef.current = lane
+    event.currentTarget.setPointerCapture(event.pointerId)
+    // 刮擦接管播放头：先暂停，否则时钟会继续前进、覆盖拖拽定位
+    if (playing) setPlaying(false)
+    setScrubbing(true)
+    seekFromScrub(event.clientX)
+  }
 
   const moveScrub = (event: ReactPointerEvent<ScrubElement>): void => {
     if (!scrubLaneRef.current) return
@@ -269,16 +304,24 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     return snapTimeToFrame(secAtClientX(clientX, box, spanSec), project.fps)
   }
 
-  const onMediaDragOver = (event: ReactDragEvent<HTMLDivElement>): void => {
+  const onMediaDragOver = (event: ReactDragEvent<HTMLDivElement>, track: MediaTrack): void => {
     if (!event.dataTransfer.types.includes(MEDIA_DRAG_MIME)) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'copy'
-    setDropSec(dropSecFrom(event.clientX, mediaLaneRef.current))
+    setDrop({
+      kind: 'media',
+      trackId: track.id,
+      sec: dropSecFrom(event.clientX, laneOf(event.currentTarget))
+    })
   }
 
-  const onMediaDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
+  const onMediaDragLeave = (trackId: string): void => {
+    setDrop((current) => (current && current.trackId === trackId ? null : current))
+  }
+
+  const onMediaDrop = (event: ReactDragEvent<HTMLDivElement>, track: MediaTrack): void => {
     event.preventDefault()
-    setDropSec(null)
+    setDrop(null)
     const mediaId = event.dataTransfer.getData(MEDIA_DRAG_MIME) || event.dataTransfer.getData('text/plain')
     if (!mediaId) return
     const item = project.media.find((m) => m.id === mediaId)
@@ -290,22 +333,40 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
       setNotice('音频素材请拖到音频轨')
       return
     }
-    const atSec = dropSecFrom(event.clientX, mediaLaneRef.current)
+    if (isTrackLocked(track)) {
+      setNotice('该轨道已锁定，无法放入')
+      return
+    }
+    const atSec = dropSecFrom(event.clientX, laneOf(event.currentTarget))
     // 整段放入：从源 0s 起覆盖全长；落点被占时由 store 顺延到后面的空档，不推动任何已有段
-    const clip = insertMediaClip({ mediaId, timelineStartSec: atSec, durationSec: item.meta.durationSec, sourceInSec: 0 })
+    const clip = insertMediaClip({
+      mediaId,
+      timelineStartSec: atSec,
+      durationSec: item.meta.durationSec,
+      sourceInSec: 0,
+      trackId: track.id
+    })
     if (!clip) setNotice(`落点剩余空间不足最短时长（${item.name}）`)
   }
 
-  const onAudioDragOver = (event: ReactDragEvent<HTMLDivElement>): void => {
+  const onAudioDragOver = (event: ReactDragEvent<HTMLDivElement>, track: AudioTrack): void => {
     if (!event.dataTransfer.types.includes(MEDIA_DRAG_MIME)) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'copy'
-    setDropSec(dropSecFrom(event.clientX, audioLaneRef.current))
+    setDrop({
+      kind: 'audio',
+      trackId: track.id,
+      sec: dropSecFrom(event.clientX, laneOf(event.currentTarget))
+    })
   }
 
-  const onAudioDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
+  const onAudioDragLeave = (trackId: string): void => {
+    setDrop((current) => (current && current.trackId === trackId ? null : current))
+  }
+
+  const onAudioDrop = (event: ReactDragEvent<HTMLDivElement>, track: AudioTrack): void => {
     event.preventDefault()
-    setDropSec(null)
+    setDrop(null)
     const mediaId = event.dataTransfer.getData(MEDIA_DRAG_MIME) || event.dataTransfer.getData('text/plain')
     if (!mediaId) return
     const item = project.media.find((m) => m.id === mediaId)
@@ -317,36 +378,26 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
       setNotice('视频素材请拖到媒体轨')
       return
     }
-    const atSec = dropSecFrom(event.clientX, audioLaneRef.current)
-    const clip = insertAudioClip({ mediaId, timelineStartSec: atSec, durationSec: item.meta.durationSec })
+    if (isTrackLocked(track)) {
+      setNotice('该轨道已锁定，无法放入')
+      return
+    }
+    const atSec = dropSecFrom(event.clientX, laneOf(event.currentTarget))
+    const clip = insertAudioClip({
+      mediaId,
+      timelineStartSec: atSec,
+      durationSec: item.meta.durationSec,
+      trackId: track.id
+    })
     if (!clip) setNotice('该音频段太短，无法放入')
   }
-
-  const activeMediaTarget = project.mediaClips.find((c) => c.id === selectedMediaClipId) ?? null
-  /** v7：媒体轨的叠放层数（按现有最大层号取，单层时不切分高度） */
-  const mediaLayers = Math.max(1, ...project.mediaClips.map((clip) => (clip.layer ?? 0) + 1))
-  const activeAudioTarget = audioClips.find((c) => c.id === selectedAudioClipId) ?? null
-  /** 音频轨的叠放层数：按现有最大层号取，空轨就是 1 层 */
-  const audioLayers = Math.max(1, ...audioClips.map((clip) => normalizeLayer(clip.layer) + 1))
-  /** v7 叠层：被选中的片段（媒体优先，否则音频）与它的当前层号 */
-  const layerTarget = activeMediaTarget ?? activeAudioTarget
-  const layerNow = layerTarget ? (layerTarget.layer ?? 0) : 0
-  /** 上/下移一层：只改层号，时间不变；0 层不落盘 */
-  const shiftLayer = (delta: number): void => {
-    if (!layerTarget) return
-    const next = layerNow + delta
-    if (activeMediaTarget) setMediaClipLayer(activeMediaTarget.id, next)
-    else if (activeAudioTarget) setAudioClipLayer(activeAudioTarget.id, next)
-  }
-
-  // P3：拆分与删除不再分轨，目标段由 store 统一解析（选中优先，其次播放头处媒体轨最下层）
 
   // ---------------------------------------------------------------- 时间轴工具
 
   /** 像素阈值换算成秒（随比例尺变化，手感一致） */
   const snapWindow = snapWindowSec(widthPx, spanSec)
 
-  /** 候选边缘：三轨所有片段的首/尾 + 0 点；被拖的那条自己不能当候选 */
+  /** 候选边缘：所有媒体轨与字幕轨片段的首/尾 + 0 点；被拖的那条自己不能当候选 */
   const snapEdges = (excludeId: string): number[] =>
     collectSnapEdges(
       [
@@ -372,18 +423,20 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     setSnapGuideSec(null)
   }
 
-  /** 媒体段整段拖拽：开着吸附时首尾都试一次，命中就画导引线 */
-  const handleMediaMove = (id: string, start: number): void => {
+  /** 媒体段整段拖拽：纵向命中另一条媒体轨则一起提交 targetTrackId。 */
+  const handleMediaMove = (id: string, start: number, clientY: number): void => {
     const clip = project.mediaClips.find((item) => item.id === id)
-    if (!clip || !tools.magneticSnap) {
+    if (!clip) return
+    const targetTrackId = trackIdAtClientY(scrollRef.current, MEDIA_ROW_SELECTOR, clientY) ?? clip.trackId
+    if (!tools.magneticSnap) {
       setSnapGuideSec(null)
-      moveMediaClip(id, start)
+      moveMediaClip(id, start, targetTrackId)
       return
     }
     const length = clip.timelineEndSec - clip.timelineStartSec
     const snapped = snapMove(start, length, edgesDuringDrag(id), snapWindow, spanSec)
     setSnapGuideSec(snapped.guideSec)
-    moveMediaClip(id, snapped.value)
+    moveMediaClip(id, snapped.value, targetTrackId)
   }
 
   /** 媒体段拖入/出点：只有被拖的那条边参与吸附 */
@@ -407,6 +460,22 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     }
     setSnapGuideSec(guide)
     trimMediaClip(id, next)
+  }
+
+  /** 音频段整段拖拽：与媒体段同一套跨轨命中。 */
+  const handleAudioMove = (id: string, start: number, clientY: number): void => {
+    const clip = audioClips.find((item) => item.id === id)
+    if (!clip) return
+    const targetTrackId = trackIdAtClientY(scrollRef.current, AUDIO_ROW_SELECTOR, clientY) ?? clip.trackId
+    if (!tools.magneticSnap) {
+      setSnapGuideSec(null)
+      moveAudioClip(id, start, targetTrackId)
+      return
+    }
+    const length = clip.timelineEndSec - clip.timelineStartSec
+    const snapped = snapMove(start, length, edgesDuringDrag(id), snapWindow, spanSec)
+    setSnapGuideSec(snapped.guideSec)
+    moveAudioClip(id, snapped.value, targetTrackId)
   }
 
   /** 字幕条拖拽：首尾各自吸附（一般只会动到其中一条边） */
@@ -436,7 +505,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const onHoverMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
     // 播放中不接管：黄线会与时钟抢画面，用户也看不清自己停在哪一帧
     if (!tools.hoverPreview || playing || event.pointerType !== 'mouse') return
-    const box = laneBoxOf(mediaLaneRef.current)
+    const box = laneBoxOf(rulerLaneRef.current)
     if (!box) return
     const sec = Math.min(contentEndSec, secAtClientX(event.clientX, box, spanSec))
     setHoverPreview(snapTimeToFrame(sec, project.fps))
@@ -458,16 +527,19 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   /** 预览与拆分都看黄线指的地方；黄线不在时才回到蓝线 */
   const operateSec = hoverActive && hoverSec !== null ? hoverSec : displayTime
 
-  /** 两轨都要画的导引线：吸附目标边缘（强调蓝）+ 预览轴（黄）。复用同一个元素实例。 */
+  /** 全宽导引线：吸附目标边缘（强调蓝）+ 预览轴（黄）。挂在整块轨道内容上，跨所有行。 */
   const guides = (
     <>
       {snapGuideSec !== null ? (
-        <div className="timeline__snap-line" style={{ left: secToPx(snapGuideSec, spanSec, widthPx) }} />
+        <div
+          className="timeline__snap-line"
+          style={{ left: LANE_GUTTER_PX + secToPx(snapGuideSec, spanSec, widthPx) }}
+        />
       ) : null}
       {hoverActive ? (
         <div
           className="timeline__hover-line"
-          style={{ left: secToPx(Math.min(hoverSec ?? 0, spanSec), spanSec, widthPx) }}
+          style={{ left: LANE_GUTTER_PX + secToPx(Math.min(hoverSec ?? 0, spanSec), spanSec, widthPx) }}
         >
           <span className="timeline__hover-tag mono">{secondsToTimecode(hoverSec ?? 0, project.fps)}</span>
         </div>
@@ -477,6 +549,14 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
 
   /** 播放头位置：夹在内容末尾之内（轨道可以更长） */
   const playheadLeft = secToPx(Math.min(displayTime, contentEndSec), spanSec, widthPx)
+
+  const dropIndicator = (sec: number): ReactElement => (
+    <div
+      className="timeline__drop-indicator"
+      style={{ left: secToPx(sec, spanSec, widthPx) }}
+      title={sec.toFixed(3) + 's'}
+    />
+  )
 
   return (
     <div
@@ -529,24 +609,6 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
           >
             {TEXT.timeline.removeTarget}
           </button>
-          <button
-            type="button"
-            className="btn btn--sm"
-            disabled={!layerTarget || layerNow >= MAX_LAYER_UI}
-            title={TEXT.timeline.layerUpHint}
-            onClick={() => shiftLayer(1)}
-          >
-            {TEXT.timeline.layerUp}
-          </button>
-          <button
-            type="button"
-            className="btn btn--sm"
-            disabled={!layerTarget || layerNow <= 0}
-            title={TEXT.timeline.layerDownHint}
-            onClick={() => shiftLayer(-1)}
-          >
-            {TEXT.timeline.layerDown}
-          </button>
           <span className="timeline__divider" aria-hidden="true" />
           <button
             type="button"
@@ -598,7 +660,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
         >
           <div
             className={`timeline__ruler${scrubbing ? ' timeline__ruler--scrubbing' : ''}`}
-            onPointerDown={beginScrub(rulerLaneRef)}
+            onPointerDown={beginScrub}
             onPointerMove={moveScrub}
             onPointerUp={endScrub}
             onPointerCancel={endScrub}
@@ -617,107 +679,112 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             </div>
           </div>
 
-          {/* 上行：媒体轨（素材库卡片拖入落点 + 拖拽排布） */}
-          <div
-            className={`timeline__track timeline__track--media${scrubbing ? ' timeline__track--scrubbing' : ''}${dropSec !== null ? ' timeline__track--dropping' : ''}`}
-            onDragOver={onMediaDragOver}
-            onDragLeave={() => setDropSec(null)}
-            onDrop={onMediaDrop}
-            onPointerDown={beginScrub(mediaLaneRef)}
-            onPointerMove={moveScrub}
-            onPointerUp={endScrub}
-            onPointerCancel={endScrub}
-          >
-            <span className="timeline__lane-label" aria-hidden="true">
-              媒体
+          {/* 媒体轨组：新增按钮在组上方；行序为数组反向（索引越大越靠上） */}
+          <div className="timeline__group-actions">
+            <button
+              type="button"
+              className="btn btn--sm btn--subtle"
+              disabled={project.mediaTracks.length >= MAX_MEDIA_TRACKS}
+              title={`媒体轨最多 ${MAX_MEDIA_TRACKS} 条`}
+              onClick={() => {
+                if (!addMediaTrack()) setNotice(`媒体轨最多 ${MAX_MEDIA_TRACKS} 条`)
+              }}
+            >
+              + 媒体轨
+            </button>
+            <span className="timeline__group-count mono">
+              {project.mediaTracks.length}/{MAX_MEDIA_TRACKS}
             </span>
-            <div className="timeline__lane" ref={mediaLaneRef} style={{ width: widthPx }}>
-              {project.mediaClips.length === 0 ? (
-                <span className="timeline__empty">{TEXT.timeline.emptyMedia}</span>
-              ) : null}
-              {project.mediaClips.map((clip) => (
-                <MediaClipCard
-                  key={clip.id}
-                  clip={clip}
-                  item={project.media.find((m) => m.id === clip.mediaId) ?? null}
-                  durationSec={spanSec}
-                  widthPx={widthPx}
-                  fps={project.fps}
-                  selected={clip.id === selectedMediaClipId}
-                  onSelect={selectMediaClip}
-                  onMove={(start) => handleMediaMove(clip.id, start)}
-                  onTrim={(patch) => handleMediaTrim(clip.id, patch)}
-                  onDragStart={() => beginCardDrag(clip.id)}
-                  onCommit={commitMediaDrag}
-                  layers={mediaLayers}
-                />
-              ))}
-              {dropSec !== null ? (
-                <div
-                  className="timeline__drop-indicator"
-                  style={{ left: secToPx(dropSec, spanSec, widthPx) }}
-                  title={dropSec.toFixed(3) + 's'}
-                />
-              ) : null}
-              {guides}
-            </div>
           </div>
 
-          {/* 中行：音频轨（v7.1）—— 只贡献声音，不参与画面合成 */}
-          <div
-            className={`timeline__track timeline__track--audio${dropSec !== null ? ' timeline__track--dropping' : ''}`}
-            onDragOver={onAudioDragOver}
-            onDragLeave={() => setDropSec(null)}
-            onDrop={onAudioDrop}
-            onPointerDown={beginScrub(audioLaneRef)}
-            onPointerMove={moveScrub}
-            onPointerUp={endScrub}
-            onPointerCancel={endScrub}
-          >
-            <span className="timeline__lane-label" aria-hidden="true">
-              {TEXT.timeline.audioLane}
-            </span>
-            <div className="timeline__lane" ref={audioLaneRef} style={{ width: widthPx }}>
-              {audioClips.length === 0 ? <span className="timeline__empty">{TEXT.timeline.emptyAudio}</span> : null}
-              {audioClips.map((clip) => (
-                <AudioClipCard
-                  key={clip.id}
-                  clip={clip}
-                  item={project.media.find((m) => m.id === clip.mediaId) ?? null}
-                  durationSec={spanSec}
-                  widthPx={widthPx}
-                  fps={project.fps}
-                  selected={clip.id === selectedAudioClipId}
-                  layers={audioLayers}
-                  onSelect={selectAudioClip}
-                  onMove={(start) => moveAudioClip(clip.id, start)}
-                  onTrim={(patch) => trimAudioClip(clip.id, patch)}
-                  onDragStart={() => beginCardDrag(clip.id)}
-                  onCommit={endCardDrag}
+          {mediaRows.map((track) => {
+            const trackClips = clipsOnMediaTrack(project.mediaClips, track.id)
+            const mediaIndex = project.mediaTracks.findIndex((item) => item.id === track.id)
+            return (
+              <div
+                key={track.id}
+                className={`timeline__track timeline__track--media${selectedTrackId === track.id ? ' timeline__track--selected' : ''}${
+                  scrubbing ? ' timeline__track--scrubbing' : ''
+                }${track.hidden ? ' timeline__track--hidden' : ''}${track.locked ? ' timeline__track--locked' : ''}${
+                  drop?.kind === 'media' && drop.trackId === track.id ? ' timeline__track--dropping' : ''
+                }`}
+                data-track-id={track.id}
+                onDragOver={(event) => onMediaDragOver(event, track)}
+                onDragLeave={() => onMediaDragLeave(track.id)}
+                onDrop={(event) => onMediaDrop(event, track)}
+                onPointerDown={beginScrub}
+                onPointerMove={moveScrub}
+                onPointerUp={endScrub}
+                onPointerCancel={endScrub}
+              >
+                <TrackHeader
+                  track={track}
+                  kind="media"
+                  selected={selectedTrackId === track.id}
+                  canMoveUp={mediaIndex < project.mediaTracks.length - 1}
+                  canMoveDown={mediaIndex > 0}
+                  canDelete={project.mediaTracks.length > 1}
+                  onSelect={() => selectTrack(track.id)}
+                  onRename={(name) => renameTrack(track.id, name)}
+                  onToggleMuted={() => setTrackMuted(track.id, !track.muted)}
+                  onToggleHidden={() => setTrackHidden(track.id, !track.hidden)}
+                  onToggleLocked={() => setTrackLocked(track.id, !track.locked)}
+                  onMoveUp={() => moveMediaTrack(track.id, mediaIndex + 1)}
+                  onMoveDown={() => moveMediaTrack(track.id, mediaIndex - 1)}
+                  onDelete={() => removeMediaTrack(track.id)}
                 />
-              ))}
-              {dropSec !== null ? (
-                <div
-                  className="timeline__drop-indicator"
-                  style={{ left: secToPx(dropSec, spanSec, widthPx) }}
-                  title={dropSec.toFixed(3) + 's'}
-                />
-              ) : null}
-            </div>
-          </div>
+                <div className="timeline__lane" style={{ width: widthPx }}>
+                  {trackClips.length === 0 ? <span className="timeline__empty">{TEXT.timeline.emptyMedia}</span> : null}
+                  {trackClips.map((clip) => (
+                    <MediaClipCard
+                      key={clip.id}
+                      clip={clip}
+                      trackId={track.id}
+                      item={project.media.find((m) => m.id === clip.mediaId) ?? null}
+                      durationSec={spanSec}
+                      widthPx={widthPx}
+                      fps={project.fps}
+                      selected={clip.id === selectedMediaClipId}
+                      locked={isTrackLocked(track)}
+                      onSelect={selectMediaClip}
+                      onMove={(start, clientY) => handleMediaMove(clip.id, start, clientY)}
+                      onTrim={(patch) => handleMediaTrim(clip.id, patch)}
+                      onDragStart={() => beginCardDrag(clip.id)}
+                      onCommit={commitMediaDrag}
+                    />
+                  ))}
+                  {drop?.kind === 'media' && drop.trackId === track.id ? dropIndicator(drop.sec) : null}
+                </div>
+              </div>
+            )
+          })}
 
-          {/* 下行：字幕条轨 */}
+          {/* 字幕轨：唯一且固定，永远夹在媒体与音频之间；只允许重命名/隐藏/锁定 */}
           <div
-            className={`timeline__track${scrubbing ? ' timeline__track--scrubbing' : ''}`}
-            onPointerDown={beginScrub(subtitleLaneRef)}
+            className={`timeline__track timeline__track--subtitle${scrubbing ? ' timeline__track--scrubbing' : ''}${
+              selectedTrackId === project.subtitleTrack.id ? ' timeline__track--selected' : ''
+            }${project.subtitleTrack.hidden ? ' timeline__track--hidden' : ''}${
+              project.subtitleTrack.locked ? ' timeline__track--locked' : ''
+            }`}
+            data-track-id={project.subtitleTrack.id}
+            onPointerDown={beginScrub}
             onPointerMove={moveScrub}
             onPointerUp={endScrub}
             onPointerCancel={endScrub}
           >
-            <span className="timeline__lane-label" aria-hidden="true">
-              字幕条
-            </span>
-            <div className="timeline__lane" ref={subtitleLaneRef} style={{ width: widthPx }}>
+            <TrackHeader
+              track={project.subtitleTrack}
+              kind="subtitle"
+              selected={selectedTrackId === project.subtitleTrack.id}
+              canMoveUp={false}
+              canMoveDown={false}
+              canDelete={false}
+              onSelect={() => selectTrack(project.subtitleTrack.id)}
+              onRename={(name) => renameTrack(project.subtitleTrack.id, name)}
+              onToggleHidden={() => setTrackHidden(project.subtitleTrack.id, !project.subtitleTrack.hidden)}
+              onToggleLocked={() => setTrackLocked(project.subtitleTrack.id, !project.subtitleTrack.locked)}
+            />
+            <div className="timeline__lane" style={{ width: widthPx }}>
               {project.clips.length === 0 ? <span className="timeline__empty">{TEXT.timeline.empty}</span> : null}
               {project.clips.map((clip) => (
                 <ClipCard
@@ -727,6 +794,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
                   widthPx={widthPx}
                   fps={project.fps}
                   selected={clip.id === selectedClipId}
+                  locked={project.subtitleTrack.locked}
                   playheadSec={displayTime}
                   onSelect={selectClip}
                   onChangeTimes={(start, end) => handleClipTimes(clip.id, start, end)}
@@ -734,11 +802,91 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
                   onCommit={endCardDrag}
                 />
               ))}
-              {guides}
             </div>
           </div>
 
-          {/* 播放头：挂在整块轨道内容上，跨尺规与三条轨道；位置夹在内容末尾之内 */}
+          {/* 音频轨组：新增按钮在组上方；同样反向（数组索引越大越靠上） */}
+          <div className="timeline__group-actions">
+            <button
+              type="button"
+              className="btn btn--sm btn--subtle"
+              disabled={project.audioTracks.length >= MAX_AUDIO_TRACKS}
+              title={`音频轨最多 ${MAX_AUDIO_TRACKS} 条`}
+              onClick={() => {
+                if (!addAudioTrack()) setNotice(`音频轨最多 ${MAX_AUDIO_TRACKS} 条`)
+              }}
+            >
+              + 音频轨
+            </button>
+            <span className="timeline__group-count mono">
+              {project.audioTracks.length}/{MAX_AUDIO_TRACKS}
+            </span>
+          </div>
+
+          {audioRows.map((track) => {
+            const trackClips = clipsOnAudioTrack(audioClips, track.id)
+            const audioIndex = project.audioTracks.findIndex((item) => item.id === track.id)
+            return (
+              <div
+                key={track.id}
+                className={`timeline__track timeline__track--audio${selectedTrackId === track.id ? ' timeline__track--selected' : ''}${
+                  scrubbing ? ' timeline__track--scrubbing' : ''
+                }${track.locked ? ' timeline__track--locked' : ''}${
+                  drop?.kind === 'audio' && drop.trackId === track.id ? ' timeline__track--dropping' : ''
+                }`}
+                data-track-id={track.id}
+                onDragOver={(event) => onAudioDragOver(event, track)}
+                onDragLeave={() => onAudioDragLeave(track.id)}
+                onDrop={(event) => onAudioDrop(event, track)}
+                onPointerDown={beginScrub}
+                onPointerMove={moveScrub}
+                onPointerUp={endScrub}
+                onPointerCancel={endScrub}
+              >
+                <TrackHeader
+                  track={track}
+                  kind="audio"
+                  selected={selectedTrackId === track.id}
+                  canMoveUp={audioIndex < project.audioTracks.length - 1}
+                  canMoveDown={audioIndex > 0}
+                  canDelete={project.audioTracks.length > 1}
+                  onSelect={() => selectTrack(track.id)}
+                  onRename={(name) => renameTrack(track.id, name)}
+                  onToggleMuted={() => setTrackMuted(track.id, !track.muted)}
+                  onToggleLocked={() => setTrackLocked(track.id, !track.locked)}
+                  onMoveUp={() => moveAudioTrack(track.id, audioIndex + 1)}
+                  onMoveDown={() => moveAudioTrack(track.id, audioIndex - 1)}
+                  onDelete={() => removeAudioTrack(track.id)}
+                />
+                <div className="timeline__lane" style={{ width: widthPx }}>
+                  {trackClips.length === 0 ? <span className="timeline__empty">{TEXT.timeline.emptyAudio}</span> : null}
+                  {trackClips.map((clip) => (
+                    <AudioClipCard
+                      key={clip.id}
+                      clip={clip}
+                      trackId={track.id}
+                      item={project.media.find((m) => m.id === clip.mediaId) ?? null}
+                      durationSec={spanSec}
+                      widthPx={widthPx}
+                      fps={project.fps}
+                      selected={clip.id === selectedAudioClipId}
+                      locked={isTrackLocked(track)}
+                      onSelect={selectAudioClip}
+                      onMove={(start, clientY) => handleAudioMove(clip.id, start, clientY)}
+                      onTrim={(patch) => trimAudioClip(clip.id, patch)}
+                      onDragStart={() => beginCardDrag(clip.id)}
+                      onCommit={endCardDrag}
+                    />
+                  ))}
+                  {drop?.kind === 'audio' && drop.trackId === track.id ? dropIndicator(drop.sec) : null}
+                </div>
+              </div>
+            )
+          })}
+
+          {guides}
+
+          {/* 播放头：位置夹在内容末尾之内 */}
           <div
             className={`timeline__playhead timeline__playhead--rows${scrubbing ? ' timeline__playhead--scrubbing' : ''}`}
             style={{ left: LANE_GUTTER_PX + playheadLeft }}

@@ -1,6 +1,6 @@
 import type { Fps, FontRecord, Resolution, ResolutionPreset, FpsPreset } from './types'
 
-export const PROJECT_VERSION = 2
+export const PROJECT_VERSION = 3
 
 export const APP_NAME = 'FocusNews'
 export const WINDOW_TITLE = 'FocusNews 新闻字幕条'
@@ -334,6 +334,21 @@ export const MIN_MEDIA_CLIP_SEC = 0.2
 export const DEFAULT_CLIP_DURATION_SEC = 5
 /** @deprecated 旧「一屏铺满」上限（60s）。新时间轴用 MAX_TRACK_SEC 作为可滚动软上限。 */
 export const MAX_TIMELINE_SEC = 60
+
+// ---------------------------------------------------------------------------
+// 多轨道（PR / 达芬奇 / 剪映式）
+// ---------------------------------------------------------------------------
+
+/** 字幕轨是唯一且固定的轨道：不参与增删/排序，恒覆盖在所有画面内容之上。 */
+export const SUBTITLE_TRACK_ID = 'track-subtitle'
+/** v3：默认媒体轨 id（空工程 / 旧工程迁移后至少有一条） */
+export const DEFAULT_MEDIA_TRACK_ID = 'track-media-0'
+/** v3：默认音频轨 id */
+export const DEFAULT_AUDIO_TRACK_ID = 'track-audio-0'
+/** 媒体轨数量上限（再多行高就压到不可用了） */
+export const MAX_MEDIA_TRACKS = 8
+/** 音频轨数量上限 */
+export const MAX_AUDIO_TRACKS = 8
 
 // ---------------------------------------------------------------------------
 // 时间轴（滚动 + 缩放）

@@ -7,6 +7,8 @@ import {
   DEFAULT_FONT_ID,
   FONT_SCALE_MAX,
   FONT_SCALE_MIN,
+  MAX_AUDIO_TRACKS,
+  MAX_MEDIA_TRACKS,
   MIN_CLIP_DURATION_SEC,
   PROJECT_VERSION
 } from './constants'
@@ -24,9 +26,17 @@ import { normalizeMediaVideo } from './mediaClipVideo'
 import { normalizeMediaStab } from './mediaStab'
 import { normalizeClipAudio, normalizeClipSpeed, speedValueOf } from './mediaClipAudio'
 import { MIN_AUDIO_CLIP_SEC, normalizeLayer } from './audioClips'
+import {
+  AUDIO_TRACK_ID_PREFIX,
+  MEDIA_TRACK_ID_PREFIX,
+  makeAudioTrack,
+  makeMediaTrack,
+  makeSubtitleTrack
+} from './tracks'
 import type {
   AnimationSpec,
   AudioClip,
+  AudioTrack,
   ColorTokens,
   EasingKey,
   FontRecord,
@@ -35,6 +45,7 @@ import type {
   LeftTabValue,
   MediaClip,
   MediaItem,
+  MediaTrack,
   PresetId,
   Project,
   Rational,
@@ -43,6 +54,8 @@ import type {
   SizeToken,
   StyleOverrides,
   SubtitleClip,
+  SubtitleTrack,
+  Track,
   VideoMeta,
   WatermarkSettings
 } from './types'
@@ -321,8 +334,117 @@ function normalizeMediaItem(value: unknown): MediaItem | null {
   }
 }
 
+/**
+ * v3：轨道归一化。
+ *
+ * 三条兜底：
+ * - 至少一条媒体轨 / 音频轨（新素材要有地方落）；
+ * - id 去重、数量夹到上限；
+ * - 片段引用了不存在的轨道（手改 JSON / 旧工程）时，按 `layer` 换算或退回第一条。
+ */
+function normalizeTrackName(value: Record<string, unknown>, fallback: string): string {
+  const name = typeof value['name'] === 'string' ? value['name'].trim() : ''
+  return name.length > 0 ? name.slice(0, 40) : fallback
+}
+
+function trackFlags(value: Record<string, unknown>): { muted: boolean; hidden: boolean; locked: boolean } {
+  return {
+    muted: value['muted'] === true,
+    hidden: value['hidden'] === true,
+    locked: value['locked'] === true
+  }
+}
+
+/** 片段里出现过的 trackId（顺序保留），用于给「缺轨道定义」的工程补轨。 */
+function collectTrackIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const ids: string[] = []
+  for (const item of raw) {
+    if (!isRecord(item)) continue
+    const id = item['trackId']
+    if (typeof id === 'string' && id.length > 0 && !ids.includes(id)) ids.push(id)
+  }
+  return ids
+}
+
+function normalizeMediaTracks(value: unknown, referenced: readonly string[]): MediaTrack[] {
+  const tracks: MediaTrack[] = []
+  const seen = new Set<string>()
+  const push = (track: MediaTrack): void => {
+    if (tracks.length >= MAX_MEDIA_TRACKS || seen.has(track.id)) return
+    seen.add(track.id)
+    tracks.push(track)
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      if (!isRecord(item)) return
+      const id = typeof item['id'] === 'string' && item['id'].length > 0 ? item['id'] : `${MEDIA_TRACK_ID_PREFIX}${index}`
+      push({ id, kind: 'media', name: normalizeTrackName(item, `媒体 ${index + 1}`), ...trackFlags(item) })
+    })
+  }
+  for (const id of referenced) {
+    if (tracks.length >= MAX_MEDIA_TRACKS) break
+    push({ id, kind: 'media', name: `媒体 ${tracks.length + 1}`, muted: false, hidden: false, locked: false })
+  }
+  if (tracks.length === 0) tracks.push(makeMediaTrack(0))
+  return tracks
+}
+
+function normalizeAudioTracks(value: unknown, referenced: readonly string[]): AudioTrack[] {
+  const tracks: AudioTrack[] = []
+  const seen = new Set<string>()
+  const push = (track: AudioTrack): void => {
+    if (tracks.length >= MAX_AUDIO_TRACKS || seen.has(track.id)) return
+    seen.add(track.id)
+    tracks.push(track)
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      if (!isRecord(item)) return
+      const id = typeof item['id'] === 'string' && item['id'].length > 0 ? item['id'] : `${AUDIO_TRACK_ID_PREFIX}${index}`
+      push({ id, kind: 'audio', name: normalizeTrackName(item, `音频 ${index + 1}`), ...trackFlags(item) })
+    })
+  }
+  for (const id of referenced) {
+    if (tracks.length >= MAX_AUDIO_TRACKS) break
+    push({ id, kind: 'audio', name: `音频 ${tracks.length + 1}`, muted: false, hidden: false, locked: false })
+  }
+  if (tracks.length === 0) tracks.push(makeAudioTrack(0))
+  return tracks
+}
+
+/** 字幕轨永远只有一条、id 固定；只保留名字与三个开关。 */
+function normalizeSubtitleTrack(value: unknown): SubtitleTrack {
+  const rec = isRecord(value) ? value : {}
+  return makeSubtitleTrack({ name: normalizeTrackName(rec, '字幕'), ...trackFlags(rec) })
+}
+
+/**
+ * 片段 → 轨道 id。
+ * 合法的 `trackId` 直接用；否则把旧 `layer` 投影成迁移后的 deterministic id；
+ * 仍然不存在时退回第一条同类轨道（宁可叠在一起，也不让片段凭空消失）。
+ */
+function resolveTrackId(
+  rawTrackId: unknown,
+  rawLayer: unknown,
+  tracks: readonly Track[],
+  legacyPrefix: string
+): string {
+  if (typeof rawTrackId === 'string' && rawTrackId.length > 0 && tracks.some((track) => track.id === rawTrackId)) {
+    return rawTrackId
+  }
+  const legacyId = `${legacyPrefix}${normalizeLayer(rawLayer)}`
+  if (tracks.some((track) => track.id === legacyId)) return legacyId
+  return tracks[0]!.id
+}
+
 /** v2：时间轴上一段媒体。入出点写入前吸附帧边界，时长不足最短时拒收。 */
-function normalizeMediaClip(value: unknown, fps: Fps, mediaIds: Set<string>): MediaClip | null {
+function normalizeMediaClip(
+  value: unknown,
+  fps: Fps,
+  mediaIds: Set<string>,
+  tracks: readonly MediaTrack[]
+): MediaClip | null {
   if (!isRecord(value)) return null
   if (typeof value['mediaId'] !== 'string' || !mediaIds.has(value['mediaId'])) return null
   const id = typeof value['id'] === 'string' && value['id'].length > 0 ? value['id'] : createId('mclip')
@@ -334,7 +456,8 @@ function normalizeMediaClip(value: unknown, fps: Fps, mediaIds: Set<string>): Me
   const sIn = snapTimeToFrame(Math.max(0, numberOr(value['sourceInSec'], 0)), fps)
   const video = normalizeMediaVideo(value['video'])
   const stab = normalizeMediaStab(value['stab'])
-  const layer = normalizeLayer(value['layer'])
+  // v3：轨道归属（旧工程的 layer 在此投影成迁移后的 deterministic trackId）
+  const trackId = resolveTrackId(value['trackId'], value['layer'], tracks, MEDIA_TRACK_ID_PREFIX)
   // v9：音频与变速（全默认 → undefined → 整键不落盘）
   const audio = normalizeClipAudio(value['audio'])
   const speed = normalizeClipSpeed(value['speed'])
@@ -348,10 +471,9 @@ function normalizeMediaClip(value: unknown, fps: Fps, mediaIds: Set<string>): Me
     timelineEndSec: tEnd,
     sourceInSec: sIn,
     sourceOutSec: sOut,
+    trackId,
     // v6：画面变换与调色；全部默认时 normalizeMediaVideo 返回 undefined，整键不落盘
     ...(video ? { video } : {}),
-    // v7：叠放层号，0 层不落盘
-    ...(layer > 0 ? { layer } : {}),
     // v8：防抖；关闭且无自定义选择时 normalizeMediaStab 返回 undefined，整键不落盘
     ...(stab ? { stab } : {}),
     // v9：音频参数 / 变速；同上，全默认时整键不存在
@@ -361,7 +483,12 @@ function normalizeMediaClip(value: unknown, fps: Fps, mediaIds: Set<string>): Me
 }
 
 /** v7：音频段。与媒体段同一套时间轴口径，但只贡献声音、不参与画面合成。 */
-function normalizeAudioClip(value: unknown, fps: Fps, mediaIds: Set<string>): AudioClip | null {
+function normalizeAudioClip(
+  value: unknown,
+  fps: Fps,
+  mediaIds: Set<string>,
+  tracks: readonly AudioTrack[]
+): AudioClip | null {
   if (!isRecord(value)) return null
   if (typeof value['mediaId'] !== 'string' || !mediaIds.has(value['mediaId'])) return null
   const id = typeof value['id'] === 'string' && value['id'].length > 0 ? value['id'] : createId('aclip')
@@ -369,7 +496,7 @@ function normalizeAudioClip(value: unknown, fps: Fps, mediaIds: Set<string>): Au
   let tEnd = snapTimeToFrame(Math.max(tStart, numberOr(value['timelineEndSec'], tStart)), fps)
   if (tEnd - tStart < MIN_AUDIO_CLIP_SEC) tEnd = snapTimeToFrame(tStart + MIN_AUDIO_CLIP_SEC, fps)
   const sIn = snapTimeToFrame(Math.max(0, numberOr(value['sourceInSec'], 0)), fps)
-  const layer = normalizeLayer(value['layer'])
+  const trackId = resolveTrackId(value['trackId'], value['layer'], tracks, AUDIO_TRACK_ID_PREFIX)
   const audio = normalizeClipAudio(value['audio'])
   const speed = normalizeClipSpeed(value['speed'])
   return {
@@ -379,7 +506,7 @@ function normalizeAudioClip(value: unknown, fps: Fps, mediaIds: Set<string>): Au
     timelineEndSec: tEnd,
     sourceInSec: sIn,
     sourceOutSec: snapTimeToFrame(sIn + (tEnd - tStart) * speedValueOf(speed), fps),
-    ...(layer > 0 ? { layer } : {}),
+    trackId,
     // v9：与媒体段同一套音频/变速口径
     ...(audio ? { audio } : {}),
     ...(speed ? { speed } : {})
@@ -461,13 +588,17 @@ export function normalizeProject(raw: unknown): Project | null {
     .filter((item): item is MediaItem => item !== null)
   const mediaIds = new Set(media.map((item) => item.id))
   const mediaClipsRaw = Array.isArray(migrated['mediaClips']) ? migrated['mediaClips'] : []
+  const audioClipsRaw = Array.isArray(migrated['audioClips']) ? migrated['audioClips'] : []
+  // v3：先归一轨道，再把片段挂上去（缺 trackId 的片段按 legacy layer 投影）
+  const mediaTracks = normalizeMediaTracks(migrated['mediaTracks'], collectTrackIds(mediaClipsRaw))
+  const audioTracks = normalizeAudioTracks(migrated['audioTracks'], collectTrackIds(audioClipsRaw))
+  const subtitleTrack = normalizeSubtitleTrack(migrated['subtitleTrack'])
   const mediaClips = mediaClipsRaw
-    .map((item) => normalizeMediaClip(item, fps, mediaIds))
+    .map((item) => normalizeMediaClip(item, fps, mediaIds, mediaTracks))
     .filter((item): item is MediaClip => item !== null)
     .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
-  const audioClipsRaw = Array.isArray(migrated['audioClips']) ? migrated['audioClips'] : []
   const audioClips = audioClipsRaw
-    .map((item) => normalizeAudioClip(item, fps, mediaIds))
+    .map((item) => normalizeAudioClip(item, fps, mediaIds, audioTracks))
     .filter((item): item is AudioClip => item !== null)
     .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
   const ui = isRecord(migrated['ui']) ? normalizeUi(migrated['ui']) : undefined
@@ -481,6 +612,9 @@ export function normalizeProject(raw: unknown): Project | null {
     fonts,
     media,
     mediaClips,
+    mediaTracks,
+    audioTracks,
+    subtitleTrack,
     // v7：没有音频段的工程不写这个键（旧工程 JSON 不变）
     ...(audioClips.length > 0 ? { audioClips } : {}),
     ...(watermark ? { watermark } : {}),
@@ -488,10 +622,60 @@ export function normalizeProject(raw: unknown): Project | null {
   }
 }
 
+/** 旧工程历史层号 → 轨道条数（连续 0..max；没有任何片段时也给一条空轨）。 */
+function legacyTrackCount(clipsRaw: unknown, max: number): number {
+  let maxLayer = -1
+  if (Array.isArray(clipsRaw)) {
+    for (const clip of clipsRaw) {
+      if (!isRecord(clip)) continue
+      maxLayer = Math.max(maxLayer, normalizeLayer(clip['layer']))
+    }
+  }
+  return Math.min(max, Math.max(1, maxLayer + 1))
+}
+
+/** 旧片段：把 layer 投影成 deterministic trackId 并删掉旧字段。 */
+function assignTrackIds(clipsRaw: unknown, prefix: string): unknown {
+  if (!Array.isArray(clipsRaw)) return clipsRaw
+  return clipsRaw.map((clip) => {
+    if (!isRecord(clip)) return clip
+    const next: Record<string, unknown> = { ...clip }
+    if (typeof next['trackId'] !== 'string' || next['trackId'].length === 0) {
+      next['trackId'] = `${prefix}${normalizeLayer(next['layer'])}`
+    }
+    delete next['layer']
+    return next
+  })
+}
+
+/**
+ * v2 → v3：给旧工程补轨道数组。
+ *
+ * 每个历史上用到的层号一条轨道（0..max 连续），id 固定为 `track-media-N` / `track-audio-N`：
+ * 同一份旧工程每次迁移结果一致（自动存档 / 历史快照读回不会漂移）。
+ * 字幕轨固定一条 `track-subtitle`；旧工程没有字幕分层概念。
+ */
+function applyTrackMigration(project: Record<string, unknown>): void {
+  const mediaClipsRaw = project['mediaClips']
+  const audioClipsRaw = project['audioClips']
+  project['mediaTracks'] = Array.from(
+    { length: legacyTrackCount(mediaClipsRaw, MAX_MEDIA_TRACKS) },
+    (_, index) => makeMediaTrack(index)
+  )
+  project['audioTracks'] = Array.from(
+    { length: legacyTrackCount(audioClipsRaw, MAX_AUDIO_TRACKS) },
+    (_, index) => makeAudioTrack(index)
+  )
+  project['subtitleTrack'] = makeSubtitleTrack()
+  if (Array.isArray(mediaClipsRaw)) project['mediaClips'] = assignTrackIds(mediaClipsRaw, MEDIA_TRACK_ID_PREFIX)
+  if (Array.isArray(audioClipsRaw)) project['audioClips'] = assignTrackIds(audioClipsRaw, AUDIO_TRACK_ID_PREFIX)
+}
+
 /**
  * 版本迁移钩子：
  * - v0（无 version）：字段名与 v1 一致，直接补版本号；
- * - v1 → v2：把 `refVideo` 拆为 `media[0] + mediaClip 覆盖整段`，无 refVideo 时 media/mediaClips 保持缺省。
+ * - v1 → v2：把 `refVideo` 拆为 `media[0] + mediaClip 覆盖整段`，无 refVideo 时 media/mediaClips 保持缺省；
+ * - v2 → v3：补 `mediaTracks` / `audioTracks` / `subtitleTrack`，并把片段的 `layer` 投影成 `trackId`。
  */
 function migrate(raw: Record<string, unknown>, fromVersion: number): Record<string, unknown> {
   if (fromVersion >= PROJECT_VERSION) return raw
@@ -537,6 +721,7 @@ function migrate(raw: Record<string, unknown>, fromVersion: number): Record<stri
       intermediate['mediaClips'] = []
     }
   }
+  if (fromVersion < 3) applyTrackMigration(intermediate)
   return intermediate
 }
 
@@ -549,7 +734,10 @@ export function createDefaultProject(name = '未命名工程'): Project {
     clips: [],
     fonts: [],
     media: [],
-    mediaClips: []
+    mediaClips: [],
+    mediaTracks: [makeMediaTrack(0)],
+    audioTracks: [makeAudioTrack(0)],
+    subtitleTrack: makeSubtitleTrack()
   }
 }
 

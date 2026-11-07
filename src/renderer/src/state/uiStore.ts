@@ -7,8 +7,8 @@ import { TIMELINE_MAX_ZOOM, TIMELINE_MIN_ZOOM } from '@shared/constants'
 
 export type UiMode = 'basic' | 'advanced'
 
-/** 顶层视图：启动页（最近项目）或编辑器。冷启动默认落在启动页。 */
-export type AppView = 'launcher' | 'editor'
+/** 顶层视图：启动页（最近项目）、设置页或编辑器。冷启动默认落在启动页。 */
+export type AppView = 'launcher' | 'editor' | 'settings'
 
 /** 时间轴缩放夹取（10%..800%）：滚轮可能连发，非法值一律回落 100%。 */
 function clampZoom(zoom: number): number {

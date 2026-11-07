@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_AUDIO_TRACK_ID } from '../src/shared/constants'
 import { createDefaultProject } from '../src/shared/projectSchema'
 import {
   AUTOSAVE_ENTRY_ID,
@@ -165,7 +166,7 @@ describe('进度判据与统计', () => {
   it('统计分辨率/帧率/三类段数量', () => {
     const project = createDefaultProject('统计')
     project.audioClips = [
-      { id: 'a1', mediaId: 'm1', timelineStartSec: 0, timelineEndSec: 1, sourceInSec: 0, sourceOutSec: 1 }
+      { id: 'a1', mediaId: 'm1', trackId: DEFAULT_AUDIO_TRACK_ID, timelineStartSec: 0, timelineEndSec: 1, sourceInSec: 0, sourceOutSec: 1 }
     ]
     expect(projectStats(project)).toEqual({
       resolution: { width: 1920, height: 1080 },

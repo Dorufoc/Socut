@@ -49,11 +49,11 @@ export function mediaClipsOverlap(a: MediaClip, b: MediaClip): boolean {
 }
 
 /**
- * 「仅重叠才右移」的对齐：把 `tracks` 里与锚段**真正重叠**且**同层**的片段依次推到锚段末尾，
- * 保持时长不变；不重叠、异层、以及锚段自身都原样返回。拆分与拖拽共用此函数。
+ * 「仅重叠才右移」的对齐：把 `tracks` 里与锚段**真正重叠**且**同轨道**的片段依次推到锚段末尾，
+ * 保持时长不变；不重叠、异轨、以及锚段自身都原样返回。拆分与拖拽共用此函数。
  *
  * 这里必须逐条判定重叠，不能只看「锚段末尾 > 片段起点」：
- * 那样会把所有起点更早的片段（包括完全不重叠的前置段、其他图层的段）全部按到锚段末尾，
+ * 那样会把所有起点更早的片段（包括完全不重叠的前置段、其它轨道的段）全部按到锚段末尾，
  * 表现为「拖一段，别的段集体跳到同一位置、总时长突然变长、整条轴被重新缩放」。
  */
 export function alignAfterOverlap(
@@ -61,13 +61,13 @@ export function alignAfterOverlap(
   anchor: MediaClip,
   fps: Fps
 ): MediaClip[] {
-  const anchorLayer = mediaClipLayer(anchor)
-  // 只处理锚段所在图层里真正被压住的片段，并按起点顺序依次后移，避免它们全部堆到同一起点
+  const anchorTrackId = anchor.trackId
+  // 只处理锚段所在轨道里真正被压住的片段，并按起点顺序依次后移，避免它们全部堆到同一起点
   const pushed = tracks
     .filter(
       (item) =>
         item.id !== anchor.id &&
-        mediaClipLayer(item) === anchorLayer &&
+        item.trackId === anchorTrackId &&
         mediaClipsOverlap(item, anchor)
     )
     .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
@@ -92,12 +92,6 @@ export function alignAfterOverlap(
   }
 
   return tracks.map((item) => shifted.get(item.id) ?? item)
-}
-
-/** 图层次号（缺省 0，与 `normalizeLayer` 同口径但避免跨模块依赖）。 */
-export function mediaClipLayer(clip: MediaClip): number {
-  const raw = clip.layer
-  return typeof raw === 'number' && Number.isFinite(raw) ? Math.round(raw) : 0
 }
 
 /**
@@ -148,10 +142,17 @@ export function frameToSec(frame: number, fps: Fps): number {
 }
 
 /**
- * v7 多层：同一时刻取层号最大的一段（画面不透明，所以**上层直接盖住下层**）。
- * 同层重叠时取后开始的那条（后放上去的在上）。
+ * v7 多层：同一时刻取**合成顺序最靠上**的一段（轨道索引最大；画面不透明，上层直接盖住下层）。
+ * 同轨重叠时取后开始的那条（后放上去的在上）。
+ *
+ * `trackOrder` = 媒体轨 id → 数组索引（0 = 最底层），由 `tracks.ts / mediaTrackOrder` 生成。
+ * 隐藏轨应在调用前从入参里剔除（预览/导出都只传可见轨的片段）。
  */
-export function topActiveMediaClip(tracks: MediaClip[], atSec: number): MediaClip | null {
+export function topActiveMediaClip(
+  tracks: MediaClip[],
+  atSec: number,
+  trackOrder: ReadonlyMap<string, number>
+): MediaClip | null {
   let best: MediaClip | null = null
   for (const clip of tracks) {
     if (atSec < clip.timelineStartSec || atSec >= clip.timelineEndSec) continue
@@ -159,11 +160,68 @@ export function topActiveMediaClip(tracks: MediaClip[], atSec: number): MediaCli
       best = clip
       continue
     }
-    const layer = clip.layer ?? 0
-    const bestLayer = best.layer ?? 0
-    if (layer > bestLayer || (layer === bestLayer && clip.timelineStartSec >= best.timelineStartSec)) best = clip
+    const rank = trackOrder.get(clip.trackId) ?? -1
+    const bestRank = trackOrder.get(best.trackId) ?? -1
+    if (rank > bestRank || (rank === bestRank && clip.timelineStartSec >= best.timelineStartSec)) best = clip
   }
   return best
+}
+
+/**
+ * v3 多轨导出：一段「被压平后」的可见音频区间（只用于内嵌原声，不影响画面分层）。
+ * 源坐标已按区间裁剪并乘上倍速。
+ */
+export interface ActiveMediaClipSpan {
+  clip: MediaClip
+  timelineStartSec: number
+  timelineEndSec: number
+  sourceInSec: number
+  sourceOutSec: number
+}
+
+/**
+ * v3 多轨导出的内嵌原声压平：按 `topActiveMediaClip` 的「取最上层」规则，
+ * 把 [spanStartSec, spanEndSec] 切成互不重叠的区间，每段只保留**当前时刻最上层**的那条片段。
+ *
+ * 调用前应剔除隐藏/静音轨上的片段：静音轨不能通过“下层补声”泄漏出来。
+ * 相邻且同一条片段的区间会合并，避免把一条片段拆成很多路音频输入。
+ */
+export function activeMediaClipSpans(
+  clips: MediaClip[],
+  trackOrder: ReadonlyMap<string, number>,
+  spanStartSec: number,
+  spanEndSec: number
+): ActiveMediaClipSpan[] {
+  if (clips.length === 0 || spanEndSec - spanStartSec <= 1e-9) return []
+  const bounds = new Set<number>([spanStartSec, spanEndSec])
+  for (const clip of clips) {
+    const from = Math.max(clip.timelineStartSec, spanStartSec)
+    const to = Math.min(clip.timelineEndSec, spanEndSec)
+    if (to - from > 1e-9) {
+      bounds.add(from)
+      bounds.add(to)
+    }
+  }
+  const sorted = [...bounds].sort((a, b) => a - b)
+  const out: ActiveMediaClipSpan[] = []
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    const from = sorted[i]!
+    const to = sorted[i + 1]!
+    if (to - from <= 1e-9) continue
+    const winner = topActiveMediaClip(clips, (from + to) / 2, trackOrder)
+    if (!winner) continue
+    const speed = speedValueOf(winner.speed)
+    const sourceInSec = winner.sourceInSec + (from - winner.timelineStartSec) * speed
+    const sourceOutSec = winner.sourceInSec + (to - winner.timelineStartSec) * speed
+    const last = out[out.length - 1]
+    if (last && last.clip.id === winner.id && Math.abs(last.timelineEndSec - from) < 1e-9) {
+      last.timelineEndSec = to
+      last.sourceOutSec = sourceOutSec
+      continue
+    }
+    out.push({ clip: winner, timelineStartSec: from, timelineEndSec: to, sourceInSec, sourceOutSec })
+  }
+  return out
 }
 
 /**
@@ -173,10 +231,14 @@ export function topActiveMediaClip(tracks: MediaClip[], atSec: number): MediaCli
  * 必须先按层号把重叠段解开（逐个时间区间取上层），而不是把两段都塞进去。
  * 相邻的同一素材片段会合并回去，避免把一条片段切成很多路输入。
  */
-export function resolveVisibleMediaClips(tracks: MediaClip[]): MediaClip[] {
+export function resolveVisibleMediaClips(
+  tracks: MediaClip[],
+  trackOrder: ReadonlyMap<string, number>
+): MediaClip[] {
   if (tracks.length <= 1) return sortMediaClips(tracks)
   const sorted = sortMediaClips(tracks)
   const bounds = [...new Set(sorted.flatMap((clip) => [clip.timelineStartSec, clip.timelineEndSec]))].sort((a, b) => a - b)
+  const rankOf = (clip: MediaClip): number => trackOrder.get(clip.trackId) ?? -1
   const out: MediaClip[] = []
   for (let i = 0; i < bounds.length - 1; i += 1) {
     const from = bounds[i]!
@@ -184,11 +246,11 @@ export function resolveVisibleMediaClips(tracks: MediaClip[]): MediaClip[] {
     if (to - from <= 1e-9) continue
     const covering = sorted.filter((clip) => clip.timelineStartSec <= from + 1e-9 && clip.timelineEndSec >= to - 1e-9)
     if (covering.length === 0) continue
-    const winner = covering.reduce((best, clip) => ((clip.layer ?? 0) >= (best.layer ?? 0) ? clip : best))
+    const winner = covering.reduce((best, clip) => (rankOf(clip) >= rankOf(best) ? clip : best))
     // v9：源坐标是时间轴坐标×倍速的投影（1x 时与旧写法完全一致）
     const speed = speedValueOf(winner.speed)
     const last = out[out.length - 1]
-    if (last && last.mediaId === winner.mediaId && (last.layer ?? 0) === (winner.layer ?? 0) && Math.abs(last.timelineEndSec - from) < 1e-9) {
+    if (last && last.mediaId === winner.mediaId && last.trackId === winner.trackId && Math.abs(last.timelineEndSec - from) < 1e-9) {
       const offset = to - winner.timelineStartSec
       last.timelineEndSec = to
       last.sourceOutSec = winner.sourceInSec + offset * speed
@@ -207,27 +269,38 @@ export function resolveVisibleMediaClips(tracks: MediaClip[]): MediaClip[] {
 }
 
 /**
- * 主轨对齐（snap-together）：按时间轴顺序从左到右**紧贴排列**，间隙恒为 0。
+ * 主轨对齐（snap-together）：**每条轨道各自**按时间轴顺序从左到右紧贴排列，间隙恒为 0。
  *
+ * - 只和同一 trackId 的片段排队（不同轨道是独立车道，不能互相挤走）；
  * - 顺序 = 当前的 timelineStartSec 升序（稳定排序，先后来的保持先后）；
  * - 时长不变（按帧数转移，不会因秒的舍入漂移）；
  * - 字幕轨不受影响——它本来就不在主轨上，允许留空。
  */
 export function compactMediaClips(tracks: MediaClip[], fps: Fps): MediaClip[] {
-  let cursorFrame = 0
-  return sortMediaClips(tracks).map((clip) => {
-    const startFrame = timeToFrameFloor(clip.timelineStartSec, fps)
-    const endFrame = timeToFrameFloor(clip.timelineEndSec, fps)
-    const durationFrames = Math.max(1, endFrame - startFrame)
-    const start = frameToSec(cursorFrame, fps)
-    const end = frameToSec(cursorFrame + durationFrames, fps)
-    cursorFrame += durationFrames
-    return {
-      ...clip,
-      timelineStartSec: start,
-      timelineEndSec: end,
-      // v9：时长不变，所以源窗口也不变（乘上倍速才是“吃掉多少源”）
-      sourceOutSec: snapTimeToFrame(clip.sourceInSec + sourceSecForTimelineSec(speedValueOf(clip.speed), end - start), fps)
+  const groups = new Map<string, MediaClip[]>()
+  for (const clip of tracks) {
+    const group = groups.get(clip.trackId)
+    if (group) group.push(clip)
+    else groups.set(clip.trackId, [clip])
+  }
+  const out: MediaClip[] = []
+  for (const group of groups.values()) {
+    let cursorFrame = 0
+    for (const clip of sortMediaClips(group)) {
+      const startFrame = timeToFrameFloor(clip.timelineStartSec, fps)
+      const endFrame = timeToFrameFloor(clip.timelineEndSec, fps)
+      const durationFrames = Math.max(1, endFrame - startFrame)
+      const start = frameToSec(cursorFrame, fps)
+      const end = frameToSec(cursorFrame + durationFrames, fps)
+      cursorFrame += durationFrames
+      out.push({
+        ...clip,
+        timelineStartSec: start,
+        timelineEndSec: end,
+        // v9：时长不变，所以源窗口也不变（乘上倍速才是“吃掉多少源”）
+        sourceOutSec: snapTimeToFrame(clip.sourceInSec + sourceSecForTimelineSec(speedValueOf(clip.speed), end - start), fps)
+      })
     }
-  })
+  }
+  return sortMediaClips(out)
 }

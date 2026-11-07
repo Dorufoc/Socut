@@ -1,9 +1,10 @@
 import { WATERMARK_BASE_RESOLUTION, WATERMARK_DISPLAY_SCALE, WATERMARK_MARGIN_PX } from './constants'
 import { fpsToArg } from './fps'
+import { videoEncodeArgs } from './gpu'
 import { stabDetectProfile, stabTransformProfile } from './mediaStab'
 import { clipAudioFilterChain, clipVideoSpeedFilter, speedValueOf } from './mediaClipAudio'
 import type { MediaClipStab } from './mediaStab'
-import type { ClipAudio, ClipSpeed, ExportTarget, Fps, Resolution } from './types'
+import type { ClipAudio, ClipSpeed, ExportTarget, Fps, MediaClipVideo, Resolution } from './types'
 
 /**
  * FFmpeg 参数构造（纯函数，argv 快照测试锁定；规格 §5 + 计划 C1–C5 修正）。
@@ -384,6 +385,12 @@ export interface ConcatSegment {
   sourceOutSec: number
   /** 本段有没有音轨；false 时用 anullsrc 补静音，保证 concat 两侧流结构一致 */
   hasAudio: boolean
+  /** v3：本段所在媒体轨的合成序号（0 = 最底层）；缺省按 0 处理 */
+  trackIndex?: number
+  /** v3：本段所在媒体轨是否静音（静音轨仍出画面，但原声被丢弃） */
+  muted?: boolean
+  /** v6：画面调色/变换参数（原样透传；导出暂未烧录） */
+  video?: MediaClipVideo
   /** v7：图像素材（需要 `-loop 1 -t` 才能撑成一段视频流） */
   isImage?: boolean
   /** v8：防抖参数（缺省/未启用 = 不防抖） */
@@ -421,7 +428,7 @@ export function stabSegmentKey(
 /** `segmentsNeedMultiInput` 只需看时间坐标与逐段开关，不要求调用方交整段。 */
 type MultiInputDecisionSegment = Pick<
   ConcatSegment,
-  'timelineStartSec' | 'timelineEndSec' | 'sourceInSec' | 'sourceOutSec' | 'stab' | 'audio' | 'speed'
+  'timelineStartSec' | 'timelineEndSec' | 'sourceInSec' | 'sourceOutSec' | 'stab' | 'audio' | 'speed' | 'trackIndex' | 'muted' | 'isImage'
 >
 
 /**
@@ -437,6 +444,13 @@ type MultiInputDecisionSegment = Pick<
 export function segmentsNeedMultiInput(segments: MultiInputDecisionSegment[] | undefined): boolean {
   if (!segments || segments.length === 0) return false
   if (segments.length > 1) return true
+  // v3：任一段来自上层媒体轨（trackIndex > 0）都必须走多输入分层合成；
+  // 即使只有一段，也可能需要按层叠加/静音，旧单输入 builder 没有分层入口。
+  if (segments.some((seg) => (seg.trackIndex ?? 0) > 0)) return true
+  // v3：静音轨必须走 trim 链用 anullsrc 补静音（单输入 builder 会直通 0:a）。
+  if (segments.some((seg) => seg.muted === true)) return true
+  // v7：单张静帧也要 `-loop 1 -t`，旧单输入 builder 不支持
+  if (segments.some((seg) => seg.isImage === true)) return true
   // v8：任一防抖段必须走 trim 链才能注入 transform
   if (segments.some((seg) => seg.stab?.enabled === true)) return true
   // v9：音量/渐变/变速同上；`{speed:1,maintainPitch:false}` 这种不改时长的写法也要算
@@ -719,7 +733,7 @@ export function buildTransparentAudioArgs(audio: TransparentAudioOptions | undef
  * concat 成 [vb]/[ab]，再 setpts 抬到 span 起点、fps 规整、overlay 透明层。
  * concat 前先统一帧率/SAR/像素格式/音频采样格式，避免参数不一致的素材直接报错。
  */
-export function buildMediaBasisFilterComplex(
+function buildSingleTrackBasis(
   input: Omit<MediaBasisOverlayInput, 'overlayPath'>
 ): string {
   const rate = fpsToArg(input.fps)
@@ -812,8 +826,134 @@ export function buildMediaBasisFilterComplex(
   ].join(';')
 }
 
+/**
+ * v3 多轨：每条媒体轨先各自合成一张全帧 RGBA 层（透明补隙 + 片段 trim/缩放），
+ * 再按 trackIndex 升序把图层从底到顶 overlay 到不透明黑底上，最后字幕、水印。
+ *
+ * 纪律：
+ * - 图层时长恒等于 span，段间空隙用 `color=black@0.0` 补透明；overlay 用
+ *   `eof_action=pass:shortest=0`，任何一层先结束都不会截断输出；
+ * - 原声不在这里混：多轨内嵌原声由渲染侧按「最上层可见且未静音」压平后走 audioClips，
+ *   本函数只输出一路等长静音 `[ab]` 供 buildAudioMixPlan 作为基座（无音频段时 `-map [ab]`）；
+ * - 水印仍然最后叠，输入序号沿用「透明层序号 + 1」口径。
+ */
+function buildMultiTrackBasis(input: Omit<MediaBasisOverlayInput, 'overlayPath'>): string {
+  const rate = fpsToArg(input.fps)
+  const start = formatSec(input.spanStartSec)
+  const end = formatSec(input.spanEndSec)
+  const size = `${input.frameSize.width}x${input.frameSize.height}`
+  const spanLen = formatSec(Math.max(0.01, input.spanEndSec - input.spanStartSec))
+  const chains: string[] = []
+  const parts: string[] = []
+  const layerLabels: string[] = []
+
+  // 输入序号必须保留原 segments 下标（`-i` 顺序由调用方决定）
+  const byTrack = new Map<number, { seg: ConcatSegment; index: number }[]>()
+  input.segments.forEach((seg, index) => {
+    const track = Math.max(0, Math.round(seg.trackIndex ?? 0))
+    const list = byTrack.get(track) ?? []
+    list.push({ seg, index })
+    byTrack.set(track, list)
+  })
+
+  const tracks = [...byTrack.keys()].sort((a, b) => a - b)
+  let gapNo = 0
+  let layerNo = 0
+  for (const track of tracks) {
+    const group = (byTrack.get(track) ?? []).sort((a, b) => a.seg.timelineStartSec - b.seg.timelineStartSec)
+    const layerParts: string[] = []
+    let cursor = input.spanStartSec
+
+    const pushGap = (len: number): void => {
+      if (len <= 1e-6) return
+      const label = `mg${gapNo}`
+      gapNo += 1
+      chains.push(`color=c=black@0.0:s=${size}:r=${rate}:d=${formatSec(len)},format=rgba[${label}]`)
+      layerParts.push(`[${label}]`)
+    }
+
+    for (const { seg, index } of group) {
+      const from = Math.max(seg.timelineStartSec, input.spanStartSec, cursor)
+      const to = Math.min(seg.timelineEndSec, input.spanEndSec)
+      if (to - from <= 1e-6) continue
+      if (from > cursor + 1e-6) pushGap(from - cursor)
+      const speed = speedValueOf(seg.speed)
+      const sourceIn = seg.sourceInSec + (from - seg.timelineStartSec) * speed
+      const sourceOut = seg.sourceInSec + (to - seg.timelineStartSec) * speed
+      const label = `mc${layerNo}_${index}`
+      const stabChain = segmentWantsStab(seg) ? `,${stabTransformFilter(seg.stab!, seg.stabFile!)}` : ''
+      const speedChain = clipVideoSpeedFilter(seg.speed)
+      chains.push(
+        `[${index}:v]${segmentTrimFpsPrefix(sourceIn, sourceOut, rate)}${stabChain}${speedChain ? `,${speedChain}` : ''}` +
+          `,scale=${input.frameSize.width}:${input.frameSize.height}:force_original_aspect_ratio=decrease` +
+          `,setsar=1,format=rgba,pad=${size}:(ow-iw)/2:(oh-ih)/2:color=black@0.0[${label}]`
+      )
+      layerParts.push(`[${label}]`)
+      cursor = Math.max(cursor, to)
+    }
+    if (cursor < input.spanEndSec - 1e-6) pushGap(input.spanEndSec - cursor)
+    if (layerParts.length === 0) continue
+
+    const layer = `ml${layerNo}`
+    layerNo += 1
+    if (layerParts.length === 1) {
+      // concat n=1 在部分 FFmpeg 版本上会报参数错误，单段直接打标签
+      parts.push(`${layerParts[0]}null[${layer}]`)
+    } else {
+      parts.push(`${layerParts.join('')}concat=n=${layerParts.length}:v=1:a=0[${layer}]`)
+    }
+    layerLabels.push(`[${layer}]`)
+  }
+
+  // 不透明黑底：所有轨道都可能在该时刻透明，最终输出必须是 yuv420p（不留 alpha）
+  chains.push(`color=c=black:s=${size}:r=${rate}:d=${spanLen},format=rgba[mb]`)
+  const subtitleOut = input.watermark ? 'vsub' : 'v'
+  let current = 'mb'
+  layerLabels.forEach((label, index) => {
+    const out = `mo${index}`
+    parts.push(`[${current}]${label}overlay=0:0:alpha=straight:format=auto:eof_action=pass:shortest=0[${out}]`)
+    current = out
+  })
+  parts.push(`[${current}]format=yuv420p[mv]`)
+  parts.push(`[${input.overlayLabel}:v]setpts=PTS+${start}/TB[ov]`)
+  parts.push(
+    `[mv][ov]overlay=0:0:alpha=straight:format=auto:eof_action=pass:enable='between(t,${start},${end})',format=yuv420p[${subtitleOut}]`
+  )
+
+  // 多轨原声已由渲染侧压平进 audioClips：这里补一路等长静音，保证 [ab] 永远存在
+  chains.push('anullsrc=channel_layout=stereo:sample_rate=48000[masrc]')
+  parts.push(`[masrc]atrim=duration=${spanLen},asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0[ab]`)
+
+  return [
+    ...chains,
+    ...parts,
+    ...(input.watermark
+      ? buildWatermarkFilterChain({
+          label: Number(input.overlayLabel) + 1,
+          prevLabel: subtitleOut,
+          watermark: input.watermark,
+          output: input.frameSize
+        })
+      : [])
+  ].join(';')
+}
+
+/**
+ * 多素材基座滤镜链：单轨（全部 trackIndex = 0）保持旧的 trim+concat 行为；
+ * 只要出现上层媒体轨，就改走逐轨 RGBA 图层合成（v3 多轨）。
+ */
+export function buildMediaBasisFilterComplex(
+  input: Omit<MediaBasisOverlayInput, 'overlayPath'>
+): string {
+  if (input.segments.some((seg) => (seg.trackIndex ?? 0) > 0)) return buildMultiTrackBasis(input)
+  return buildSingleTrackBasis(input)
+}
+
 /** 多输入叠加（两阶段法）：N 路媒体 + 循环透明 MOV 帧序列，trim+concat 基座后叠加。 */
-export function buildOverlayMp4MultiInput(input: MediaBasisOverlayInput): string[] {
+export function buildOverlayMp4MultiInput(
+  input: MediaBasisOverlayInput,
+  encoder?: string | null
+): string[] {
   const audioArgs = input.audioMode === 'copy' ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']
   const args: string[] = [...common({})]
   for (const seg of input.segments) {
@@ -851,12 +991,7 @@ export function buildOverlayMp4MultiInput(input: MediaBasisOverlayInput): string
     '[v]',
     '-map',
     audioPlan ? `[${audioPlan.label}]` : '[ab]',
-    '-c:v',
-    'libx264',
-    '-crf',
-    '18',
-    '-preset',
-    'medium',
+    ...videoEncodeArgs({ encoder: encoder ?? null, quality: 18, preset: 'medium' }),
     '-fps_mode',
     input.fpsMode,
     ...BT709_TAGS,
@@ -870,7 +1005,8 @@ export function buildOverlayMp4MultiInput(input: MediaBasisOverlayInput): string
 
 /** 多输入直接管道合成：N 路媒体 + stdin 帧流（image2pipe/rawvideo）。 */
 export function buildOverlayMp4MultiInputDirectPipe(
-  input: Omit<MediaBasisOverlayInput, 'overlayPath'> & { frameFormat: 'raw' | 'png' }
+  input: Omit<MediaBasisOverlayInput, 'overlayPath'> & { frameFormat: 'raw' | 'png' },
+  encoder?: string | null
 ): string[] {
   const audioArgs = input.audioMode === 'copy' ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']
   const frameInput =
@@ -901,12 +1037,7 @@ export function buildOverlayMp4MultiInputDirectPipe(
     '[v]',
     '-map',
     audioPlan ? `[${audioPlan.label}]` : '[ab]',
-    '-c:v',
-    'libx264',
-    '-crf',
-    '18',
-    '-preset',
-    'medium',
+    ...videoEncodeArgs({ encoder: encoder ?? null, quality: 18, preset: 'medium' }),
     '-fps_mode',
     input.fpsMode,
     ...BT709_TAGS,
@@ -1025,7 +1156,7 @@ export function buildFilterComplex(
 }
 
 /** 叠加合成（两阶段：参考视频 + 临时透明 MOV）。 */
-export function buildOverlayMp4(input: OverlayInput): string[] {
+export function buildOverlayMp4(input: OverlayInput, encoder?: string | null): string[] {
   const audioArgs =
     input.audioMode === 'copy'
       ? ['-c:a', 'copy']
@@ -1049,12 +1180,7 @@ export function buildOverlayMp4(input: OverlayInput): string[] {
     '[v]',
     '-map',
     '0:a?',
-    '-c:v',
-    'libx264',
-    '-crf',
-    '18',
-    '-preset',
-    'medium',
+    ...videoEncodeArgs({ encoder: encoder ?? null, quality: 18, preset: 'medium' }),
     '-fps_mode',
     input.fpsMode,
     ...BT709_TAGS,
@@ -1067,7 +1193,8 @@ export function buildOverlayMp4(input: OverlayInput): string[] {
 
 /** 直接管道合成：stdin 帧流作为 overlay 输入（长素材 / 磁盘不足时启用）。 */
 export function buildOverlayMp4DirectPipe(
-  input: Omit<OverlayInput, 'overlayPath'>
+  input: Omit<OverlayInput, 'overlayPath'>,
+  encoder?: string | null
 ): string[] {
   const audioArgs =
     input.audioMode === 'copy' ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']
@@ -1094,12 +1221,7 @@ export function buildOverlayMp4DirectPipe(
     '[v]',
     '-map',
     '0:a?',
-    '-c:v',
-    'libx264',
-    '-crf',
-    '18',
-    '-preset',
-    'medium',
+    ...videoEncodeArgs({ encoder: encoder ?? null, quality: 18, preset: 'medium' }),
     '-fps_mode',
     input.fpsMode,
     ...BT709_TAGS,

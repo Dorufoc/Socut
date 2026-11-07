@@ -25,8 +25,14 @@ function clip(id: string, start: number, end: number, patch: Partial<MediaClip> 
     timelineEndSec: end,
     sourceInSec: 0,
     sourceOutSec: end - start,
+    trackId: 'track-media-0',
     ...patch
   }
+}
+
+/** 媒体轨 id → 绘制序号（0 = 最底层），与 `mediaTrackOrder` 同口径。 */
+function trackOrder(...ids: string[]): Map<string, number> {
+  return new Map(ids.map((id, index) => [id, index]))
 }
 
 describe('isClipActiveAt', () => {
@@ -40,45 +46,63 @@ describe('isClipActiveAt', () => {
 })
 
 describe('selectPreviewCandidates', () => {
-  it('当前图层全部保留，按层号升序（底层先画、上层后画）', () => {
+  const oneTrack = trackOrder('track-media-0')
+
+  it('当前图层全部保留，按轨道升序（底层先画、上层后画）', () => {
     const tracks = [
-      clip('top', 0, 10, { layer: 2 }),
-      clip('bottom', 0, 10, { layer: 0 }),
-      clip('middle', 0, 10, { layer: 1 })
+      clip('top', 0, 10, { trackId: 'track-media-2' }),
+      clip('bottom', 0, 10, { trackId: 'track-media-0' }),
+      clip('middle', 0, 10, { trackId: 'track-media-1' })
     ]
 
-    expect(selectPreviewCandidates(tracks, 5).map((c) => c.id)).toEqual(['bottom', 'middle', 'top'])
+    expect(
+      selectPreviewCandidates(tracks, 5, trackOrder('track-media-0', 'track-media-1', 'track-media-2')).map(
+        (c) => c.id
+      )
+    ).toEqual(['bottom', 'middle', 'top'])
+  })
+
+  it('不同轨道同时重叠的段全部保留：底层在前、上层最后', () => {
+    const order = trackOrder('track-media-0', 'track-media-1')
+    const bottom = clip('bottom', 0, 10, { trackId: 'track-media-0' })
+    const top = clip('top', 2, 8, { trackId: 'track-media-1' })
+
+    expect(selectPreviewCandidates([top, bottom], 5, order).map((c) => c.id)).toEqual(['bottom', 'top'])
   })
 
   it('当前段排在最前，刚结束的段紧随其后', () => {
     const tracks = [clip('old', 0, 2), clip('newer', 2, 4), clip('next', 4, 6)]
 
-    expect(selectPreviewCandidates(tracks, 4.2).map((c) => c.id)).toEqual(['next', 'newer'])
+    expect(selectPreviewCandidates(tracks, 4.2, oneTrack).map((c) => c.id)).toEqual(['next', 'newer'])
   })
 
   it('超过 hold 窗口的段不再保留', () => {
     const tracks = [clip('old', 0, 2)]
 
-    expect(selectPreviewCandidates(tracks, 2 + PREVIEW_HOLD_SEC + 0.01)).toEqual([])
+    expect(selectPreviewCandidates(tracks, 2 + PREVIEW_HOLD_SEC + 0.01, oneTrack)).toEqual([])
   })
 
   it('前瞻窗口内的下一段提前挂载，窗口外的暂不挂', () => {
     const inside = clip('inside', 3, 5)
     const outside = clip('outside', 3 + PREVIEW_LOOKAHEAD_SEC + 0.01, 8)
 
-    expect(selectPreviewCandidates([inside, outside], 1).map((c) => c.id)).toEqual(['inside'])
+    expect(selectPreviewCandidates([inside, outside], 1, oneTrack).map((c) => c.id)).toEqual(['inside'])
     // 1 + 2 = 3，正好在窗口边界；再早 0.5s 就不该挂
-    expect(selectPreviewCandidates([inside, outside], 0.5)).toEqual([])
-    expect(selectPreviewCandidates([outside], 1)).toEqual([])
+    expect(selectPreviewCandidates([inside, outside], 0.5, oneTrack)).toEqual([])
+    expect(selectPreviewCandidates([outside], 1, oneTrack)).toEqual([])
   })
 
   it('候选总数受限，但当前图层永远全部保留', () => {
     const active = Array.from({ length: PREVIEW_MAX_CANDIDATES + 2 }, (_, i) =>
-      clip(`active-${i}`, 0, 10, { layer: i })
+      clip(`active-${i}`, 0, 10, { trackId: `track-media-${i + 1}` })
     )
     const upcoming = clip('upcoming', 10.5, 12)
 
-    const selected = selectPreviewCandidates([...active, upcoming], 5)
+    const selected = selectPreviewCandidates(
+      [...active, upcoming],
+      5,
+      trackOrder('track-media-0', ...active.map((c) => c.trackId))
+    )
     expect(selected).toHaveLength(PREVIEW_MAX_CANDIDATES + 2)
     expect(selected.some((c) => c.id === 'upcoming')).toBe(false)
   })
@@ -86,7 +110,7 @@ describe('selectPreviewCandidates', () => {
   it('切点处当前段在前、上一段作为兜底保留，且不会重复', () => {
     const tracks = [clip('a', 0, 2), clip('b', 2, 4)]
 
-    expect(selectPreviewCandidates(tracks, 2).map((c) => c.id)).toEqual(['b', 'a'])
+    expect(selectPreviewCandidates(tracks, 2, oneTrack).map((c) => c.id)).toEqual(['b', 'a'])
   })
 })
 

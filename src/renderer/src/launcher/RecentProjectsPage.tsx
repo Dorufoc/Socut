@@ -9,6 +9,8 @@ export interface RecentProjectsPageProps {
   onOpen: (id: string) => Promise<void> | void
   onCreate: () => Promise<void> | void
   onBrowse: () => Promise<void> | void
+  /** 打开设置页；未提供时入口仍可见，但点击无动作（测试与嵌入式用法兼容） */
+  onOpenSettings?: () => void
 }
 
 const SKELETON_COUNT = 6
@@ -21,7 +23,8 @@ export function RecentProjectsPage({
   appVersion,
   onOpen,
   onCreate,
-  onBrowse
+  onBrowse,
+  onOpenSettings
 }: RecentProjectsPageProps): ReactElement {
   const entries = useRecentProjectsStore((state) => state.entries)
   const loading = useRecentProjectsStore((state) => state.loading)
@@ -117,6 +120,9 @@ export function RecentProjectsPage({
           </button>
           <button type="button" className="launcher__nav-item" disabled title="即将推出">
             <span className="launcher__nav-label">素材库</span>
+          </button>
+          <button type="button" className="launcher__nav-item" onClick={() => onOpenSettings?.()}>
+            <span className="launcher__nav-label">设置</span>
           </button>
         </nav>
 

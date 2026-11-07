@@ -23,6 +23,8 @@ export interface ClipCardProps {
   widthPx: number
   fps: Fps
   selected: boolean
+  /** 字幕轨锁定：不开始拖动/修剪（仍可选中查看） */
+  locked?: boolean
   /** 播放头（秒）：用于在示意条上标出当前位置相对出入点的关系 */
   playheadSec: number
   onSelect: (id: string) => void
@@ -48,6 +50,7 @@ export function ClipCard({
   widthPx,
   fps,
   selected,
+  locked = false,
   playheadSec,
   onSelect,
   onChangeTimes,
@@ -67,6 +70,11 @@ export function ClipCard({
     const rect = card.getBoundingClientRect()
     if (rect.width <= 0) return
     onSelect(clip.id)
+    // 字幕轨锁定：只允许选中，不开始拖拽/修剪；仍要吞掉事件，避免触发轨道刮擦
+    if (locked) {
+      event.stopPropagation()
+      return
+    }
     dragRef.current = {
       edge,
       grabOffsetPx: event.clientX - rect.left,

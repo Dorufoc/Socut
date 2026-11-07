@@ -13,6 +13,7 @@ import type {
 } from '../../shared/types'
 import type { EstimateInput } from '../../shared/api'
 import { resolveFfmpegBinaries } from '../paths'
+import { resolveExportEncoder } from '../gpu'
 import { createWorkspace, diskFreeBytes, disposeWorkspace } from '../tempWorkspace'
 import type { Workspace } from '../tempWorkspace'
 import { terminateJob } from '../procRegistry'
@@ -314,6 +315,13 @@ export class ExportEngine {
       // 叠加压制
       const overlay = request.overlay
       if (!overlay) throw new Error('叠加导出缺少参考视频参数')
+      // 硬件编码器只解析一次：失败/不可用一律回落 libx264，导出照常进行
+      let videoEncoder: string | null = null
+      try {
+        videoEncoder = await resolveExportEncoder()
+      } catch {
+        videoEncoder = null
+      }
       const done = await runOverlayMp4({
         state,
         binaries,
@@ -333,6 +341,8 @@ export class ExportEngine {
         codec,
         frameFormat: spec.frameFormat,
         directPipe: overlay.directPipe,
+        // 硬件编码器（null = libx264）；合成失败会自动回退软件编码
+        videoEncoder,
         // 水印：尺寸不可用/路径缺失时归一为 undefined，合成链退回无水印的旧参数
         watermark: watermarkInputOf(overlay.watermark),
         // v7：音频轨；有它就与参考视频原声 amix（渲染侧已按 span 裁剪）

@@ -3,6 +3,7 @@ import { DEFAULT_FONT_ID, FPS_29_97, FPS_30, MIN_CLIP_DURATION_SEC, MIN_MEDIA_CL
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import { getPreset } from '@shared/presets'
 import { snapTimeToFrame } from '@shared/fps'
+import { MEDIA_TRACK_ID_PREFIX, makeMediaTrack } from '@shared/tracks'
 import type { MediaItem, Project, VideoMeta } from '@shared/types'
 import { useProjectStore, timelineDurationSec } from './projectStore'
 
@@ -56,6 +57,9 @@ function freshProject(project?: Project): void {
     project: project ?? createDefaultProject('媒体轨测试'),
     selectedClipId: null,
     selectedMediaClipId: null,
+    selectedAudioClipId: null,
+    selectedTrackId: null,
+    selectionKind: 'subtitle',
     fonts: [],
     revision: 0,
     currentPath: null
@@ -174,13 +178,15 @@ describe('媒体轨动作', () => {
     expect(after.find((clip) => clip.id === c.id)!.timelineEndSec).toBe(1)
   })
 
-  it('moveMediaClip：不同图层的片段互不推挤', () => {
+  it('moveMediaClip：不同轨道的片段互不推挤', () => {
     const store = useProjectStore.getState()
     const id = store.addMedia(seedItem({ meta: baseMeta({ durationSec: 10 }) }))
-    const a = store.insertMediaClip({ mediaId: id, timelineStartSec: 3, durationSec: 4 })!
-    const b = store.insertMediaClip({ mediaId: id, timelineStartSec: 8, durationSec: 1 })!
-    useProjectStore.getState().setMediaClipLayer(b.id, 1)
-    // B 从 8s 拖到 4s：与 0 层的 A[3,7] 重叠，但 B 在 1 层，不能把 A 顶走
+    const a = useProjectStore.getState().insertMediaClip({ mediaId: id, timelineStartSec: 3, durationSec: 4 })!
+    const trackId = useProjectStore.getState().addMediaTrack()!
+    const b = useProjectStore
+      .getState()
+      .insertMediaClip({ mediaId: id, timelineStartSec: 8, durationSec: 1, trackId })!
+    // B 从 8s 拖到 4s：与底层轨道 0 的 A[3,7] 重叠，但 B 在上层轨道，不能把 A 顶走
     useProjectStore.getState().moveMediaClip(b.id, 4)
     const after = useProjectStore.getState().project.mediaClips
     expect(after.find((clip) => clip.id === b.id)!.timelineStartSec).toBe(4)
@@ -647,19 +653,21 @@ describe('v9 片段音频与变速动作', () => {
 })
 
 describe('拆分 / 删除作用于「当前该操作的那一段」（P3）', () => {
-  /** 直接搭轨：避开插入时的重叠右移规则，把叠层场景摆准 */
-  function seedTracks(clips: Array<{ id: string; start: number; end: number; layer?: number }>): void {
+  /** 直接搭轨：避开插入时的重叠右移规则，把多轨场景摆准（trackIndex 0 = 最底层） */
+  function seedTracks(clips: Array<{ id: string; start: number; end: number; track?: number }>): void {
     const project = createDefaultProject('拆分目标')
     project.fps = FPS_30
     project.media = [{ id: 'media-1', ...seedItem() }]
+    const maxTrack = clips.reduce((max, clip) => Math.max(max, clip.track ?? 0), 0)
+    project.mediaTracks = Array.from({ length: maxTrack + 1 }, (_, index) => makeMediaTrack(index))
     project.mediaClips = clips.map((clip) => ({
       id: clip.id,
       mediaId: 'media-1',
+      trackId: `${MEDIA_TRACK_ID_PREFIX}${clip.track ?? 0}`,
       timelineStartSec: clip.start,
       timelineEndSec: clip.end,
       sourceInSec: clip.start,
-      sourceOutSec: clip.end,
-      ...(clip.layer ? { layer: clip.layer } : {})
+      sourceOutSec: clip.end
     }))
     useProjectStore.setState({
       project,
@@ -724,19 +732,23 @@ describe('拆分 / 删除作用于「当前该操作的那一段」（P3）', ()
     expect(useProjectStore.getState().selectionKind).toBe('audio')
   })
 
-  it('未选中时拆播放头处的媒体段，叠层中取最下面那一层', () => {
+  it('未选中时拆播放头处的媒体段，多轨取最下面那一轨', () => {
     seedTracks([
-      { id: 'base', start: 0, end: 10, layer: 0 },
-      { id: 'top', start: 0, end: 10, layer: 3 }
+      { id: 'base', start: 0, end: 10, track: 0 },
+      { id: 'top', start: 0, end: 10, track: 3 }
     ])
 
     const rightId = useProjectStore.getState().splitTargetAt(4)
 
     expect(rightId).not.toBeNull()
-    // 被拆的是最下层（layer 3）；底层保持整段不动
-    expect(mediaClips().find((clip) => clip.id === 'base')?.timelineEndSec).toBe(10)
-    expect(mediaClips().find((clip) => clip.id === 'top')).toMatchObject({ timelineStartSec: 0, timelineEndSec: 4 })
-    expect(mediaClips().find((clip) => clip.id === rightId)).toMatchObject({ timelineStartSec: 4, timelineEndSec: 10, layer: 3 })
+    // 被拆的是最下面那一轨（索引 0）；上层轨道保持整段不动
+    expect(mediaClips().find((clip) => clip.id === 'top')?.timelineEndSec).toBe(10)
+    expect(mediaClips().find((clip) => clip.id === 'base')).toMatchObject({ timelineStartSec: 0, timelineEndSec: 4 })
+    expect(mediaClips().find((clip) => clip.id === rightId)).toMatchObject({
+      trackId: 'track-media-0',
+      timelineStartSec: 4,
+      timelineEndSec: 10
+    })
   })
 
   it('切点不在选中段里：返回 null 且工程一个字节也不动', () => {
@@ -756,11 +768,11 @@ describe('拆分 / 删除作用于「当前该操作的那一段」（P3）', ()
     expect(useProjectStore.getState().project.clips).toHaveLength(0)
 
     seedTracks([
-      { id: 'base', start: 0, end: 10, layer: 0 },
-      { id: 'top', start: 0, end: 10, layer: 2 }
+      { id: 'base', start: 0, end: 10, track: 0 },
+      { id: 'top', start: 0, end: 10, track: 2 }
     ])
     expect(useProjectStore.getState().removeTargetAt(3)).toBe(true)
-    expect(mediaClips().map((clip) => clip.id)).toEqual(['base'])
+    expect(mediaClips().map((clip) => clip.id)).toEqual(['top'])
   })
 
   it('播放头处什么都没有：removeTargetAt 返回 false，工程不变', () => {
@@ -794,5 +806,131 @@ describe('拆分 / 删除作用于「当前该操作的那一段」（P3）', ()
     seedTracks([{ id: 'base', start: 0, end: 10 }])
     expect(useProjectStore.getState().removeSelected()).toBe(false)
     expect(mediaClips()).toHaveLength(1)
+  })
+})
+
+describe('v3 轨道管理', () => {
+  const addMediaItem = (): string =>
+    useProjectStore.getState().addMedia(seedItem({ meta: baseMeta({ durationSec: 30 }) }))
+
+  it('addMediaTrack 置顶新增并选中；rename / move 生效', () => {
+    const first = useProjectStore.getState().project.mediaTracks[0]!.id
+    const second = useProjectStore.getState().addMediaTrack()!
+
+    expect(second).not.toBeNull()
+    expect(useProjectStore.getState().project.mediaTracks.map((track) => track.id)).toEqual([first, second])
+    expect(useProjectStore.getState().selectedTrackId).toBe(second)
+
+    useProjectStore.getState().renameTrack(second, '特写')
+    expect(useProjectStore.getState().project.mediaTracks[1]!.name).toBe('特写')
+
+    useProjectStore.getState().moveMediaTrack(second, 0)
+    expect(useProjectStore.getState().project.mediaTracks.map((track) => track.id)).toEqual([second, first])
+  })
+
+  it('removeMediaTrack 连同片段一起删除，且最后一条轨不可删', () => {
+    const mediaId = addMediaItem()
+    const second = useProjectStore.getState().addMediaTrack()!
+    const clip = useProjectStore
+      .getState()
+      .insertMediaClip({ mediaId, timelineStartSec: 0, trackId: second })!
+
+    useProjectStore.getState().removeMediaTrack(second)
+    expect(useProjectStore.getState().project.mediaTracks).toHaveLength(1)
+    expect(useProjectStore.getState().project.mediaClips.some((item) => item.id === clip.id)).toBe(false)
+    expect(useProjectStore.getState().selectedMediaClipId).toBeNull()
+
+    const last = useProjectStore.getState().project.mediaTracks[0]!.id
+    useProjectStore.getState().removeMediaTrack(last)
+    expect(useProjectStore.getState().project.mediaTracks).toHaveLength(1)
+  })
+
+  it('跨轨移动：目标轨无冲突时改 trackId；有冲突时拒绝', () => {
+    const mediaId = addMediaItem()
+    const base = useProjectStore.getState().project.mediaTracks[0]!.id
+    const second = useProjectStore.getState().addMediaTrack()!
+    const b = useProjectStore
+      .getState()
+      .insertMediaClip({ mediaId, timelineStartSec: 10, durationSec: 2, trackId: second })!
+    const c = useProjectStore
+      .getState()
+      .insertMediaClip({ mediaId, timelineStartSec: 10, durationSec: 2, trackId: base })!
+    const d = useProjectStore
+      .getState()
+      .insertMediaClip({ mediaId, timelineStartSec: 20, durationSec: 2, trackId: base })!
+
+    // 底层 [20,22] → 上层：与 B[10,12] 不重叠，允许
+    useProjectStore.getState().moveMediaClip(d.id, 20, second)
+    expect(useProjectStore.getState().project.mediaClips.find((item) => item.id === d.id)!.trackId).toBe(second)
+
+    // 底层 [10,12] → 上层：与 B 重叠，拒绝（位置与轨道都不动）
+    useProjectStore.getState().moveMediaClip(c.id, 10, second)
+    const movedC = useProjectStore.getState().project.mediaClips.find((item) => item.id === c.id)!
+    expect(movedC.trackId).toBe(base)
+    expect(movedC.timelineStartSec).toBe(10)
+
+    // setMediaClipTrack 同样按目标轨冲突拒绝
+    useProjectStore.getState().setMediaClipTrack(c.id, second)
+    expect(useProjectStore.getState().project.mediaClips.find((item) => item.id === c.id)!.trackId).toBe(base)
+    expect(useProjectStore.getState().project.mediaClips.find((item) => item.id === b.id)!.trackId).toBe(second)
+  })
+
+  it('锁定轨道拒绝平移 / 裁剪 / 删除；静音与隐藏只改轨道开关', () => {
+    const mediaId = addMediaItem()
+    const clip = useProjectStore
+      .getState()
+      .insertMediaClip({ mediaId, timelineStartSec: 0, durationSec: 2 })!
+    const trackId = clip.trackId
+
+    useProjectStore.getState().setTrackLocked(trackId, true)
+    useProjectStore.getState().moveMediaClip(clip.id, 6)
+    useProjectStore.getState().trimMediaClip(clip.id, { timelineEndSec: 1 })
+    useProjectStore.getState().removeMediaClip(clip.id)
+    const locked = useProjectStore.getState().project.mediaClips.find((item) => item.id === clip.id)!
+    expect(locked.timelineStartSec).toBe(0)
+    expect(locked.timelineEndSec).toBe(2)
+
+    useProjectStore.getState().setTrackLocked(trackId, false)
+    useProjectStore.getState().setTrackMuted(trackId, true)
+    useProjectStore.getState().setTrackHidden(trackId, true)
+    const track = useProjectStore.getState().project.mediaTracks.find((item) => item.id === trackId)!
+    expect(track.muted).toBe(true)
+    expect(track.hidden).toBe(true)
+  })
+
+  it('字幕轨只能改名 / 隐藏 / 锁定', () => {
+    const id = useProjectStore.getState().project.subtitleTrack.id
+    useProjectStore.getState().renameTrack(id, '解说字幕')
+    useProjectStore.getState().setTrackHidden(id, true)
+    useProjectStore.getState().setTrackLocked(id, true)
+    expect(useProjectStore.getState().project.subtitleTrack).toMatchObject({
+      name: '解说字幕',
+      hidden: true,
+      locked: true
+    })
+  })
+
+  it('音频轨新增 / 删除会连带删除其片段，最后一条轨不可删', () => {
+    const audioId = useProjectStore.getState().addMedia(
+      seedItem({
+        path: 'C:/media/vo.mp3',
+        name: 'vo.mp3',
+        meta: baseMeta({ width: 0, height: 0, durationSec: 10 })
+      })
+    )
+    const second = useProjectStore.getState().addAudioTrack()!
+    const clip = useProjectStore
+      .getState()
+      .insertAudioClip({ mediaId: audioId, timelineStartSec: 0, durationSec: 2, trackId: second })!
+
+    useProjectStore.getState().removeAudioTrack(second)
+    expect(useProjectStore.getState().project.audioTracks).toHaveLength(1)
+    expect(useProjectStore.getState().project.audioClips ?? []).toHaveLength(0)
+    expect(useProjectStore.getState().selectedAudioClipId).toBeNull()
+
+    const last = useProjectStore.getState().project.audioTracks[0]!.id
+    useProjectStore.getState().removeAudioTrack(last)
+    expect(useProjectStore.getState().project.audioTracks).toHaveLength(1)
+    expect(clip.trackId).toBe(second)
   })
 })

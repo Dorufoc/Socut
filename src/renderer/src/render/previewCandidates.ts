@@ -1,4 +1,3 @@
-import { mediaClipLayer } from '@shared/mediaClips'
 import { sourceTimeAt, speedValueOf } from '@shared/mediaClipAudio'
 import { MEDIA_GRADE_FILTER_ID } from '@shared/mediaClipVideo'
 import { stabProxyTimeOf } from '@shared/mediaStab'
@@ -54,17 +53,23 @@ export function isClipActiveAt(
 
 /**
  * 选出当前需要存活的候选段，顺序即 DOM 顺序：
- * 1. **所有当前图层**（按层号升序：底层先画、上层后画）；
+ * 1. **所有当前图层**（按轨道序号升序：底层先画、上层后画）；
  * 2. **刚结束仍在 hold 窗口内的段**（最近结束的优先，用于接缝兜底）；
  * 3. **前瞻窗口内即将开始的段**（按开始时间升序）。
  *
- * 总数不超过 `PREVIEW_MAX_CANDIDATES`，但当前图层永远全部保留——
- * 多图层重叠时少挂一层会直接改变画面内容，不能为了限流牺牲正确性。
+ * `trackOrder` = 媒体轨 id → 数组索引（0 = 最底层），由 `tracks.ts / mediaTrackOrder` 生成；
+ * 隐藏轨的片段应在调用前剔除。总数不超过 `PREVIEW_MAX_CANDIDATES`，但当前图层永远全部保留——
+ * 多轨重叠时少挂一层会直接改变画面内容，不能为了限流牺牲正确性。
  */
-export function selectPreviewCandidates(tracks: MediaClip[], atSec: number): MediaClip[] {
+export function selectPreviewCandidates(
+  tracks: MediaClip[],
+  atSec: number,
+  trackOrder: ReadonlyMap<string, number>
+): MediaClip[] {
+  const rankOf = (clip: MediaClip): number => trackOrder.get(clip.trackId) ?? -1
   const active = tracks
     .filter((clip) => isClipActiveAt(clip, atSec))
-    .sort((a, b) => mediaClipLayer(a) - mediaClipLayer(b) || a.timelineStartSec - b.timelineStartSec)
+    .sort((a, b) => rankOf(a) - rankOf(b) || a.timelineStartSec - b.timelineStartSec)
 
   const activeIds = new Set(active.map((clip) => clip.id))
   const held = tracks

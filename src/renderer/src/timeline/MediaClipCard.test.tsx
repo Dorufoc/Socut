@@ -17,6 +17,7 @@ import { resetStripCache } from './useMediaStrips'
 const clip: MediaClip = {
   id: 'mclip-1',
   mediaId: 'media-1',
+  trackId: 'track-media-0',
   timelineStartSec: 2,
   timelineEndSec: 8,
   sourceInSec: 1,
@@ -135,6 +136,7 @@ afterEach(() => {
 function makeProps(overrides: Partial<MediaClipCardProps> = {}): MediaClipCardProps {
   return {
     clip,
+    trackId: 'track-media-0',
     item,
     durationSec: 10,
     widthPx: 1000,
@@ -265,14 +267,14 @@ describe('MediaClipCard 时间帧预览条', () => {
     // 按住卡片中间（左缘 200px，抓取偏移 300px）
     fireEvent.pointerDown(card, pointer(500))
     fireEvent.pointerMove(card, pointer(700))
-    expect(props.onMove).toHaveBeenLastCalledWith(4)
+    expect(props.onMove).toHaveBeenLastCalledWith(4, 20)
 
     // 拖出当前轴尾 → 上层把总时长从 10s 拉到 20s（整条轴重新缩放）
     rerender(<MediaClipCard {...props} durationSec={20} />)
     fireEvent.pointerMove(card, pointer(700))
 
     // 指针没动，(700-300)px / 1000px × 20s = 8s；按「累计位移」算会得到 6s，卡片就离开指针了
-    expect(props.onMove).toHaveBeenLastCalledWith(8)
+    expect(props.onMove).toHaveBeenLastCalledWith(8, 20)
   })
 
   it('拖出点手柄：缩放变化后端点仍落在指针所在帧上', async () => {

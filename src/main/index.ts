@@ -13,6 +13,7 @@ import { installMediaProtocol, registerMediaScheme } from './media'
 import { installThumbProtocol, registerThumbScheme } from './thumbProtocol'
 import { installStripProtocol, registerStripScheme } from './stripProtocol'
 import { installCoverProtocol, registerCoverScheme } from './coverProtocol'
+import { applyGpuPreferenceAtStartup } from './gpu'
 import { log } from './log'
 
 /**
@@ -48,6 +49,10 @@ function applyDevUserDataOverride(): void {
   }
 }
 applyDevUserDataOverride()
+
+// 显卡偏好开关必须在 GPU 进程初始化前追加（app ready 之前），因此放在模块作用域。
+// 依赖上一步的 userData 覆盖，否则读到的会是默认 profile 里的设置。
+const appliedGpuPreference = applyGpuPreferenceAtStartup()
 
 // 单实例：多开会让临时目录与子进程失控
 const gotLock = app.requestSingleInstanceLock()
@@ -119,7 +124,7 @@ async function bootstrap(): Promise<void> {
   await log(
     'info',
     `启动 FocusNews ${app.getVersion()}｜Electron ${process.versions.electron}｜Chromium ${process.versions.chrome}｜` +
-      `FFmpeg ${binaries.source} (${binaries.ffmpeg})｜清理残留临时目录 ${swept} 个`
+      `FFmpeg ${binaries.source} (${binaries.ffmpeg})｜渲染显卡偏好 ${appliedGpuPreference}｜清理残留临时目录 ${swept} 个`
   )
   if (binaries.hint) await log('warn', binaries.hint)
   if (!binaries.available) await log('error', `FFmpeg 不可用：${binaries.ffmpeg}`)

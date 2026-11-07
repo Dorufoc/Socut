@@ -40,6 +40,11 @@ export interface MediaPreviewHandle {
 export interface MediaPreviewLayerProps {
   candidates: PreviewCandidate[]
   fps: Fps
+  /**
+   * 本层是否为当前内嵌原声的出声层（多轨叠加时只有最上层出声）。
+   * 缺省 true：单层 / 旧用法行为不变。
+   */
+  audioEnabled?: boolean
   /** 当前是否有可显示的媒体帧（决定 Canvas 要不要画棋盘格） */
   onVisibleChange?: (visible: boolean) => void
   /** 当前负责出声的视频元素（null = 没有媒体原声） */
@@ -75,7 +80,10 @@ function seekVideo(video: HTMLVideoElement, target: number): void {
 }
 
 export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLayerProps>(
-  function MediaPreviewLayer({ candidates, fps, onVisibleChange, onAudioChange, onFailure }, ref) {
+  function MediaPreviewLayer(
+    { candidates, fps, audioEnabled = true, onVisibleChange, onAudioChange, onFailure },
+    ref
+  ) {
     const [urls, setUrls] = useState<Record<string, string | null>>({})
     const elementsRef = useRef(new Map<string, HTMLVideoElement | HTMLImageElement>())
     /**
@@ -92,6 +100,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
 
     const candidatesRef = useRef(candidates)
     const fpsRef = useRef(fps)
+    const audioEnabledRef = useRef(audioEnabled)
     const onVisibleRef = useRef(onVisibleChange)
     const onAudioRef = useRef(onAudioChange)
     const onFailureRef = useRef(onFailure)
@@ -101,6 +110,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
 
     candidatesRef.current = candidates
     fpsRef.current = fps
+    audioEnabledRef.current = audioEnabled
     onVisibleRef.current = onVisibleChange
     onAudioRef.current = onAudioChange
     onFailureRef.current = onFailure
@@ -270,11 +280,14 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       }
       publishVisible(visibleId !== null)
 
-      // 2. 谁负责出声：最上层的 active 视频（与画面可见性同一优先级）
+      // 2. 谁负责出声：只有被 PreviewStage 选为出声层时，才取本层最上层的 active 视频；
+      //    多轨叠加时其余层保持静音，避免同一时刻几路内嵌原声一起响。
       let audioCandidate: PreviewCandidate | null = null
-      for (const candidate of list) {
-        if (isClipActiveAt(candidate.clip, atSec) && candidate.kind === 'video' && candidate.hasAudio) {
-          audioCandidate = candidate
+      if (audioEnabledRef.current) {
+        for (const candidate of list) {
+          if (isClipActiveAt(candidate.clip, atSec) && candidate.kind === 'video' && candidate.hasAudio) {
+            audioCandidate = candidate
+          }
         }
       }
       const audioElement = audioCandidate

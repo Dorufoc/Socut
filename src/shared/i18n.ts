@@ -346,6 +346,49 @@ export const TEXT = {
     pickHint: '点选字幕条'
   },
 
+  /** v11：设置页（渲染显卡 / 导出编码 / 诊断信息） */
+  settings: {
+    title: '设置',
+    subtitle: '渲染与导出硬件',
+    back: '← 最近项目',
+    nav: {
+      recent: '最近项目',
+      settings: '设置'
+    },
+    render: {
+      title: '渲染显卡',
+      preference: '渲染设备偏好',
+      active: '当前使用',
+      preferred: '将优先使用',
+      hint: '预览渲染、视频解码与画面合成由 Chromium 使用所选显卡；切换需要重启应用。',
+      softwareRendering: '当前处于软件渲染，硬件加速不可用。',
+      emptyTitle: '未检测到可用显卡',
+      emptyHint: 'Chromium 正在使用软件渲染。请确认显卡驱动已正确安装，然后重启应用重新检测。'
+    },
+    encoder: {
+      title: '导出编码',
+      mode: '编码模式',
+      selected: '当前编码器',
+      available: '可用 H.264 硬件编码器',
+      software: 'libx264（软件）',
+      hintHardware: '硬件编码只作用于叠加导出的 H.264 MP4；透明 ProRes 仍由 CPU 编码。',
+      hintFallback: '硬件编码不可用或失败时会自动回退 libx264，不会导致导出失败。'
+    },
+    diagnostics: {
+      title: '诊断信息',
+      activeDevice: 'Chromium 当前设备',
+      appliedPreference: '已应用偏好',
+      hardwareEncoding: 'FFmpeg 硬件编码可用',
+      yes: '是',
+      no: '否'
+    },
+    loading: '正在检测显卡…',
+    error: '显卡检测失败',
+    saveError: '设置保存失败',
+    retry: '重试',
+    restartNote: '已保存。重启 FocusNews 后切换到所选显卡。'
+  },
+
   /** 主界面伸缩布局：区域名用于分隔线实时读数与无障碍朗读 */
   layout: {
     labels: {

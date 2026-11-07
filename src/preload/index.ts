@@ -19,6 +19,7 @@ import type {
   VideoMeta
 } from '../shared/types'
 import type { EstimateInput, SmokeReport, WatermarkPickResult, CoverCaptureRect, NewProjectResult, OpenProjectResult, SaveProjectResult } from '../shared/api'
+import type { GpuPreference, VideoEncoderMode } from '../shared/gpu'
 import type { RecentProjectCard } from '../shared/recentProjects'
 
 /**
@@ -103,6 +104,15 @@ const api = {
   watermark: {
     /** 选一张本机图片作水印，主进程探测原图尺寸（用户取消 null） */
     pick: () => ipcRenderer.invoke(CHANNELS.watermarkPick) as Promise<WatermarkPickResult | null>
+  },
+  gpu: {
+    /** 渲染显卡体检：设备清单 / 当前使用 / 可用硬件编码器 */
+    diagnostics: () => ipcRenderer.invoke(CHANNELS.gpuDiagnostics),
+    /** 保存渲染显卡偏好（Chromium 开关需重启生效） */
+    setPreference: (preference: GpuPreference) =>
+      ipcRenderer.invoke(CHANNELS.gpuSetPreference, preference),
+    /** 保存导出编码模式（自动硬件编码 / 仅软件） */
+    setEncoder: (mode: VideoEncoderMode) => ipcRenderer.invoke(CHANNELS.gpuSetEncoder, mode)
   },
   media: {
     /** v2：主进程 ffmpeg 抽帧缩略图，返回 focusnews-thumb://<mediaId>（失败 null） */

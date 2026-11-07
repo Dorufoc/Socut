@@ -11,6 +11,11 @@ export const CHANNELS = {
   /** 仅开发：读仓库 spikes/ 下的取证素材（评审表背景帧） */
   devReadFile: 'app:devReadFile',
 
+  /** 渲染显卡：体检报告 / 偏好切换 / 编码模式切换 */
+  gpuDiagnostics: 'gpu:diagnostics',
+  gpuSetPreference: 'gpu:setPreference',
+  gpuSetEncoder: 'gpu:setEncoder',
+
   projectOpen: 'project:open',
   projectSaveAs: 'project:saveAs',
   projectAutosaveRead: 'project:autosaveRead',

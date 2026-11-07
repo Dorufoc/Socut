@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FPS_30 } from '@shared/constants'
+import { DEFAULT_MEDIA_TRACK_ID, FPS_30 } from '@shared/constants'
 import { compactMediaClips } from '@shared/mediaClips'
 import {
   TIMELINE_SNAP_PX,
@@ -23,6 +23,7 @@ import type { MediaClip } from '@shared/types'
 const clip = (id: string, start: number, end: number): MediaClip => ({
   id,
   mediaId: 'media-1',
+  trackId: DEFAULT_MEDIA_TRACK_ID,
   timelineStartSec: start,
   timelineEndSec: end,
   sourceInSec: 1,

@@ -38,20 +38,23 @@ import { useSpectrumLive } from './useSpectrumLive'
 
 export interface MediaClipCardProps {
   clip: MediaClip
+  /** v3：片段所属媒体轨（卡片填满整行，不再按层号切分高度） */
+  trackId: string
   item: MediaItem | null
   durationSec: number
   widthPx: number
   fps: Fps
   selected: boolean
+  /** 轨道锁定：不开始拖动/修剪（仍可选中查看） */
+  locked?: boolean
   onSelect: (id: string) => void
-  onMove: (timelineStartSec: number) => void
+  /** 第二个参数是指针 Y：上层据此命中另一条轨道实现跨轨拖拽 */
+  onMove: (timelineStartSec: number, clientY: number) => void
   onTrim: (patch: { timelineStartSec?: number; timelineEndSec?: number }) => void
   /** 一次拖拽结束时的回调（上层用它做「主轨对齐」重排；不传则什么都不做） */
   onCommit?: () => void
   /** 按下时的回调：上层在这一刻快照吸附候选边缘，拖拽途中不再重算 */
   onDragStart?: () => void
-  /** v7：本条轨道的叠放层数（>1 时按层号切分高度，叠层可见） */
-  layers?: number
 }
 
 type Edge = 'in' | 'out' | 'move'
@@ -66,17 +69,18 @@ interface DragState {
 
 export function MediaClipCard({
   clip,
+  trackId,
   item,
   durationSec,
   widthPx,
   fps,
   selected,
+  locked = false,
   onSelect,
   onMove,
   onTrim,
   onCommit,
-  onDragStart,
-  layers = 1
+  onDragStart
 }: MediaClipCardProps): ReactElement {
   const dragRef = useRef<DragState | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
@@ -131,6 +135,11 @@ export function MediaClipCard({
     const rect = card.getBoundingClientRect()
     if (rect.width <= 0) return
     onSelect(clip.id)
+    // 锁定轨道：只允许选中，不开始任何拖拽/修剪；仍要吞掉事件，别让空白处的刮擦接管
+    if (locked) {
+      event.stopPropagation()
+      return
+    }
     dragRef.current = {
       edge,
       grabOffsetPx: event.clientX - rect.left,
@@ -159,7 +168,10 @@ export function MediaClipCard({
     if (drag.edge === 'move') {
       const length = drag.end - drag.start
       const grabSec = secAtClientX(event.clientX - drag.grabOffsetPx, box, durationSec)
-      onMove(snapTimeToFrame(Math.min(grabSec, Math.max(0, durationSec - length)), fps))
+      onMove(
+        snapTimeToFrame(Math.min(grabSec, Math.max(0, durationSec - length)), fps),
+        event.clientY
+      )
       return
     }
     if (drag.edge === 'in') {
@@ -193,21 +205,15 @@ export function MediaClipCard({
 
   return (
     <div
-          ref={cardRef}
-          data-clip-id={clip.id}
+      ref={cardRef}
+      data-clip-id={clip.id}
+      data-track-id={trackId}
       className={`media-clip-card${selected ? ' media-clip-card--selected' : ''}${item ? '' : ' media-clip-card--orphan'}${
         stripReady ? ' media-clip-card--strip' : ''
-      }${layers > 1 ? ' media-clip-card--layered' : ''}${bars.length > 0 ? ' media-clip-card--spectrum' : ''}`}
+      }${locked ? ' media-clip-card--locked' : ''}${bars.length > 0 ? ' media-clip-card--spectrum' : ''}`}
       style={{
         left,
-        width: Math.max(24, right - left),
-        // v7 多层：单层时完全交给 CSS（与旧行为一致），多层时按层号切分高度
-        ...(layers > 1
-          ? {
-              top: `${((clip.layer ?? 0) * 100) / layers}%`,
-              height: `calc(${100 / layers}% - 4px)`
-            }
-          : {})
+        width: Math.max(24, right - left)
       }}
       onPointerDown={begin('move')}
       onPointerMove={onPointerMove}

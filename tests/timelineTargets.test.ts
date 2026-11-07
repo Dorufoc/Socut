@@ -3,6 +3,7 @@ import { FPS_30, MIN_CLIP_DURATION_SEC } from '@shared/constants'
 import { resolveTargetAt } from '@shared/timelineTargets'
 import { MIN_AUDIO_CLIP_SEC, splitAudioClipAt } from '@shared/audioClips'
 import { createClip, splitSubtitleClipAt } from '@shared/projectSchema'
+import { makeMediaTrack } from '@shared/tracks'
 import type { AudioClip, MediaClip, SubtitleClip } from '@shared/types'
 
 /**
@@ -11,9 +12,11 @@ import type { AudioClip, MediaClip, SubtitleClip } from '@shared/types'
  * 规则来自用户明确要求：
  * - 拆分/删除作用于**当前选中的段**（字幕条 / 媒体段 / 音频段三类都算）；
  * - 没有任何选中时，默认落到**媒体轨**里播放头所覆盖的那一段，
- *   媒体轨叠了多层时取最下面那一层（层号最大，也就是画面上盖住别人的那条）；
+ *   多轨时取最下面那一轨（轨道数组索引最小，合成时最先画）；
  * - 连这一段都没有 → 返回 null，由 UI 提示「没有」，而不是悄悄什么也不做。
  */
+
+const MEDIA_TRACKS = [0, 1, 2, 3].map((index) => makeMediaTrack(index))
 
 const NO_SELECTION = { clipId: null, mediaClipId: null, audioClipId: null, kind: 'subtitle' as const }
 
@@ -21,6 +24,7 @@ function mediaClip(over: Partial<MediaClip> = {}): MediaClip {
   return {
     id: over.id ?? 'mclip-a',
     mediaId: over.mediaId ?? 'media-1',
+    trackId: over.trackId ?? 'track-media-0',
     timelineStartSec: over.timelineStartSec ?? 0,
     timelineEndSec: over.timelineEndSec ?? 6,
     sourceInSec: over.sourceInSec ?? 0,
@@ -33,6 +37,7 @@ function audioClip(over: Partial<AudioClip> = {}): AudioClip {
   return {
     id: over.id ?? 'aclip-a',
     mediaId: over.mediaId ?? 'media-1',
+    trackId: over.trackId ?? 'track-audio-0',
     timelineStartSec: over.timelineStartSec ?? 0,
     timelineEndSec: over.timelineEndSec ?? 6,
     sourceInSec: over.sourceInSec ?? 0,
@@ -49,6 +54,7 @@ function subtitle(over: Partial<SubtitleClip> = {}): SubtitleClip {
 describe('resolveTargetAt（拆分/删除该操作哪一段）', () => {
   it('选中字幕条时目标就是它，即使播放头落在别处', () => {
     const tracks = {
+      mediaTracks: MEDIA_TRACKS,
       clips: [subtitle({ id: 'c1', startTime: 20, endTime: 25 })],
       mediaClips: [mediaClip({ id: 'm1' })],
       audioClips: []
@@ -60,6 +66,7 @@ describe('resolveTargetAt（拆分/删除该操作哪一段）', () => {
 
   it('选中媒体段 / 音频段时各自主导，不被另一条轨上同名的选中态干扰', () => {
     const tracks = {
+      mediaTracks: MEDIA_TRACKS,
       clips: [subtitle({ id: 'c1' })],
       mediaClips: [mediaClip({ id: 'm1' })],
       audioClips: [audioClip({ id: 'a1' })]
@@ -71,22 +78,24 @@ describe('resolveTargetAt（拆分/删除该操作哪一段）', () => {
     expect(resolveTargetAt(tracks, { ...selection, kind: 'audio' }, 2)).toEqual({ kind: 'audio', id: 'a1' })
   })
 
-  it('没有选中时退回媒体轨，并且取播放头处最下面那一层（层号最大）', () => {
+  it('没有选中时退回媒体轨，并且取播放头处最下面那一轨（索引最小）', () => {
     const tracks = {
+      mediaTracks: MEDIA_TRACKS,
       clips: [],
       mediaClips: [
-        mediaClip({ id: 'base', timelineStartSec: 0, timelineEndSec: 10, layer: 0 }),
-        mediaClip({ id: 'mid', timelineStartSec: 0, timelineEndSec: 10, layer: 1 }),
-        mediaClip({ id: 'top', timelineStartSec: 0, timelineEndSec: 10, layer: 3 })
+        mediaClip({ id: 'base', trackId: 'track-media-0', timelineStartSec: 0, timelineEndSec: 10 }),
+        mediaClip({ id: 'mid', trackId: 'track-media-1', timelineStartSec: 0, timelineEndSec: 10 }),
+        mediaClip({ id: 'top', trackId: 'track-media-3', timelineStartSec: 0, timelineEndSec: 10 })
       ],
       audioClips: [audioClip({ id: 'a1' })]
     }
 
-    expect(resolveTargetAt(tracks, NO_SELECTION, 4)).toEqual({ kind: 'media', id: 'top' })
+    expect(resolveTargetAt(tracks, NO_SELECTION, 4)).toEqual({ kind: 'media', id: 'base' })
   })
 
   it('没有选中且播放头处没有媒体段：返回 null（UI 据此提示「没有」）', () => {
     const tracks = {
+      mediaTracks: MEDIA_TRACKS,
       clips: [subtitle({ id: 'c1', startTime: 0, endTime: 3 })],
       mediaClips: [mediaClip({ id: 'm1', timelineStartSec: 8, timelineEndSec: 12 })],
       audioClips: [audioClip({ id: 'a1', timelineStartSec: 0, timelineEndSec: 20 })]
@@ -99,7 +108,7 @@ describe('resolveTargetAt（拆分/删除该操作哪一段）', () => {
   })
 
   it('选中的段已经不存在（撤销/别处删除）：退回默认解析，而不是抓着死 id', () => {
-    const tracks = { clips: [], mediaClips: [mediaClip({ id: 'm1' })], audioClips: [] }
+    const tracks = { mediaTracks: MEDIA_TRACKS, clips: [], mediaClips: [mediaClip({ id: 'm1' })], audioClips: [] }
 
     expect(resolveTargetAt(tracks, { ...NO_SELECTION, clipId: '已删除', kind: 'subtitle' }, 2)).toEqual({
       kind: 'media',

@@ -3,6 +3,7 @@ import { TEXT } from '@shared/i18n'
 import { fpsToString } from '@shared/constants'
 import { defaultMediaVideo } from '@shared/mediaClipVideo'
 import { topActiveMediaClip } from '@shared/mediaClips'
+import { mediaTrackOrder, visibleMediaTracks } from '@shared/tracks'
 import { activeAudioClips, mediaKindOf } from '@shared/audioClips'
 import { clipTimelineDurationSec, previewGainAt, previewPlaybackRate, previewPreservesPitch, sourceTimeAt } from '@shared/mediaClipAudio'
 import { attachPreviewAudio, elementLevelReader, setElementLevel, setPreservesPitch } from '../audio/previewAudioGraph'
@@ -11,7 +12,7 @@ import { computeWatermarkGeometry } from '@shared/ffmpegArgs'
 import type { AudioClip, MediaClip, MediaItem, RenderJobSpec } from '@shared/types'
 import { usePreviewLoop } from '../hooks/usePreviewLoop'
 import { containFrameRect, displayToNative, hitTestClips } from '../render/hitTest'
-import { selectPreviewCandidates, type PreviewCandidate } from '../render/previewCandidates'
+import { selectPreviewCandidates, isClipActiveAt, type PreviewCandidate } from '../render/previewCandidates'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 import { stabSignatureFor, useStabPreviewStore } from '../state/stabPreviewStore'
@@ -24,14 +25,15 @@ import { StageTransformOverlay } from './StageTransformOverlay'
  * 显示 Canvas 只承担等比缩放显示，尺寸与 CSS 缩放都不参与渲染坐标计算，
  * 真正的像素由 NativeStage（目标分辨率 1:1）产出，因此预览与导出像素一致。
  *
- * 参考视频叠加（v2 双轨）：播放头落在哪枚 mediaClip 上，<video> 就换成它的源文件
- *（focusnews-media:// 流，带 Range 支持），currentTime 按 sourceTimeOf 换算；
- * 落在段间空隙则回到棋盘格。上层 Canvas 改画透明底字幕条，两者按同一「等比装入」
- * 矩形对齐，于是预览看到的就是导出 MP4 的叠加结果。视频解码失败（如 ProRes）时回退棋盘格。
+ * 参考视频叠加（v7 多轨）：每一条可见媒体轨各挂一层 `<video>`/`<img>`，按轨道数组顺序
+ *（索引 0 = 最底层）渲染——DOM 顺序就是合成顺序，高处轨道直接盖住低处，形成真正的画中画叠层。
+ * 隐藏轨整层跳过；段间空隙时该层收起，所有层都无帧才回退棋盘格。
+ * 上层 Canvas 改画透明底字幕条，恒在所有媒体层之上，于是预览看到的就是导出 MP4 的叠加结果。
+ * 视频解码失败（如 ProRes）时该层回退棋盘格。
  *
  * 水印（Watermark）：同一套装入矩形里再按原生像素定位一张图，位置/尺寸与导出
  * 共用 `computeWatermarkGeometry`（1080P 基准 → 原图 32% → 左上角 30px），
- * 不进 Canvas——Canvas 的像素就是导出的透明字幕层，水印属于合成层，不能烘进去。
+ * 不进 Canvas——Canvas 的像素就是导出的透明字幕层，水印属于合成层且在最顶层，不能烘进去。
  *
  * 画面框（v3 伸缩布局配套）：预览区可以被分隔线拖成任意宽高比，而目标分辨率的比例不变。
  * 因此这里先量容器、算出一个**与目标分辨率同比例的矩形**（`containFrameRect`），把
@@ -67,7 +69,6 @@ export interface PreviewStageProps {
 
 export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElement {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const layerRef = useRef<MediaPreviewHandle | null>(null)
   const playing = useUiStore((state) => state.playing)
   const setLiveClipId = useUiStore((state) => state.setLiveClipId)
   const showSafeArea = useUiStore((state) => state.showSafeArea)
@@ -78,6 +79,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   const setDisplayTime = useUiStore((state) => state.setDisplayTime)
   const selectClip = useProjectStore((state) => state.selectClip)
   const mediaClips = useProjectStore((state) => state.project.mediaClips)
+  const mediaTracks = useProjectStore((state) => state.project.mediaTracks)
   const mediaPool = useProjectStore((state) => state.project.media)
   // @deprecated v1 兼容：冒烟取证脚本直接写 refVideo，没有 mediaClips 时仍按旧路取源
   const legacyRefPath = useProjectStore((state) => state.project.refVideo?.path ?? null)
@@ -88,12 +90,25 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   const stabApplied = useStabPreviewStore((state) => state.applied)
 
   /**
+   * 多轨合成：轨道数组顺序 = 绘制顺序（索引 0 在最底），隐藏轨不参与画面。
+   * `trackOrder` 用**完整轨道数组**生成，隐藏轨只从片段入参里剔除——
+   * 这样轨道之间的相对层级保持稳定，不会因为隐藏某条轨而整体重排。
+   */
+  const trackOrder = useMemo(() => mediaTrackOrder(mediaTracks), [mediaTracks])
+  const visibleTracks = useMemo(() => visibleMediaTracks(mediaTracks), [mediaTracks])
+  const visibleClips = useMemo(() => {
+    if (mediaTracks.length === 0) return mediaClips
+    const ids = new Set(visibleTracks.map((track) => track.id))
+    return mediaClips.filter((clip) => ids.has(clip.trackId))
+  }, [mediaClips, mediaTracks, visibleTracks])
+
+  /**
    * 预览候选池：当前图层 + 刚结束的兜底段 + 前瞻窗口内的下一段。
    * 路径在这里就解析成原片/防抖代理，DOM 层只负责挂载与同步。
    */
   const candidates = useMemo((): PreviewCandidate[] => {
     const out: PreviewCandidate[] = []
-    for (const clip of selectPreviewCandidates(mediaClips, Math.max(0, previewTime))) {
+    for (const clip of selectPreviewCandidates(visibleClips, Math.max(0, previewTime), trackOrder)) {
       const item = mediaPool.find((media) => media.id === clip.mediaId)
       if (!item) continue
       const kind = mediaKindOf(item)
@@ -127,27 +142,98 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
         timelineStartSec: 0,
         timelineEndSec: 1e12,
         sourceInSec: 0,
-        sourceOutSec: 1e12
+        sourceOutSec: 1e12,
+        // 旧兼容段也要落在一条真实轨道上，预览层才能按轨道分组叠放
+        trackId: visibleTracks[0]?.id ?? mediaTracks[0]?.id ?? 'track-media-0'
       }
       out.push({ clip, kind: 'video', hasAudio: legacyHasAudio, sourcePath: legacyRefPath, useStabProxy: false })
     }
     return out
-  }, [mediaClips, mediaPool, previewTime, stabApplied, projectFps, legacyRefPath, legacyHasAudio])
+  }, [
+    visibleClips,
+    trackOrder,
+    mediaClips,
+    mediaTracks,
+    visibleTracks,
+    mediaPool,
+    previewTime,
+    stabApplied,
+    projectFps,
+    legacyRefPath,
+    legacyHasAudio
+  ])
 
   const [mediaVisibleReady, setMediaVisibleReady] = useState(false)
   /** 同一份可见性同时写进 ref：usePreviewLoop 在同一帧的 blit 里读它 */
   const mediaVisibleRef = useRef(false)
+  /** 当前有可见帧的轨道 id 集合：任一轨道可见就关掉棋盘格 */
+  const visibleTracksWithFrameRef = useRef(new Set<string>())
   const [failedClipIds, setFailedClipIds] = useState<ReadonlySet<string>>(() => new Set())
-  const [audioRoute, setAudioRoute] = useState<{ element: HTMLVideoElement; clip: MediaClip } | null>(null)
+  /** 每条轨道当前上报的原声路：顶层轨道胜出（与导出内嵌原声的 topmost-wins 同口径） */
+  const [audioRoutes, setAudioRoutes] = useState<
+    ReadonlyMap<string, { element: HTMLVideoElement; clip: MediaClip }>
+  >(() => new Map())
+  /** 每个轨道一层 MediaPreviewLayer；tick 按轨道升序（底层 → 顶层）驱动 */
+  const layerRefs = useRef(new Map<string, MediaPreviewHandle>())
+  const layerRefCallbacks = useRef(
+    new Map<string, (handle: MediaPreviewHandle | null) => void>()
+  )
 
-  const handleVisibleChange = useCallback((visible: boolean): void => {
-    mediaVisibleRef.current = visible
-    setMediaVisibleReady(visible)
+  const handleVisibleChange = useCallback((trackId: string, visible: boolean): void => {
+    const set = visibleTracksWithFrameRef.current
+    if (visible === set.has(trackId)) return
+    if (visible) set.add(trackId)
+    else set.delete(trackId)
+    const next = set.size > 0
+    mediaVisibleRef.current = next
+    setMediaVisibleReady(next)
   }, [])
 
-  const handleAudioChange = useCallback((element: HTMLVideoElement | null, clip: MediaClip | null): void => {
-    setAudioRoute(element && clip ? { element, clip } : null)
-  }, [])
+  const handleAudioChange = useCallback(
+    (trackId: string, element: HTMLVideoElement | null, clip: MediaClip | null): void => {
+      setAudioRoutes((previous) => {
+        const current = previous.get(trackId)
+        if (!element || !clip) {
+          if (!current) return previous
+          const next = new Map(previous)
+          next.delete(trackId)
+          return next
+        }
+        if (current && current.element === element && current.clip.id === clip.id) return previous
+        const next = new Map(previous)
+        next.set(trackId, { element, clip })
+        return next
+      })
+    },
+    []
+  )
+
+  /** 出声轨：所有上报里轨道序号最大的那一路，下层不抢麦 */
+  const audioRoute = useMemo(() => {
+    let best: { element: HTMLVideoElement; clip: MediaClip } | null = null
+    let bestRank = Number.NEGATIVE_INFINITY
+    for (const [trackId, route] of audioRoutes) {
+      const rank = trackOrder.get(trackId) ?? -1
+      if (rank > bestRank) {
+        bestRank = rank
+        best = route
+      }
+    }
+    return best
+  }, [audioRoutes, trackOrder])
+
+  /** 稳定 ref 回调：内联箭头每次渲染都换身份，会 detach/attach 一遍所有层 */
+  const layerRefFor = (trackId: string): ((handle: MediaPreviewHandle | null) => void) => {
+    let callback = layerRefCallbacks.current.get(trackId)
+    if (!callback) {
+      callback = (handle) => {
+        if (handle) layerRefs.current.set(trackId, handle)
+        else layerRefs.current.delete(trackId)
+      }
+      layerRefCallbacks.current.set(trackId, callback)
+    }
+    return callback
+  }
 
   const handleFailure = useCallback((clipId: string): void => {
     setFailedClipIds((previous) => (previous.has(clipId) ? previous : new Set(previous).add(clipId)))
@@ -167,7 +253,43 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   const selectedMediaClipId = useProjectStore((state) => state.selectedMediaClipId)
   const stageInteract = useUiStore((state) => state.stageInteract)
   const audioClips = useProjectStore((state) => state.project.audioClips) ?? EMPTY_AUDIO_CLIPS
-  const playheadClip = useMemo(() => topActiveMediaClip(mediaClips, Math.max(0, displayTime)) ?? null, [mediaClips, displayTime])
+  /**
+   * 内嵌原声的出声轨：可见、未静音、且当前有 active 视频（带音轨）的**最高轨道**。
+   * 只看候选池里的 active 段——hold/前瞻段不参与抢麦，避免切点前先把上一层的声音顶掉。
+   */
+  const audioOwnerTrackId = useMemo((): string | null => {
+    const muted = new Set(mediaTracks.filter((track) => track.muted).map((track) => track.id))
+    let owner: string | null = null
+    let bestRank = Number.NEGATIVE_INFINITY
+    for (const candidate of candidates) {
+      if (candidate.kind !== 'video' || !candidate.hasAudio) continue
+      if (!isClipActiveAt(candidate.clip, previewTime)) continue
+      if (muted.has(candidate.clip.trackId)) continue
+      const rank = trackOrder.get(candidate.clip.trackId) ?? -1
+      if (rank > bestRank) {
+        bestRank = rank
+        owner = candidate.clip.trackId
+      }
+    }
+    return owner
+  }, [candidates, mediaTracks, previewTime, trackOrder])
+
+  /** 每个可见轨道一层，按轨道升序排列：DOM 顺序就是合成顺序（底层先画、上层后画）。 */
+  const layerGroups = useMemo(
+    () =>
+      visibleTracks
+        .map((track) => ({
+          trackId: track.id,
+          candidates: candidates.filter((candidate) => candidate.clip.trackId === track.id)
+        }))
+        .filter((group) => group.candidates.length > 0),
+    [visibleTracks, candidates]
+  )
+
+  const playheadClip = useMemo(
+    () => topActiveMediaClip(visibleClips, Math.max(0, displayTime), trackOrder) ?? null,
+    [visibleClips, displayTime, trackOrder]
+  )
   const overlayClip =
     stageInteract && selectionKind === 'media' && playheadClip && playheadClip.id === selectedMediaClipId
       ? playheadClip
@@ -243,8 +365,10 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     overrideSec: hoverPreviewSec,
     onDisplayTime: setDisplayTime,
     onTick: (timelineSec, isPlaying) => {
-      // 悬停时按静态帧预览：媒体层暂停在悬停帧，不跟着播放时钟跑
-      layerRef.current?.tick(timelineSec, isPlaying && hoverPreviewSec === null)
+      // 悬停时按静态帧预览：媒体层暂停在悬停帧，不跟着播放时钟跑。
+      // 按轨道升序逐层 tick（底层 → 顶层），出声轨由 audioEnabled 单独仲裁。
+      const play = isPlaying && hoverPreviewSec === null
+      for (const track of visibleTracks) layerRefs.current.get(track.id)?.tick(timelineSec, play)
     }
   })
 
@@ -299,14 +423,19 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     <div className="stage__canvas-wrap" ref={wrapRef}>
       {/* 画面框：唯一与目标分辨率同比例的矩形，里面所有层共用同一原点与缩放比 */}
       <div className="stage__frame" style={frameStyle}>
-        <MediaPreviewLayer
-          ref={layerRef}
-          candidates={candidates}
-          fps={projectFps}
-          onVisibleChange={handleVisibleChange}
-          onAudioChange={handleAudioChange}
-          onFailure={handleFailure}
-        />
+        {/* 每层一条可见媒体轨，按轨道升序渲染：DOM 顺序 = 合成顺序，高处轨道盖住低处 */}
+        {layerGroups.map((group) => (
+          <MediaPreviewLayer
+            key={group.trackId}
+            ref={layerRefFor(group.trackId)}
+            candidates={group.candidates}
+            fps={projectFps}
+            audioEnabled={group.trackId === audioOwnerTrackId}
+            onVisibleChange={(visible) => handleVisibleChange(group.trackId, visible)}
+            onAudioChange={(element, clip) => handleAudioChange(group.trackId, element, clip)}
+            onFailure={handleFailure}
+          />
+        ))}
 
         <canvas
           ref={canvasRef}

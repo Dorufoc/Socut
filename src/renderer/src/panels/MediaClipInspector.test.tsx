@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { FPS_30 } from '@shared/constants'
+import { DEFAULT_MEDIA_TRACK_ID, FPS_30 } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import { defaultMediaVideo } from '@shared/mediaClipVideo'
@@ -64,6 +64,7 @@ function seed(): { project: Project; mediaClipId: string; subtitleClipId: string
   const mediaClip: MediaClip = {
     id: 'mclip-1',
     mediaId: item.id,
+    trackId: DEFAULT_MEDIA_TRACK_ID,
     timelineStartSec: 0,
     timelineEndSec: 8,
     sourceInSec: 0,

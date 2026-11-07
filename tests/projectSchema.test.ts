@@ -299,8 +299,8 @@ describe('v8 防抖参数归一', () => {
     expect(JSON.stringify(parsed.mediaClips[0])).not.toContain('stab')
   })
 
-  it('新增可选键不 bump PROJECT_VERSION：与 v6 video / v7 audioClips 同一先例', () => {
-    expect(PROJECT_VERSION).toBe(2)
+  it('v3 轨道模型是必填结构：PROJECT_VERSION 随之上调到 3', () => {
+    expect(PROJECT_VERSION).toBe(3)
   })
 })
 

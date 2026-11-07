@@ -39,6 +39,9 @@ import { generateAudioPeaks, removePeaksFor } from './audioPeaks'
 import { cancelCfr, convertToCfr } from './cfrTranscode'
 import { applyStabPreview, cancelStabPreview, removeStabPreviewForClip } from './stabPreview'
 import { smokeConfig, verifySmokeReport, writeSmokeReport } from './smoke'
+import { getGpuDiagnostics } from './gpu'
+import { getRenderSettings, getStartupPreference, saveRenderSettings } from './renderSettings'
+import type { GpuDiagnostics, RenderSettings } from '../shared/gpu'
 import { installFrameIpc } from './export/frameChannel'
 import type { SmokeReport } from '../shared/api'
 import type { ExportEngine } from './export/engine'
@@ -430,6 +433,25 @@ export function registerIpc(engine: ExportEngine): void {
 
   /** 选一张本机图片作水印：主进程探测原图尺寸（几何换算的唯一输入）后交给渲染侧写入工程。 */
   ipcMain.handle(CHANNELS.watermarkPick, async (event) => pickAndProbeWatermark(senderWindow(event)))
+
+  // ---------------------------------------------------------------- 渲染显卡
+  ipcMain.handle(CHANNELS.gpuDiagnostics, async (): Promise<GpuDiagnostics> => getGpuDiagnostics())
+
+  ipcMain.handle(
+    CHANNELS.gpuSetPreference,
+    async (_event, preference: unknown): Promise<{ settings: RenderSettings; restartRequired: boolean }> => {
+      if (preference !== 'auto' && preference !== 'high-performance' && preference !== 'low-power') {
+        throw new Error('无效的显卡偏好')
+      }
+      const settings = saveRenderSettings({ ...getRenderSettings(), gpuPreference: preference })
+      return { settings, restartRequired: preference !== getStartupPreference() }
+    }
+  )
+
+  ipcMain.handle(CHANNELS.gpuSetEncoder, async (_event, mode: unknown): Promise<RenderSettings> => {
+    if (mode !== 'auto' && mode !== 'software') throw new Error('无效的编码模式')
+    return saveRenderSettings({ ...getRenderSettings(), videoEncoder: mode })
+  })
 
   ipcMain.handle(CHANNELS.exportCancel, async (_event, jobId: string) => {
     await engine.cancel(String(jobId))

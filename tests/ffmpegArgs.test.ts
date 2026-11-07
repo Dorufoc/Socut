@@ -632,5 +632,77 @@ describe('segmentsNeedMultiInput（导出拓扑判定）', () => {
     // 而「没写过这些键」依旧走单输入（旧 argv 逐字节不变）
     expect(segmentsNeedMultiInput([whole({ audio: undefined, speed: undefined })])).toBe(false)
   })
+
+  it('v3：上层媒体轨（trackIndex > 0）必须走多输入分层合成', () => {
+    // 即使只有一段，上层也不能回退旧单输入 builder（它没有分层入口）
+    expect(segmentsNeedMultiInput([whole({ trackIndex: 1 })])).toBe(true)
+    expect(segmentsNeedMultiInput([whole({ trackIndex: 0 })])).toBe(false)
+  })
+
+  it('v3：静音轨必须走 trim 链补静音；纯无音轨段仍可回退单输入', () => {
+    expect(segmentsNeedMultiInput([whole({ muted: true })])).toBe(true)
+    // 源本来就没音轨时，单输入 builder 的 `-map 0:a?` 已经能正确处理
+    expect(segmentsNeedMultiInput([whole({ hasAudio: false })])).toBe(false)
+  })
+
+  it('v7：单张静帧必须走 `-loop 1 -t` 的多输入路径', () => {
+    expect(segmentsNeedMultiInput([whole({ isImage: true })])).toBe(true)
+  })
+})
+
+describe('v3 多轨图层合成', () => {
+  it('按 trackIndex 从底到顶叠加，并为多轨原声补等长静音 [ab]', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis(
+        [
+          seg({ trackIndex: 0, timelineEndSec: 4 }),
+          seg({
+            trackIndex: 1,
+            refVideoPath: 'D:/media/b.mp4',
+            timelineStartSec: 2,
+            timelineEndSec: 6,
+            sourceInSec: 0,
+            sourceOutSec: 4
+          })
+        ],
+        '2'
+      )
+    )
+    // 两条轨各一张全帧 RGBA 层，段间空隙补透明，overlay 按 0 → 1 从底到顶
+    expect(fc).toContain('color=c=black@0.0')
+    expect(fc).toContain('concat=n=')
+    expect(fc).toContain('eof_action=pass:shortest=0')
+    expect(fc.indexOf('[ml0]')).toBeLessThan(fc.indexOf('[ml1]'))
+    // 多轨原声已由渲染侧压平进 audioClips：这里只留一路等长静音基座
+    expect(fc).toContain('anullsrc=channel_layout=stereo:sample_rate=48000')
+    expect(fc).toContain('[ab]')
+    // 不能再逐段混原声，否则会与 audioClips 双声
+    expect(fc).not.toContain('[0:a]')
+    expect(fc).not.toContain('[1:a]')
+  })
+
+  it('水印仍然最后叠加：媒体层 → 字幕层 → 水印 [v]', () => {
+    const fc = buildMediaBasisFilterComplex({
+      ...basis([seg({ trackIndex: 1 })], '1'),
+      watermark: { path: 'D:/wm.png', sourceWidth: 100, sourceHeight: 50 }
+    })
+    expect(fc).toContain('format=yuv420p[vsub]')
+    // 水印输入索引 = 透明层序号 + 1 = 2，且水印链的产物是最终的 [v]
+    expect(fc).toContain('[2:v]format=rgba')
+    expect(fc.lastIndexOf('format=yuv420p[v]')).toBeGreaterThan(fc.lastIndexOf('format=yuv420p[vsub]'))
+  })
+
+  it('单轨（trackIndex 全 0）保持旧 trim+concat 路径（逐段音频仍在段内混）', () => {
+    const legacy = buildMediaBasisFilterComplex({
+      ...basis([
+        seg({ trackIndex: 0 }),
+        seg({ trackIndex: 0, timelineStartSec: 4, timelineEndSec: 8, sourceInSec: 0, sourceOutSec: 4 })
+      ]),
+      spanEndSec: 8
+    })
+    expect(legacy).toContain('[0:a]')
+    expect(legacy).toContain('concat=n=2:v=1:a=1[vb][ab]')
+    expect(legacy).not.toContain('color=c=black@0.0')
+  })
 })
 

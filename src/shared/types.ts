@@ -358,6 +358,46 @@ export interface MediaItem {
 /** v7：素材类型（缺省 = 视频，旧工程与旧测试无需补字段） */
 export type MediaKind = 'video' | 'audio' | 'image'
 
+// ---------------------------------------------------------------------------
+// 多轨道（v3：PR / 达芬奇 / 剪映式）
+// ---------------------------------------------------------------------------
+
+/**
+ * 轨道类型。
+ * - `media`：画面层，可多条上下叠放，**索引越大越靠上**（画面合成从上往下覆盖）；
+ * - `audio`：声音层，可多条叠放，只参与最终混音；
+ * - `subtitle`：唯一且固定的一条，恒覆盖在所有画面内容之上（不参与增删/排序）。
+ */
+export type TrackKind = 'media' | 'audio' | 'subtitle'
+
+export interface TrackBase {
+  id: string
+  name: string
+  /** 静音：音频轨 = 不参与混音；媒体轨 = 其内嵌原声不参与混音；字幕轨无意义 */
+  muted: boolean
+  /** 隐藏：媒体轨 = 不参与画面合成；字幕轨 = 不渲染字幕；音频轨无意义 */
+  hidden: boolean
+  /** 锁定：禁止增删/拖拽/修剪该轨上的片段（仍可选中查看） */
+  locked: boolean
+}
+
+/** 媒体轨道（画面层）。数组索引 0 = 最底层，索引越大越靠上。 */
+export interface MediaTrack extends TrackBase {
+  kind: 'media'
+}
+
+/** 音频轨道（混音层），与媒体轨道分属两条车道。 */
+export interface AudioTrack extends TrackBase {
+  kind: 'audio'
+}
+
+/** 字幕轨：固定 id、固定位置（永远在画面之上），不进 mediaTracks/audioTracks 数组。 */
+export interface SubtitleTrack extends TrackBase {
+  kind: 'subtitle'
+}
+
+export type Track = MediaTrack | AudioTrack | SubtitleTrack
+
 /**
  * 时间轴媒体轨：一枚媒体片段（视频/图像）。时间轴坐标与源坐标分别以 `timeline*Sec`
  * 与 `source*Sec` 命名，写入前已 `snapTimeToFrame`，时长以秒为准。
@@ -377,8 +417,11 @@ export interface MediaClip {
   sourceOutSec: number
   /** v6：画面变换与调色（缺省 = 全部默认值） */
   video?: MediaClipVideo
-  /** v7：叠放层号（0 = 最底层）；同轨同层互斥，层高由轨道按最大层数均分 */
-  layer?: number
+  /**
+   * v3：所属媒体轨 id（`Project.mediaTracks[].id`）。
+   * 轨道在数组里的索引决定合成顺序：0 = 最底层，索引越大越靠上。
+   */
+  trackId: string
   /** v8：视频防抖（缺省 = 关闭；仅导出时生效，预览仍播原片） */
   stab?: MediaClipStab
   /** v9：音频增益与渐入渐出（缺省 = 100% / 0 / 0） */
@@ -428,8 +471,8 @@ export interface AudioClip {
   timelineEndSec: number
   sourceInSec: number
   sourceOutSec: number
-  /** 叠放层号（0 = 最底层） */
-  layer?: number
+  /** v3：所属音频轨 id（`Project.audioTracks[].id`）；音频轨道只影响最终混音 */
+  trackId: string
   /** v9：音频增益与渐入渐出（缺省 = 100% / 0 / 0） */
   audio?: ClipAudio
   /** v9：变速（缺省 = 1.0x 保持音高） */
@@ -598,6 +641,15 @@ export interface Project {
   media: MediaItem[]
   /** v2：时间轴上行（媒体轨）；与 `clips` 下行共享尺规/播放头 */
   mediaClips: MediaClip[]
+  /**
+   * v3：媒体轨道（画面层）。数组索引 0 = 最底层，索引越大越靠上；
+   * 空工程也至少有一条，保证新素材有地方落。
+   */
+  mediaTracks: MediaTrack[]
+  /** v3：音频轨道（混音层），与媒体轨道分属两条车道，互不重叠 */
+  audioTracks: AudioTrack[]
+  /** v3：唯一且固定的字幕轨，恒覆盖在所有画面内容之上 */
+  subtitleTrack: SubtitleTrack
   /** v7：音频轨（缺省 = 空轨；与媒体轨/Caption 轨并列） */
   audioClips?: AudioClip[]
   /** 水印设置；缺省 = 未导入水印（合成链与旧工程逐字节一致） */
@@ -791,6 +843,17 @@ export interface OverlaySegment {
   sourceInSec: number
   /** 到源文件的这个出点结束 */
   sourceOutSec: number
+  /**
+   * v3：本段所在媒体轨的合成序号（0 = 最底层，越大越靠上）。
+   * 缺省按 0 处理，兼容旧请求；单轨工程（全部为 0）仍走旧 trim+concat 路径。
+   */
+  trackIndex?: number
+  /** v3：本段是否贡献原声；缺省 = 非图像（与旧行为一致）。静音轨的段必须显式 false。 */
+  hasAudio?: boolean
+  /** v3：本段所在媒体轨是否静音；静音轨仍出画面，但原声不得进入混音。 */
+  muted?: boolean
+  /** v6：画面调色/变换参数（原样透传给导出层；当前导出仍未烧录调色/变换，见验收文档） */
+  video?: MediaClipVideo
   /** v8：该段的防抖参数（缺省 = 不防抖；主进程会先跑 detect 再在段链注入 transform） */
   stab?: MediaClipStab
   /** v7：图像素材（主进程用 `-loop 1 -t` 把静帧撑成一段视频） */
