@@ -403,16 +403,21 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     return owner
   }, [candidates, mediaTracks, displayTime, trackOrder])
 
-  /** 每个可见轨道一层，按轨道升序排列：DOM 顺序就是合成顺序（底层先画、上层后画）。 */
+  /**
+   * 每个可见轨道一层，按轨道升序排列：DOM 顺序就是合成顺序（底层先画、上层后画）。
+   * `trackClips` 是该轨道**全部**可见片段（不只候选池里的几段）：图层靠它判断
+   * 「这段后面是否还紧贴下一段」，轨道真正结束时才不会把最后一帧兜底继续挂着。
+   */
   const layerGroups = useMemo(
     () =>
       visibleTracks
         .map((track) => ({
           trackId: track.id,
-          candidates: candidates.filter((candidate) => candidate.clip.trackId === track.id)
+          candidates: candidates.filter((candidate) => candidate.clip.trackId === track.id),
+          trackClips: visibleClips.filter((clip) => clip.trackId === track.id)
         }))
         .filter((group) => group.candidates.length > 0),
-    [visibleTracks, candidates]
+    [visibleTracks, visibleClips, candidates]
   )
 
   const playheadClip = useMemo(
@@ -586,6 +591,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
             key={group.trackId}
             ref={layerRefFor(group.trackId)}
             candidates={group.candidates}
+            trackClips={group.trackClips}
             fps={projectFps}
             loopDurationSec={loopDurationSec}
             audioEnabled={group.trackId === audioOwnerTrackId}

@@ -15,7 +15,9 @@ import { attachPreviewAudio, setElementLevel, setPreservesPitch } from '../audio
 import {
   PREVIEW_DRIFT_SEC,
   PREVIEW_LOOKAHEAD_SEC,
+  hasSeamSuccessor,
   isClipActiveAt,
+  latestEndedClip,
   previewClipStartSourceTime,
   previewGradeFilterId,
   previewPrerollTarget,
@@ -69,11 +71,48 @@ export interface MediaPreviewLayerProps {
    * 需要提前把它对齐到入点，否则回绕瞬间要等一次异步 seek 才出首帧。
    */
   loopDurationSec?: number
+  /**
+   * 本轨道上的全部可见片段（含候选池之外的段）。
+   * 用来判断「刚结束的段后面是否紧贴着下一段」——只有这种缝口才允许用最后一帧
+   * 兜底；轨道真的结束（末端 / 段后空隙）时必须立即隐藏。缺省时退回候选池内判断。
+   */
+  trackClips?: readonly MediaClip[]
+}
+
+interface PreviewUrlEntry {
+  /** null = 无法预览 */
+  url: string | null
+  fetchedAt: number
 }
 
 /** 源路径 → 协议地址 + 获取时刻；null = 已失败。跨挂载复用，避免每次切段重发 IPC。 */
-const previewUrlCache = new Map<string, { url: string | null; fetchedAt: number }>()
-const pendingPreviewUrls = new Set<string>()
+const previewUrlCache = new Map<string, PreviewUrlEntry>()
+
+/**
+ * 在飞请求按路径合并成同一个 Promise。
+ *
+ * 关键点：缓存与请求是模块级的，而 `urls` 是**每个图层实例自己的 state**。
+ * 新轨道 / 重新挂载的图层如果只看到「这个路径有人正在取」，不能就此放弃——
+ * 必须照样 await 同一个 Promise，再写回自己的 `urls`，否则那一层的 `<video>`
+ * 永远没有 src，画面就停在棋盘格或上一段。
+ */
+const previewUrlRequests = new Map<string, Promise<PreviewUrlEntry>>()
+
+function requestPreviewUrl(path: string): Promise<PreviewUrlEntry> {
+  const pending = previewUrlRequests.get(path)
+  if (pending) return pending
+  const request = (async (): Promise<PreviewUrlEntry> => {
+    const api = window.focusnews?.video
+    const url = api ? await api.previewUrl(path).catch(() => null) : null
+    const entry: PreviewUrlEntry = { url, fetchedAt: performance.now() }
+    previewUrlCache.set(path, entry)
+    return entry
+  })().finally(() => {
+    previewUrlRequests.delete(path)
+  })
+  previewUrlRequests.set(path, request)
+  return request
+}
 
 /** 协议地址的时效（毫秒）：源文件被同名替换后旧 URL 仍带长缓存头，会播到旧内容。 */
 export const PREVIEW_URL_TTL_MS = 10_000
@@ -118,10 +157,19 @@ interface SeekState {
 
 export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLayerProps>(
   function MediaPreviewLayer(
-    { candidates, fps, audioEnabled = true, loopDurationSec = 0, onVisibleChange, onAudioChange, onFailure, transition, transitionResolver },
+    { candidates, fps, audioEnabled = true, loopDurationSec = 0, trackClips, onVisibleChange, onAudioChange, onFailure, transition, transitionResolver },
     ref
   ) {
-    const [urls, setUrls] = useState<Record<string, string | null>>({})
+    // 首帧就按模块级缓存预置：缓存命中时不需要等一次 effect + re-render 才挂元素
+    // （新增轨道 / 切段后重新挂载时，元素能在第一次提交里就带着 src 出现）。
+    const [urls, setUrls] = useState<Record<string, string | null>>(() => {
+      const seed: Record<string, string | null> = {}
+      for (const candidate of candidates) {
+        const entry = previewUrlCache.get(candidate.sourcePath)
+        if (entry) seed[candidate.sourcePath] = entry.url
+      }
+      return seed
+    })
     const elementsRef = useRef(new Map<string, HTMLVideoElement | HTMLImageElement>())
     /**
      * 每个 clipId 一个**稳定**的 ref 回调：内联箭头函数每次渲染都会换身份，
@@ -143,6 +191,9 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     const fpsRef = useRef(fps)
     const audioEnabledRef = useRef(audioEnabled)
     const loopDurationRef = useRef(loopDurationSec)
+    /** 本轨道全部片段；调用方没传时退回候选池（静态用例 / 旧用法行为不变） */
+    const trackClipsRef = useRef<readonly MediaClip[]>(trackClips ?? [])
+    trackClipsRef.current = trackClips && trackClips.length > 0 ? trackClips : candidates.map((item) => item.clip)
     const onVisibleRef = useRef(onVisibleChange)
     const onAudioRef = useRef(onAudioChange)
     const onFailureRef = useRef(onFailure)
@@ -170,51 +221,68 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
 
     const pathsKey = candidates.map((candidate) => candidate.sourcePath).join('\n')
 
-    useEffect(() => {
-      const now = performance.now()
-      const paths = [...new Set(candidates.map((candidate) => candidate.sourcePath))]
-      // 没缓存过的路径直接取；缓存过的按 TTL 判过期（同名替换后要换 URL）。
-      // 在飞路径走 `pendingPreviewUrls` 同键合并，避免并发重复 IPC。
-      const missing = paths.filter(
-        (path) => !pendingPreviewUrls.has(path) && previewUrlCache.get(path) === undefined
-      )
-      const stale = paths.filter((path) => {
-        if (pendingPreviewUrls.has(path)) return false
-        const entry = previewUrlCache.get(path)
-        return entry !== undefined && shouldRefreshPreviewUrl(entry, now)
+    /**
+     * 把解析结果写回本实例的 `urls`。命中缓存也要写：缓存是模块级、`urls` 是实例级，
+     * 新挂载的图层（新增轨道 / 切段后重新挂载）不读缓存就会永远拿不到 src。
+     */
+    const applyResolvedUrls = (
+      entries: ReadonlyArray<readonly [string, string | null]>
+    ): void => {
+      setUrls((previous) => {
+        let next = previous
+        for (const [path, url] of entries) {
+          if (Object.prototype.hasOwnProperty.call(next, path) && next[path] === url) continue
+          if (next === previous) next = { ...previous }
+          next[path] = url
+        }
+        return next
       })
-      const toFetch = [...missing, ...stale]
+    }
+
+    useEffect(() => {
+      const paths = [...new Set(candidates.map((candidate) => candidate.sourcePath))]
+      if (paths.length === 0) return
+
+      const now = performance.now()
+      const cached: Array<readonly [string, string | null]> = []
+      const toFetch: string[] = []
+      for (const path of paths) {
+        const entry = previewUrlCache.get(path)
+        if (!entry) {
+          toFetch.push(path)
+          continue
+        }
+        // 缓存命中先上屏（过期也先用旧地址，过期只表示要换版本号，不是不可用）
+        cached.push([path, entry.url])
+        if (shouldRefreshPreviewUrl(entry, now)) toFetch.push(path)
+      }
+      if (cached.length > 0) applyResolvedUrls(cached)
       if (toFetch.length === 0) return
-      for (const path of toFetch) pendingPreviewUrls.add(path)
+
+      let cancelled = false
+      // 在飞路径同样进入 Promise.all：共享同一个请求结果，而不是「别人在取我就不取了」
       void Promise.all(
         toFetch.map(async (path) => {
-          const api = window.focusnews?.video
-          const url = api ? await api.previewUrl(path).catch(() => null) : null
-          return [path, url] as const
+          const entry = await requestPreviewUrl(path)
+          return [path, entry.url] as const
         })
-      ).then((entries) => {
-        const fetchedAt = performance.now()
-        /** URL 真的变了才写回状态：未变时不动 `urls`，避免无谓重载 `<video>` */
-        const changed: Array<readonly [string, string | null]> = []
-        for (const [path, url] of entries) {
-          const previous = previewUrlCache.get(path)
-          previewUrlCache.set(path, { url, fetchedAt })
-          pendingPreviewUrls.delete(path)
-          if (previous?.url === url) continue
-          changed.push([path, url])
-          if (url) continue
-          // 拿不到协议地址 = 这条源不可预览；没有元素也就不会有 error 事件，这里主动上报
-          for (const candidate of candidatesRef.current) {
-            if (candidate.sourcePath === path) onFailureRef.current?.(candidate.clip.id)
+      )
+        .then((entries) => {
+          if (cancelled) return
+          applyResolvedUrls(entries)
+          for (const [path, url] of entries) {
+            if (url) continue
+            // 拿不到协议地址 = 这条源不可预览；没有元素也就不会有 error 事件，这里主动上报
+            for (const candidate of candidatesRef.current) {
+              if (candidate.sourcePath === path) onFailureRef.current?.(candidate.clip.id)
+            }
           }
-        }
-        if (changed.length === 0) return
-        setUrls((previous) => {
-          const next = { ...previous }
-          for (const [path, url] of changed) next[path] = url
-          return next
         })
-      })
+        .catch(() => undefined)
+
+      return () => {
+        cancelled = true
+      }
     }, [pathsKey])
 
     useEffect(() => {
@@ -348,6 +416,14 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       onAudioRef.current?.(element, clip)
     }
 
+    /**
+     * 是否「真的能出画」：既已就绪、DOM 里也确实挂着一个元素。
+     * 候选段离开候选池后元素会卸载，但就绪标记还留着；只看 ready 会把一个
+     * 没有元素的段判成可见段（画面上什么都没有，也轮不到兜底段）。
+     */
+    const isRenderable = (clipId: string): boolean =>
+      readyRef.current.has(clipId) && elementsRef.current.has(clipId)
+
     /** 同一 clipId 永远返回同一个 ref 回调，避免 React 每次渲染都 detach/attach 一遍。 */
     const refCallbackFor = (
       clipId: string
@@ -360,6 +436,9 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
             return
           }
           elementsRef.current.set(clipId, element)
+          // 换新元素时清掉旧的就绪标记：上一枚元素的解码结果不属于这一枚，
+          // 否则切回该段的第一帧可能把还没解码出画面的元素翻到最上层。
+          resetElement(clipId)
           // 新元素先静音，等 tick 判定它该出声时再解除；避免挂载瞬间漏音
           if (element instanceof HTMLVideoElement) element.muted = true
         }
@@ -524,26 +603,26 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       restoreTransitionStyles(list)
 
       // 1. 该显示哪一段：上层 ready 优先；上层没就绪时回落到下层 ready；
-      //    都没有就保留刚结束那一段的最后一帧（切点兜底）。
+      //    都没有时，**只有剪辑缝口**（刚结束这段的终点处紧贴下一段）才保留最后一帧兜底。
       let visible: PreviewCandidate | null = null
       /** 当帧活动但还没就绪的候选（诊断用）：它才是「本该切过去」的目标 */
       let pendingVisibleId: string | null = null
       for (const candidate of list) {
         if (!isClipActiveAt(candidate.clip, atSec)) continue
-        if (readyRef.current.has(candidate.clip.id)) visible = candidate
+        if (isRenderable(candidate.clip.id)) visible = candidate
         else pendingVisibleId = candidate.clip.id
       }
       let fallback = false
       if (!visible) {
-        let bestEnd = Number.NEGATIVE_INFINITY
-        for (const candidate of list) {
-          if (
-            candidate.clip.timelineEndSec <= atSec + EPS &&
-            candidate.clip.timelineEndSec > bestEnd &&
-            readyRef.current.has(candidate.clip.id)
-          ) {
-            bestEnd = candidate.clip.timelineEndSec
-            visible = candidate
+        // 轨道真正结束（末端 / 段后空隙）时画面必须立刻交还给下层或棋盘格。
+        // 之前对所有「刚结束的段」无条件兜底，导致上层叠加视频播完后还会用最后一帧
+        // 压住下层，直到候选池 hold 窗口（0.5s）结束才消失。
+        const trackClips = trackClipsRef.current
+        const ended = latestEndedClip(trackClips, atSec)
+        if (ended && hasSeamSuccessor(ended, trackClips) && isRenderable(ended.id)) {
+          const bridged = list.find((candidate) => candidate.clip.id === ended.id)
+          if (bridged) {
+            visible = bridged
             fallback = true
           }
         }

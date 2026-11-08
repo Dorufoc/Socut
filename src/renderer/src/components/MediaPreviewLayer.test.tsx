@@ -34,7 +34,7 @@ const right = clip({ id: 'right', timelineStartSec: 2, timelineEndSec: 4, source
 
 let pathSeq = 0
 
-/** 每个用例用独立源路径：模块级 URL 缓存跨挂载复用，同路径会让后续挂载拿不到元素。 */
+/** 每个用例用独立源路径：模块级 URL 缓存跨用例复用，独立路径避免用例之间互相影响。 */
 function candidates(): PreviewCandidate[] {
   const seq = ++pathSeq
   return [
@@ -384,6 +384,172 @@ describe('MediaPreviewLayer 回绕预对齐（Task 8）', () => {
 
     act(() => ref.current?.tick(11.5, false))
     expect(video.currentTime).toBe(2)
+  })
+})
+
+describe('MediaPreviewLayer 源地址缓存（叠加层 / 顺序段）', () => {
+  function one(path: string, id: string): PreviewCandidate {
+    return {
+      clip: clip({ id, mediaId: `media-${id}`, timelineStartSec: 0, timelineEndSec: 4 }),
+      kind: 'video',
+      hasAudio: false,
+      sourcePath: path,
+      useStabProxy: false
+    }
+  }
+
+  it('模块级缓存命中时新挂载的图层仍然拿到 src（新增轨道不能空渲染）', async () => {
+    const path = `C:/media/reuse-${++pathSeq}.mp4`
+
+    const first = render(<MediaPreviewLayer candidates={[one(path, 'reuse-a')]} fps={FPS_30} transition={null} />)
+    await waitFor(() => expect(first.container.querySelectorAll('video')).toHaveLength(1))
+    // 卸载后再用同一路径挂新实例：模拟「新建轨道 / 再次切回该段」时缓存已经命中
+    first.unmount()
+
+    const second = render(<MediaPreviewLayer candidates={[one(path, 'reuse-b')]} fps={FPS_30} transition={null} />)
+    await waitFor(() => expect(second.container.querySelectorAll('video')).toHaveLength(1))
+  })
+
+  it('两个图层同时引用同一源路径时都能挂载（在飞请求按路径共享而不是互相吞掉）', async () => {
+    const path = `C:/media/shared-${++pathSeq}.mp4`
+
+    const view = render(
+      <>
+        <MediaPreviewLayer candidates={[one(path, 'shared-a')]} fps={FPS_30} transition={null} />
+        <MediaPreviewLayer candidates={[one(path, 'shared-b')]} fps={FPS_30} transition={null} />
+      </>
+    )
+    await waitFor(() => expect(view.container.querySelectorAll('video')).toHaveLength(2))
+  })
+
+  it('同一轨道上紧邻的第二段在切点后接替显示', async () => {
+    const ref = createRef<MediaPreviewHandle>()
+    const first = clip({ id: 'seq-a', timelineStartSec: 0, timelineEndSec: 2 })
+    const second = clip({ id: 'seq-b', timelineStartSec: 2, timelineEndSec: 4 })
+    const view = render(
+      <MediaPreviewLayer
+        ref={ref}
+        candidates={[
+          { clip: first, kind: 'video', hasAudio: false, sourcePath: `C:/media/seq-a-${++pathSeq}.mp4`, useStabProxy: false },
+          { clip: second, kind: 'video', hasAudio: false, sourcePath: `C:/media/seq-b-${++pathSeq}.mp4`, useStabProxy: false }
+        ]}
+        fps={FPS_30}
+        transition={null}
+      />
+    )
+    await waitFor(() => expect(view.container.querySelectorAll('video')).toHaveLength(2))
+    for (const video of Array.from(view.container.querySelectorAll('video'))) {
+      fireEvent.loadedMetadata(video)
+      fireEvent.seeked(video)
+      fireEvent.loadedData(video)
+    }
+
+    act(() => ref.current?.tick(1.9, true))
+    expect(videoAt(view.container, 0).style.opacity).toBe('1')
+    expect(videoAt(view.container, 1).style.opacity).toBe('0')
+
+    act(() => ref.current?.tick(2.1, true))
+    expect(videoAt(view.container, 0).style.opacity).toBe('0')
+    expect(videoAt(view.container, 1).style.opacity).toBe('1')
+  })
+
+  it('上层轨道与下层轨道同时有画面时两层各自出图', async () => {
+    const bottomPath = `C:/media/bottom-${++pathSeq}.mp4`
+    const topPath = `C:/media/top-${++pathSeq}.mp4`
+    const view = render(
+      <>
+        <MediaPreviewLayer
+          candidates={[
+            {
+              clip: clip({ id: 'bottom', trackId: 'track-media-0', timelineStartSec: 0, timelineEndSec: 10 }),
+              kind: 'video',
+              hasAudio: false,
+              sourcePath: bottomPath,
+              useStabProxy: false
+            }
+          ]}
+          fps={FPS_30}
+          transition={null}
+        />
+        <MediaPreviewLayer
+          candidates={[
+            {
+              clip: clip({ id: 'top', trackId: 'track-media-1', timelineStartSec: 0, timelineEndSec: 10 }),
+              kind: 'video',
+              hasAudio: false,
+              sourcePath: topPath,
+              useStabProxy: false
+            }
+          ]}
+          fps={FPS_30}
+          transition={null}
+        />
+      </>
+    )
+    // 两个不同源并发解析：各层都要有自己的元素，不能因为共享缓存的竞态少挂一层
+    await waitFor(() => expect(view.container.querySelectorAll('video')).toHaveLength(2))
+  })
+})
+
+describe('MediaPreviewLayer 段落结束边界（叠加层收尾）', () => {
+  async function renderSingle(target: MediaClip, trackClips: MediaClip[]) {
+    const ref = createRef<MediaPreviewHandle>()
+    const view = render(
+      <MediaPreviewLayer
+        ref={ref}
+        candidates={[
+          {
+            clip: target,
+            kind: 'video',
+            hasAudio: false,
+            sourcePath: `C:/media/end-${++pathSeq}.mp4`,
+            useStabProxy: false
+          }
+        ]}
+        trackClips={trackClips}
+        fps={FPS_30}
+        transition={null}
+      />
+    )
+    await waitFor(() => expect(view.container.querySelectorAll('video')).toHaveLength(1))
+    const video = videoAt(view.container, 0)
+    fireEvent.loadedMetadata(video)
+    fireEvent.seeked(video)
+    fireEvent.loadedData(video)
+    return { ...view, ref, video }
+  }
+
+  it('轨道末端：结束帧之后立即隐藏，不再用最后一帧压住下层', async () => {
+    const a = clip({ id: 'end-a', timelineStartSec: 0, timelineEndSec: 2 })
+    const { ref, video } = await renderSingle(a, [a])
+
+    act(() => ref.current?.tick(1.9, false))
+    expect(video.style.opacity).toBe('1')
+
+    act(() => ref.current?.tick(2.05, false))
+    expect(video.style.opacity).toBe('0')
+  })
+
+  it('段后留有空隙时同样立即隐藏（空隙属于空白画面）', async () => {
+    const a = clip({ id: 'gap-a', timelineStartSec: 0, timelineEndSec: 2 })
+    const next = clip({ id: 'gap-b', timelineStartSec: 2.5, timelineEndSec: 4 })
+    const { ref, video } = await renderSingle(a, [a, next])
+
+    act(() => ref.current?.tick(1.9, false))
+    expect(video.style.opacity).toBe('1')
+
+    act(() => ref.current?.tick(2.2, false))
+    expect(video.style.opacity).toBe('0')
+  })
+
+  it('终点处紧贴下一段、但下一段还没进候选池时仍用最后一帧兜底', async () => {
+    const a = clip({ id: 'seam-a', timelineStartSec: 0, timelineEndSec: 2 })
+    const b = clip({ id: 'seam-b', timelineStartSec: 2, timelineEndSec: 4 })
+    // 候选池只因上限被裁剪成 [a]；轨道数据里 b 紧贴 a 的终点，属于真正的缝口
+    const { ref, video } = await renderSingle(a, [a, b])
+
+    act(() => ref.current?.tick(2.05, false))
+    expect(video.style.opacity).toBe('1')
   })
 })
 

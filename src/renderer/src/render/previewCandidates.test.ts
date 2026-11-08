@@ -5,7 +5,9 @@ import {
   PREVIEW_LOOKAHEAD_SEC,
   PREVIEW_MAX_CANDIDATES,
   PREVIEW_PREROLL_SEC,
+  hasSeamSuccessor,
   isClipActiveAt,
+  latestEndedClip,
   previewClipStartSourceTime,
   previewPrerollTarget,
   previewSourceTimeAt,
@@ -252,6 +254,23 @@ describe('previewTransitionSourceTime（转场手柄）', () => {
 
     expect(previewTransitionSourceTime(c, 10)).toBe(5)
     expect(previewTransitionSourceTime(c, 9.8)).toBeCloseTo(4.6, 9)
+  })
+})
+
+describe('latestEndedClip / hasSeamSuccessor（最后一帧兜底的边界）', () => {
+  const a = clip('a', 0, 2)
+  const b = clip('b', 2, 4)
+
+  it('latestEndedClip 只认最近结束的一段（更早的段不能重新冒出来）', () => {
+    expect(latestEndedClip([a, b], 1.5)).toBeNull()
+    expect(latestEndedClip([a, b], 2.05)?.id).toBe('a')
+    expect(latestEndedClip([a, b], 4.05)?.id).toBe('b')
+  })
+
+  it('hasSeamSuccessor 只认终点处紧贴的下一段：段后空隙 / 轨道末端都不算', () => {
+    expect(hasSeamSuccessor(a, [a, b])).toBe(true)
+    expect(hasSeamSuccessor(b, [a, b])).toBe(false)
+    expect(hasSeamSuccessor(a, [a, clip('gap', 2.5, 4)])).toBe(false)
   })
 })
 

@@ -205,6 +205,33 @@ export function previewClipStartSourceTime(clip: MediaClip, useStabProxy: boolea
 }
 
 /**
+ * 最近一个已经结束的片段（终点 <= atSec）。
+ * 「最后一帧兜底」只能由它来做：更早结束的段即便还在候选池的 hold 窗口里，
+ * 也不能在更晚的段结束之后重新冒出来。
+ */
+export function latestEndedClip(clips: readonly MediaClip[], atSec: number): MediaClip | null {
+  let latest: MediaClip | null = null
+  for (const clip of clips) {
+    if (clip.timelineEndSec > atSec + EPS) continue
+    if (latest === null || clip.timelineEndSec > latest.timelineEndSec) latest = clip
+  }
+  return latest
+}
+
+/**
+ * 该片段终点处是否紧贴着同轨的下一段（剪辑缝口）。
+ *
+ * 只有这种缝口才允许拿上一段最后一帧顶住画面、等下一段就绪；轨道真正结束
+ * （末端 / 段后空隙）时必须立即隐藏，否则上层轨道的最后一帧会多压住下层半秒，
+ * 看起来像「叠加层结束后还赖着不走」。
+ */
+export function hasSeamSuccessor(clip: MediaClip, clips: readonly MediaClip[]): boolean {
+  return clips.some(
+    (other) => other.id !== clip.id && Math.abs(other.timelineStartSec - clip.timelineEndSec) < 1e-6
+  )
+}
+
+/**
  * 预卷目标：切点前 `remaining` 秒开始，从 `start - remaining × speed` 静音播放，
  * 到切点时 `currentTime` 正好等于入点。
  *
