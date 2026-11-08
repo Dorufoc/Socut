@@ -57,6 +57,8 @@ export class TextMeasurer {
   private readonly raw = createMeasureContext()
   private readonly cache = new Map<string, MeasuredText>()
   private readonly wrapCache = new Map<string, { lines: string[]; truncated: boolean }>()
+  /** 单字宽度缓存：绘制侧逐字调 widthOf（layers.drawText），不缓存就是每帧 N 次 measureText */
+  private readonly widthCache = new Map<string, number>()
   private lastFont = ''
   private lastTracking = ''
 
@@ -159,7 +161,15 @@ export class TextMeasurer {
   }
 
   widthOf(text: string, font: FontSpec): number {
-    return this.rawWidth(text, font)
+    // 键包含全部影响字形度量的输入（字体串 + 字距 + 文本）；结果与 rawWidth 完全相同
+    const key = `${font.family}|${font.weight}|${font.sizePx}|${font.trackingPx}|${text}`
+    const hit = this.widthCache.get(key)
+    if (hit !== undefined) return hit
+    const width = this.rawWidth(text, font)
+    // 与 measure/wrap 缓存同一策略：满了一整批丢弃，避免无界增长
+    if (this.widthCache.size > 8000) this.widthCache.clear()
+    this.widthCache.set(key, width)
+    return width
   }
 
   /**
@@ -210,6 +220,7 @@ export class TextMeasurer {
   clearCache(): void {
     this.cache.clear()
     this.wrapCache.clear()
+    this.widthCache.clear()
     this.lastFont = ''
   }
 }

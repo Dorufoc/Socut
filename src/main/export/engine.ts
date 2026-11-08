@@ -7,6 +7,7 @@ import { TEXT } from '../../shared/i18n'
 import type {
   ExportRequest,
   JobErrorInfo,
+  JobProgress,
   JobResult,
   SizeEstimate,
   TransparentCodec
@@ -32,10 +33,17 @@ import { verifyOverlayMp4, verifyTransparentMov } from './verify'
 /** 导出任务编排（规格 §4.2 主进程职责：任务队列、取消、临时目录清理、进度回传）。 */
 
 const PROGRESS_THROTTLE_MS = 100
+/** 控制面查询用的历史上限；超出按插入顺序淘汰最旧的一条。 */
+const JOB_SNAPSHOT_LIMIT = 50
 
 interface Pending {
   request: ExportRequest
   windowId: number
+}
+
+export interface EngineJobSnapshot {
+  progress: JobProgress
+  result: JobResult | null
 }
 
 export class ExportEngine {
@@ -43,6 +51,10 @@ export class ExportEngine {
   private readonly queue: Pending[] = []
   private runningId: string | null = null
   private readonly channels = new Map<string, FrameChannelHandle>()
+  /** CLI/控制面查询用：最近一次进度快照（任务结束后 registry 会移除，快照仍保留）。 */
+  private readonly snapshots = new Map<string, JobProgress>()
+  /** 终态结果（成功/失败/取消），供 `export.status` 在完成后仍能查到原因。 */
+  private readonly results = new Map<string, JobResult>()
 
   async estimate(input: EstimateInput): Promise<SizeEstimate> {
     const freeBytes = await diskFreeBytes(input.outputDir)
@@ -65,6 +77,8 @@ export class ExportEngine {
       framesTotal,
       framesTotal * frameIntervalSec(request.frameSpec.fps)
     )
+    const created = this.registry.get(request.jobId)
+    if (created) this.remember(created)
     this.queue.push({ request, windowId: window.id })
     void this.drain()
     return { jobId: request.jobId }
@@ -87,6 +101,22 @@ export class ExportEngine {
 
   activeJobs(): JobState[] {
     return this.registry.active()
+  }
+
+  /** 单个任务的最新进度 / 终态结果（未知任务返回 null）。 */
+  jobStatus(jobId: string): EngineJobSnapshot | null {
+    const progress = this.snapshots.get(jobId)
+    const result = this.results.get(jobId) ?? null
+    if (!progress && !result) return null
+    return { progress: progress ?? result!.progress, result }
+  }
+
+  /** 本次进程内见过的任务（含已结束），按开始时间从旧到新。 */
+  listJobs(): EngineJobSnapshot[] {
+    const ids = new Set<string>([...this.snapshots.keys(), ...this.results.keys()])
+    return [...ids]
+      .map((id) => this.jobStatus(id))
+      .filter((item): item is EngineJobSnapshot => item !== null)
   }
 
   /** 应用退出前调用：取消所有排队任务并断开帧通道。 */
@@ -405,8 +435,20 @@ export class ExportEngine {
       const terminal = state.framesDone >= state.framesTotal
       if (now - last < PROGRESS_THROTTLE_MS && !terminal) return
       last = now
+      this.remember(state)
       emitProgress(this.windowOf(state.windowId), state)
     }
+  }
+
+  /** 记录进度快照（节流由调用方保证；终态也会走到这里）。 */
+  private remember(state: JobState): void {
+    this.snapshots.set(state.id, toProgress(state))
+    trimOldest(this.snapshots, JOB_SNAPSHOT_LIMIT)
+  }
+
+  private rememberResult(result: JobResult): void {
+    this.results.set(result.jobId, result)
+    trimOldest(this.results, JOB_SNAPSHOT_LIMIT)
   }
 
   /** 输出路径：MOV/MP4 为文件，PNG 出口为目录。 */
@@ -432,6 +474,7 @@ export class ExportEngine {
       progress: toProgress(state)
     }
     emitResult(this.windowOf(state.windowId), result)
+    this.rememberResult(result)
     await log('info', `任务 ${state.id} 完成：${state.outputs.join(', ')}`)
     this.registry.remove(state.id)
     void request
@@ -448,6 +491,7 @@ export class ExportEngine {
       progress: toProgress(state)
     }
     emitResult(this.windowOf(state.windowId), result)
+    this.rememberResult(result)
     this.registry.remove(state.id)
     void request
   }
@@ -462,8 +506,18 @@ export class ExportEngine {
       progress: toProgress(state)
     }
     emitResult(this.windowOf(state.windowId), result)
+    this.rememberResult(result)
     this.registry.remove(state.id)
     void request
+  }
+}
+
+/** Map 按插入顺序淘汰；只用于进度/结果缓存，不影响运行中的任务对象。 */
+function trimOldest<K, V>(map: Map<K, V>, limit: number): void {
+  while (map.size > limit) {
+    const oldest = map.keys().next().value as K | undefined
+    if (oldest === undefined) return
+    map.delete(oldest)
   }
 }
 

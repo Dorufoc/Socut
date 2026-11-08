@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRef } from 'react'
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { DEFAULT_MEDIA_TRACK_ID, FPS_30 } from '@shared/constants'
@@ -6,7 +6,8 @@ import { defaultMediaVideo } from '@shared/mediaClipVideo'
 import type { MediaClip } from '@shared/types'
 import type { PreviewCandidate } from '../render/previewCandidates'
 import type { PreviewTransitionState } from '../render/previewTransition'
-import { MediaPreviewLayer, type MediaPreviewHandle } from './MediaPreviewLayer'
+import { previewPerf, resetPreviewPerf } from '../render/previewPerf'
+import { MediaPreviewLayer, shouldRefreshPreviewUrl, type MediaPreviewHandle } from './MediaPreviewLayer'
 
 /**
  * 转场预览的 DOM 纪律（v10 Task 6）：
@@ -70,6 +71,10 @@ function state(over: Partial<PreviewTransitionState> = {}): PreviewTransitionSta
 
 let originalPlay: typeof HTMLMediaElement.prototype.play
 let originalPause: typeof HTMLMediaElement.prototype.pause
+let originalSeeking: PropertyDescriptor | undefined
+
+/** 可控的在飞 seek 标记：测试里直接 `video.__seeking = true` 模拟 seek 未完成。 */
+type SeekingHook = HTMLVideoElement & { __seeking?: boolean }
 
 beforeAll(() => {
   // jsdom 没有媒体解码：把 readyState / currentTime 变成可控的简单属性
@@ -86,6 +91,14 @@ beforeAll(() => {
       (this as unknown as { __ct?: number }).__ct = value
     }
   })
+  // seek 合并器要读 video.seeking：用可配置的桩替代 jsdom 的只读实现，afterAll 还原
+  originalSeeking = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'seeking')
+  Object.defineProperty(HTMLMediaElement.prototype, 'seeking', {
+    configurable: true,
+    get(this: HTMLMediaElement) {
+      return (this as unknown as SeekingHook).__seeking === true
+    }
+  })
   originalPlay = HTMLMediaElement.prototype.play
   originalPause = HTMLMediaElement.prototype.pause
   HTMLMediaElement.prototype.play = vi.fn(() => Promise.resolve())
@@ -100,15 +113,31 @@ beforeAll(() => {
 afterAll(() => {
   HTMLMediaElement.prototype.play = originalPlay
   HTMLMediaElement.prototype.pause = originalPause
+  if (originalSeeking) {
+    Object.defineProperty(HTMLMediaElement.prototype, 'seeking', originalSeeking)
+  } else {
+    delete (HTMLMediaElement.prototype as unknown as { seeking?: unknown }).seeking
+  }
   delete (window as unknown as { focusnews?: unknown }).focusnews
 })
 
+beforeEach(() => resetPreviewPerf())
+
 afterEach(() => cleanup())
 
-async function renderLayer(transition: PreviewTransitionState | null) {
+async function renderLayer(
+  transition: PreviewTransitionState | null,
+  transitionResolver?: (atSec: number) => PreviewTransitionState | null
+) {
   const ref = createRef<MediaPreviewHandle>()
   const view = render(
-    <MediaPreviewLayer ref={ref} candidates={candidates()} fps={FPS_30} transition={transition} />
+    <MediaPreviewLayer
+      ref={ref}
+      candidates={candidates()}
+      fps={FPS_30}
+      transition={transition}
+      transitionResolver={transitionResolver}
+    />
   )
   await waitFor(() => expect(view.container.querySelectorAll('video')).toHaveLength(2))
   const videos = Array.from(view.container.querySelectorAll('video'))
@@ -135,6 +164,20 @@ describe('MediaPreviewLayer 转场', () => {
     act(() => ref.current?.tick(2, false))
     expect(videoAt(container, 0).style.opacity).toBe('0.5')
     expect(videoAt(container, 1).style.opacity).toBe('0.5')
+  })
+
+  it('transitionResolver 返回窗口内状态时两层交叉淡化生效（按实时 tick 时间现算）', async () => {
+    const resolver = (atSec: number) => (atSec >= 1.75 && atSec <= 2.25 ? state() : null)
+    const { container, ref } = await renderLayer(null, resolver)
+
+    act(() => ref.current?.tick(2, false))
+    expect(videoAt(container, 0).style.opacity).toBe('0.5')
+    expect(videoAt(container, 1).style.opacity).toBe('0.5')
+
+    // 窗口外 resolver 返回 null：回到单层可见，右侧（当前活动段）不透明
+    act(() => ref.current?.tick(2.6, false))
+    expect(videoAt(container, 0).style.opacity).toBe('0')
+    expect(videoAt(container, 1).style.opacity).toBe('1')
   })
 
   it('风感把转场位移叠加在片段基座 transform 之后', async () => {
@@ -211,5 +254,149 @@ describe('MediaPreviewLayer 转场', () => {
     expect(view.container.querySelectorAll('video')[0]!.style.transform).toBe('scale(1.2)')
     expect(view.container.querySelectorAll('video')[0]!.style.opacity).toBe('0')
     expect(view.container.querySelectorAll('video')[1]!.style.opacity).toBe('1')
+  })
+})
+
+describe('MediaPreviewLayer 切点与循环重启（Task 4）', () => {
+  it('restart() 把每个候选送回各自入点，并还原转场样式与色块', async () => {
+    const { container, ref } = await renderLayer(state({ type: 'windLeft' }))
+    const flash = container.querySelector('.stage__transition-flash') as HTMLElement
+
+    act(() => ref.current?.tick(2, false))
+    // 先确认确实进了转场：位移与 zIndex 都是转场增量
+    expect(videoAt(container, 0).style.transform).toBe('translate(-87.5%, 0%)')
+    expect(videoAt(container, 1).style.zIndex).toBe('2')
+
+    act(() => ref.current?.restart())
+    // jsdom 没有 duration，钳制退化成 target - 1ms（与 `seekVideo` 同口径），所以只比到 0.01
+    expect(videoAt(container, 0).currentTime).toBeCloseTo(0.5, 2)
+    expect(videoAt(container, 1).currentTime).toBeCloseTo(1, 2)
+    expect(videoAt(container, 0).style.transform).toBe('')
+    expect(videoAt(container, 0).style.filter).toBe('')
+    expect(videoAt(container, 1).style.transform).toBe('')
+    expect(videoAt(container, 1).style.zIndex).toBe('')
+    expect(flash.style.opacity).toBe('0')
+  })
+
+  it('切点目标未就绪时停在上一段，就绪后同一时刻切过去', async () => {
+    const ref = createRef<MediaPreviewHandle>()
+    const view = render(
+      <MediaPreviewLayer ref={ref} candidates={candidates()} fps={FPS_30} transition={null} />
+    )
+    await waitFor(() => expect(view.container.querySelectorAll('video')).toHaveLength(2))
+    const videos = Array.from(view.container.querySelectorAll('video'))
+
+    // 只让 left（前段）就绪：right 不发任何加载事件
+    fireEvent.loadedMetadata(videos[0]!)
+    fireEvent.seeked(videos[0]!)
+    fireEvent.loadedData(videos[0]!)
+
+    act(() => ref.current?.tick(2.1, true))
+    expect(videos[1]!.style.opacity).toBe('0')
+    expect(videos[0]!.style.opacity).toBe('1')
+    // 画面停在已结束的兜底段 = 一次迟到切换
+    expect(previewPerf.lateSwitches).toBe(1)
+
+    fireEvent.loadedMetadata(videos[1]!)
+    fireEvent.seeked(videos[1]!)
+    fireEvent.loadedData(videos[1]!)
+
+    act(() => ref.current?.tick(2.1, true))
+    expect(videos[1]!.style.opacity).toBe('1')
+    expect(videos[0]!.style.opacity).toBe('0')
+  })
+
+  it('seek 合并：在飞期间只换目标，seeked 后落到最后一次目标', async () => {
+    const { container, ref } = await renderLayer(null)
+    const rightVideo = videoAt(container, 1) as SeekingHook
+    // 挂载阶段 primeVideo 已经各发过一次 seek，这里只看 tick 之后的增量
+    const baseRequests = previewPerf.seekRequests
+    const baseCoalesced = previewPerf.seekCoalesced
+
+    act(() => ref.current?.tick(2.1, true))
+    // 首次进入活动段：强制对齐到 1 + (2.1 - 2) = 1.1
+    expect(rightVideo.currentTime).toBeCloseTo(1.1, 2)
+    expect(previewPerf.seekRequests).toBe(baseRequests + 1)
+
+    // 模拟一次在飞 seek：之后的连续 tick 只能合并目标
+    rightVideo.__seeking = true
+    act(() => ref.current?.tick(2.4, true))
+    act(() => ref.current?.tick(2.6, true))
+    expect(previewPerf.seekRequests).toBe(baseRequests + 1)
+    expect(previewPerf.seekCoalesced).toBeGreaterThanOrEqual(baseCoalesced + 2)
+
+    rightVideo.__seeking = false
+    fireEvent.seeked(rightVideo)
+    expect(rightVideo.currentTime).toBeCloseTo(1.6, 2)
+  })
+})
+
+describe('MediaPreviewLayer 回绕预对齐（Task 8）', () => {
+  const head = clip({
+    id: 'head',
+    timelineStartSec: 0,
+    timelineEndSec: 2,
+    sourceInSec: 0.5,
+    sourceOutSec: 2.5
+  })
+
+  /** 只挂头部片段：loopDurationSec 缺省时不启用回绕前瞻。 */
+  async function renderHead(loopDurationSec?: number) {
+    const ref = createRef<MediaPreviewHandle>()
+    const view = render(
+      <MediaPreviewLayer
+        ref={ref}
+        candidates={[
+          {
+            clip: head,
+            kind: 'video',
+            hasAudio: true,
+            sourcePath: `C:/media/head-${++pathSeq}.mp4`,
+            useStabProxy: false
+          }
+        ]}
+        fps={FPS_30}
+        transition={null}
+        loopDurationSec={loopDurationSec}
+      />
+    )
+    await waitFor(() => expect(view.container.querySelectorAll('video')).toHaveLength(1))
+    const video = videoAt(view.container, 0)
+    fireEvent.loadedMetadata(video)
+    fireEvent.seeked(video)
+    fireEvent.loadedData(video)
+    return { ...view, ref, video }
+  }
+
+  it('回绕前瞻窗口内把「已结束」的头部片段送回入点', async () => {
+    const { ref, video } = await renderHead(12)
+    // 模拟本轮已播到片段末尾
+    video.currentTime = 2
+
+    act(() => ref.current?.tick(11.5, false))
+    // jsdom 无 duration，钳制保留 1ms 余量，按两位小数比较
+    expect(video.currentTime).toBeCloseTo(0.5, 2)
+  })
+
+  it('loopDurationSec = 0（不循环）时保持旧行为：停在最后一帧', async () => {
+    const { ref, video } = await renderHead()
+    video.currentTime = 2
+
+    act(() => ref.current?.tick(11.5, false))
+    expect(video.currentTime).toBe(2)
+  })
+})
+
+describe('shouldRefreshPreviewUrl（Task 8：URL 版本刷新）', () => {
+  it('没有缓存条目时必须刷新', () => {
+    expect(shouldRefreshPreviewUrl(undefined, 100)).toBe(true)
+  })
+
+  it('TTL 内不刷新', () => {
+    expect(shouldRefreshPreviewUrl({ fetchedAt: 100 }, 100 + 4_999, 5_000)).toBe(false)
+  })
+
+  it('TTL 外刷新', () => {
+    expect(shouldRefreshPreviewUrl({ fetchedAt: 100 }, 100 + 5_000, 5_000)).toBe(true)
   })
 })

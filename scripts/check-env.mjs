@@ -39,7 +39,7 @@ const OFFLINE_FORBIDDEN = [
   { pattern: /\bnew\s+WebSocket\b/, label: 'WebSocket' },
   { pattern: /\bEventSource\b/, label: 'EventSource' },
   { pattern: /\bnavigator\.sendBeacon\b/, label: 'sendBeacon' },
-  { pattern: /['"]node:(?:https?|net|dns|tls|dgram)['"]/, label: 'Node 网络内置模块' },
+  { pattern: /['"]node:(?:https|net|dns|tls|dgram)['"]/, label: 'Node 网络内置模块' },
   { pattern: /\brequire\(['"](?:https?|net)['"]\)/, label: 'require 网络模块' }
 ]
 

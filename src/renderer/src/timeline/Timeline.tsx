@@ -25,10 +25,10 @@ import { TEXT } from '@shared/i18n'
 import { timelineContentEndSec } from '@shared/presetResolver'
 import { clipsOnAudioTrack, clipsOnMediaTrack, isTrackLocked } from '@shared/tracks'
 import { TRANSITION_MAP, previousMediaClipOnTrack, resolveTransitionDuration, transitionMediaMetaOf } from '@shared/transitions'
-import type { AudioTrack, MediaClip, MediaTrack } from '@shared/types'
+import type { AudioTrack, Fps, MediaClip, MediaTrack } from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
 import { useHistoryStore } from '../state/projectHistory'
-import { useUiStore } from '../state/uiStore'
+import { useUiStore, type UiState } from '../state/uiStore'
 import { IconRedo, IconUndo } from '../components/ui/Icon'
 import { ClipCard } from './ClipCard'
 import { MediaClipCard } from './MediaClipCard'
@@ -38,6 +38,7 @@ import { mediaKindOf } from '@shared/audioClips'
 import { MEDIA_DRAG_MIME } from '../panels/MediaLibraryPanel'
 import { buildTicks, pickStep, secToPx } from './ruler'
 import { laneBoxOf, secAtClientX } from './lane'
+import { previewPerf } from '../render/previewPerf'
 
 /**
  * 时间轴（v3 多轨）：
@@ -90,6 +91,7 @@ function trackIdAtClientY(container: Element | null, selector: string, clientY: 
 }
 
 export function Timeline({ seekTo }: TimelineProps): ReactElement {
+  previewPerf.timelineRenders += 1
   const project = useProjectStore((state) => state.project)
   const selectedClipId = useProjectStore((state) => state.selectedClipId)
   const selectClip = useProjectStore((state) => state.selectClip)
@@ -152,9 +154,12 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const dragEdgesRef = useRef<number[] | null>(null)
   // 缩放锚点：比例尺变更后要把这个时间点放回鼠标下面
   const pendingAnchorRef = useRef<{ sec: number; localX: number } | null>(null)
-  // 预览轴：悬停帧存在 uiStore 里（预览画面要跟着它走）；null = 没有悬停或正在播放
-  const hoverSec = useUiStore((state) => state.hoverPreviewSec)
+  // 预览轴：悬停帧存在 uiStore 里（预览画面要跟着它走）；null = 没有悬停或正在播放。
+  // Timeline 本身不订阅它（否则鼠标每换一帧就整条时间轴重渲染），
+  // 黄线由内部 `HoverGuide`、根类名由下面的 store 订阅命令式维护。
   const setHoverPreview = useUiStore((state) => state.setHoverPreview)
+  /** 时间轴根节点：`timeline--hover-preview` 类直接切 DOM，不走 React */
+  const rootRef = useRef<HTMLDivElement | null>(null)
 
   // ---------------------------------------------------------------- 比例尺与轨道长度
 
@@ -513,44 +518,37 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   }
 
   const endHover = (): void => {
-    if (hoverSec === null) return
+    if (useUiStore.getState().hoverPreviewSec === null) return
     setHoverPreview(null)
   }
 
+  /**
+   * 根类名与「播放开始/关闭预览轴时立刻清掉悬停」都走 store 订阅：
+   * 这两件事只看 hoverPreviewSec / playing / tools，但都不需要让 Timeline 重渲染。
+   * 清空悬停后条件不再成立，所以订阅回调不会互相触发成死循环。
+   */
   useEffect(() => {
-    // 关掉预览轴或开始播放：立刻把黄线与接管态收起，不用等鼠标移出
-    if (tools.hoverPreview && !playing) return
-    if (hoverSec === null) return
-    setHoverPreview(null)
-  }, [tools.hoverPreview, playing, hoverSec, setHoverPreview])
+    const apply = (state: UiState): void => {
+      rootRef.current?.classList.toggle(
+        'timeline--hover-preview',
+        state.hoverPreviewSec !== null && state.timelineTools.hoverPreview && !state.playing
+      )
+      if ((state.playing || !state.timelineTools.hoverPreview) && state.hoverPreviewSec !== null) {
+        state.setHoverPreview(null)
+      }
+    }
+    apply(useUiStore.getState())
+    return useUiStore.subscribe(apply)
+  }, [])
 
-  const hoverActive = tools.hoverPreview && !playing && hoverSec !== null
-  /** 预览与拆分都看黄线指的地方；黄线不在时才回到蓝线 */
-  const operateSec = hoverActive && hoverSec !== null ? hoverSec : displayTime
-
-  /** 全宽导引线：吸附目标边缘（强调蓝）+ 预览轴（黄）。挂在整块轨道内容上，跨所有行。 */
-  const guides = (
-    <>
-      {snapGuideSec !== null ? (
-        <div
-          className="timeline__snap-line"
-          style={{ left: LANE_GUTTER_PX + secToPx(snapGuideSec, spanSec, widthPx) }}
-        />
-      ) : null}
-      {hoverActive ? (
-        <div
-          className="timeline__hover-line"
-          style={{ left: LANE_GUTTER_PX + secToPx(Math.min(hoverSec ?? 0, spanSec), spanSec, widthPx) }}
-        >
-          <span className="timeline__hover-tag mono">{secondsToTimecode(hoverSec ?? 0, project.fps)}</span>
-        </div>
-      ) : null}
-    </>
-  )
-
-  /** 播放头位置：夹在内容末尾之内（轨道可以更长） */
-  const playheadLeft = secToPx(Math.min(displayTime, contentEndSec), spanSec, widthPx)
-
+  /** 全宽导引线：吸附目标边缘（强调蓝）。黄线由 `HoverGuide` 单独渲染，避免它拖着整条轨道重渲染。 */
+  const guides =
+    snapGuideSec !== null ? (
+      <div
+        className="timeline__snap-line"
+        style={{ left: LANE_GUTTER_PX + secToPx(snapGuideSec, spanSec, widthPx) }}
+      />
+    ) : null
   const dropIndicator = (sec: number): ReactElement => (
     <div
       className="timeline__drop-indicator"
@@ -597,7 +595,8 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
 
   return (
     <div
-      className={`timeline${hoverActive ? ' timeline--hover-preview' : ''}`}
+      ref={rootRef}
+      className="timeline"
       onPointerMove={onHoverMove}
       onPointerLeave={endHover}
       onPointerUp={() => setSnapGuideSec(null)}
@@ -631,7 +630,13 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             className="btn btn--sm"
             title={TEXT.timeline.splitHint}
             onClick={() => {
-              if (!splitTargetAt(operateSec)) setNotice(TEXT.timeline.noSplitTarget)
+              // 落点在点击时现读：预览轴开着且指针停在黄线上就以黄线为准，否则用蓝线
+              const s = useUiStore.getState()
+              const atSec =
+                s.timelineTools.hoverPreview && !s.playing && s.hoverPreviewSec !== null
+                  ? s.hoverPreviewSec
+                  : s.displayTimeSec
+              if (!splitTargetAt(atSec)) setNotice(TEXT.timeline.noSplitTarget)
             }}
           >
             {TEXT.timeline.splitClip}
@@ -923,14 +928,63 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
           })}
 
           {guides}
+          {/* 预览轴黄线：单独订阅 hoverPreviewSec，只有这 2 个节点随悬停换帧重渲染 */}
+          <HoverGuide spanSec={spanSec} widthPx={widthPx} fps={project.fps} />
 
-          {/* 播放头：位置夹在内容末尾之内 */}
-          <div
-            className={`timeline__playhead timeline__playhead--rows${scrubbing ? ' timeline__playhead--scrubbing' : ''}`}
-            style={{ left: LANE_GUTTER_PX + playheadLeft }}
-          />
+          {/* 播放头：帧级位置单独订阅 playheadSec，位置夹在内容末尾之内 */}
+          <Playhead spanSec={spanSec} widthPx={widthPx} contentEndSec={contentEndSec} scrubbing={scrubbing} />
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * 预览轴黄线（P4）。
+ * 只订阅 `hoverPreviewSec`：鼠标每换一帧只重渲染这两个节点，`Timeline` 自身不重渲染。
+ * null = 没有悬停 / 正在播放 / 预览轴关闭，元素整体不存在（既有测试也依赖这一点）。
+ */
+function HoverGuide({
+  spanSec,
+  widthPx,
+  fps
+}: {
+  spanSec: number
+  widthPx: number
+  fps: Fps
+}): ReactElement | null {
+  const sec = useUiStore((state) => state.hoverPreviewSec)
+  if (sec === null) return null
+  return (
+    <div
+      className="timeline__hover-line"
+      style={{ left: LANE_GUTTER_PX + secToPx(Math.min(sec, spanSec), spanSec, widthPx) }}
+    >
+      <span className="timeline__hover-tag mono">{secondsToTimecode(sec, fps)}</span>
+    </div>
+  )
+}
+
+/**
+ * 蓝线（帧级播放头）。
+ * 只订阅 `playheadSec`：播放时由预览循环逐帧写入，不会再被 10Hz 的 `displayTimeSec` 拖慢。
+ */
+function Playhead({
+  spanSec,
+  widthPx,
+  contentEndSec,
+  scrubbing
+}: {
+  spanSec: number
+  widthPx: number
+  contentEndSec: number
+  scrubbing: boolean
+}): ReactElement {
+  const sec = useUiStore((state) => state.playheadSec)
+  return (
+    <div
+      className={`timeline__playhead timeline__playhead--rows${scrubbing ? ' timeline__playhead--scrubbing' : ''}`}
+      style={{ left: LANE_GUTTER_PX + secToPx(Math.min(sec, contentEndSec), spanSec, widthPx) }}
+    />
   )
 }

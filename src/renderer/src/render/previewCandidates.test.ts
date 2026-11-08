@@ -114,6 +114,69 @@ describe('selectPreviewCandidates', () => {
     expect(selectPreviewCandidates(tracks, 2, oneTrack).map((c) => c.id)).toEqual(['b', 'a'])
   })
 
+  it('多轨 + 多 hold 时，即将开始的段不会被兜底段挤出候选池', () => {
+    const order = trackOrder('track-media-0', 'track-media-1')
+    const tracks = [
+      clip('bottom', 4, 10, { trackId: 'track-media-0' }),
+      clip('top', 4, 10, { trackId: 'track-media-1' }),
+      clip('hold-late', 3.9, 4.1),
+      clip('hold-early', 3.8, 4.0),
+      clip('next', 4.5, 6)
+    ]
+
+    // 上限 4：两个活动层 + upcoming 之后只剩 1 个名额，保留结束更近的 hold
+    expect(selectPreviewCandidates(tracks, 4.2, order).map((c) => c.id)).toEqual([
+      'bottom',
+      'top',
+      'next',
+      'hold-late'
+    ])
+  })
+
+  it('候选上限只裁剪 held：更早结束的段先被丢弃', () => {
+    const order = trackOrder('track-media-0', 'track-media-1')
+    const tracks = [
+      clip('bottom', 4, 10, { trackId: 'track-media-0' }),
+      clip('top', 4, 10, { trackId: 'track-media-1' }),
+      clip('hold-a', 3.9, 4.1),
+      clip('hold-b', 3.85, 4.05),
+      clip('hold-c', 3.8, 4.0)
+    ]
+
+    expect(selectPreviewCandidates(tracks, 4.2, order).map((c) => c.id)).toEqual([
+      'bottom',
+      'top',
+      'hold-a',
+      'hold-b'
+    ])
+  })
+
+  it('回绕前瞻：d + s <= 前瞻窗口才纳入，窗口外不挂', () => {
+    const loop = 10
+    const head = clip('head', 0.5, 1.5)
+    // 距回绕 1.5s：1.5 + 0.5 = 2.0 正好在前瞻窗口边界
+    expect(
+      selectPreviewCandidates([head], 8.5, oneTrack, undefined, { loopDurationSec: loop }).map((c) => c.id)
+    ).toEqual(['head'])
+    // 再早 0.1s（d = 1.6）就超出窗口
+    expect(selectPreviewCandidates([head], 8.4, oneTrack, undefined, { loopDurationSec: loop })).toEqual([])
+
+    const zero = clip('zero', 0, 1)
+    expect(
+      selectPreviewCandidates([zero], 8, oneTrack, undefined, { loopDurationSec: loop }).map((c) => c.id)
+    ).toEqual(['zero'])
+    expect(selectPreviewCandidates([zero], 7.99, oneTrack, undefined, { loopDurationSec: loop })).toEqual([])
+  })
+
+  it('回绕候选排在本轮末尾即将开始的段之后（按有效起点升序）', () => {
+    const loop = 10
+    const tracks = [clip('tail', 9.2, 9.6), clip('head-a', 0.5, 1), clip('head-b', 0.8, 1.2)]
+
+    expect(
+      selectPreviewCandidates(tracks, 8.9, oneTrack, undefined, { loopDurationSec: loop }).map((c) => c.id)
+    ).toEqual(['tail', 'head-a', 'head-b'])
+  })
+
   it('转场窗口两侧强制保留：左侧超过 hold 仍为右侧的转场候选', () => {
     const prev = clip('prev', 0, 2, { sourceInSec: 0, sourceOutSec: 2 })
     // 右侧 sourceIn 1s → 最大转场 1.5s，窗口到 2.75s

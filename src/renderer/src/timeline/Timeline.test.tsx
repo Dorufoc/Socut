@@ -11,6 +11,7 @@ import { Timeline } from './Timeline'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 import { attachProjectHistory } from '../state/projectHistory'
+import { previewPerf, resetPreviewPerf } from '../render/previewPerf'
 
 /**
  * 时间轴交互契约（v2 双轨）：
@@ -78,7 +79,7 @@ afterEach(() => {
   cleanup()
   act(() => {
     useProjectStore.setState({ project: createDefaultProject('空'), selectedClipId: null, fonts: [] })
-    useUiStore.setState({ playing: false, displayTimeSec: 0, notice: null, timelineZoom: 1 })
+    useUiStore.setState({ playing: false, displayTimeSec: 0, playheadSec: 0, notice: null, timelineZoom: 1 })
     useUiStore.setState({ timelineTools: { snapTogether: false, magneticSnap: false, hoverPreview: false } })
   })
 })
@@ -612,6 +613,30 @@ describe('时间轴工具栏', () => {
     expect(clips.some((clip) => Math.abs(clip.timelineStartSec - 6) < 0.05)).toBe(true)
     // 拆分没有顺手把播放头推走
     expect(useUiStore.getState().displayTimeSec).toBe(3)
+  })
+
+  it('预览轴横移不重渲染时间轴：黄线只换 2 个节点，状态与时间码跟得上', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+    fireEvent.click(toolButton(root, TEXT.timeline.hoverPreview))
+    const timelineEl = root.querySelector('.timeline') as HTMLElement
+
+    resetPreviewPerf()
+    const baseline = previewPerf.timelineRenders
+
+    // 连续 10 次横移（每次都落在不同的帧上，覆盖 100~640px）
+    const positions = [100, 160, 220, 280, 340, 400, 460, 520, 580, 640]
+    for (const clientX of positions) {
+      fireEvent.pointerMove(timelineEl, { pointerId: 7, pointerType: 'mouse', clientX })
+    }
+
+    const lastSec = snapTimeToFrame(timeAtPx(positions[positions.length - 1]!), FPS_30)
+    // Timeline 自身 0 次重渲染（黄线是内部 HoverGuide 的局部渲染）
+    expect(previewPerf.timelineRenders).toBe(baseline)
+    expect(useUiStore.getState().hoverPreviewSec).toBe(lastSec)
+    expect((root.querySelector('.timeline__hover-tag') as HTMLElement).textContent).toBe(
+      secondsToTimecode(lastSec, FPS_30)
+    )
   })
 })
 

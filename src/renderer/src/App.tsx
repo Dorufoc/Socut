@@ -110,6 +110,7 @@ export function App(): ReactElement {
    */
   const stageRef = useRef<StageSeekHandle | null>(null)
   const setDisplayTime = useUiStore((state) => state.setDisplayTime)
+  const setPlayheadSec = useUiStore((state) => state.setPlayheadSec)
   const seekTo = useCallback(
     (sec: number): void => {
       // 播放头不是「无限长」的：最多到最后一个媒体/字幕/音频段的末尾（空工程 = 0s）。
@@ -119,8 +120,10 @@ export function App(): ReactElement {
       stageRef.current?.seekTime(clamped)
       // 拖拽刮擦时同步 UI 时间文本：预览循环是节流的，不等它才能让时间码/播放头即刻跟随
       setDisplayTime(clamped)
+      // 帧级蓝线也要立刻跟上（播放时由预览循环逐帧写，这里负责跳转/刮擦）
+      setPlayheadSec(clamped)
     },
-    [setDisplayTime]
+    [setDisplayTime, setPlayheadSec]
   )
 
   /**

@@ -11,6 +11,7 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
+    "cli": "node cli/focusnews-cli.mjs",
     "build": "electron-vite build",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",

@@ -58,9 +58,17 @@ export function usePreviewSpec(): { spec: RenderJobSpec | null; ready: boolean; 
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    let cancelled = false
+    let cancelSchedule: () => void = () => undefined
+
     const run = async (): Promise<void> => {
+      if (cancelled) return
+      // 真正开始构建时才从 store 取最新值：同一帧里连续改参数只会留下最后一份工程，
+      // 前面几份根本不会进入字体注册与 Yoga 布局（旧的 result 仍由 specGeneration 兜底丢弃）。
+      const latest = useProjectStore.getState()
+      const ui = useUiStore.getState()
       const localGeneration = ++specGeneration
-      const wanted = wantedFontIds(fonts, project.clips)
+      const wanted = wantedFontIds(latest.fonts, latest.project.clips)
       let failure: string | null = null
       for (const record of wanted) {
         try {
@@ -70,10 +78,10 @@ export function usePreviewSpec(): { spec: RenderJobSpec | null; ready: boolean; 
         }
       }
       // 字体必须先注册完成，否则 Canvas 会回落默认字形（预览与导出就会不一致）
-      const target = previewTargetCanvas(project, previewCanvasKind, previewFit)
+      const target = previewTargetCanvas(latest.project, ui.previewCanvasKind, ui.previewFit)
       const built = await buildRenderJob({
-        project,
-        fontIndex: fonts,
+        project: latest.project,
+        fontIndex: latest.fonts,
         scope: { kind: 'timeline' },
         ...(target
           ? {
@@ -82,12 +90,30 @@ export function usePreviewSpec(): { spec: RenderJobSpec | null; ready: boolean; 
             }
           : {})
       })
-      if (localGeneration !== specGeneration) return
+      if (cancelled || localGeneration !== specGeneration) return
       setSpec(built)
       setError(failure)
       setReady(true)
     }
-    void run()
+
+    // 用一个「下一帧/下一宏任务」调度：effect 重跑时先取消上一份，
+    // 同一帧内的多次 revision 因此只剩最后一次真正开始构建（异步合并）。
+    if (typeof requestAnimationFrame === 'function') {
+      const id = requestAnimationFrame(() => {
+        void run()
+      })
+      cancelSchedule = () => cancelAnimationFrame(id)
+    } else {
+      const id = setTimeout(() => {
+        void run()
+      }, 0)
+      cancelSchedule = () => clearTimeout(id)
+    }
+
+    return () => {
+      cancelled = true
+      cancelSchedule()
+    }
   }, [project, revision, fonts, previewCanvasKind, previewFit])
 
   return { spec, ready, error }

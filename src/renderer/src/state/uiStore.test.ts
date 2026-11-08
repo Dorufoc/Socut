@@ -4,7 +4,7 @@ import { useUiStore } from './uiStore'
 /** 界面模式：程序启动总是基础模式（只显示高频入口），高级模式按需切换。 */
 
 afterEach(() => {
-  useUiStore.setState({ uiMode: 'basic' })
+  useUiStore.setState({ uiMode: 'basic', playheadSec: 0 })
 })
 
 describe('uiStore · 界面模式', () => {
@@ -43,5 +43,27 @@ describe('uiStore · 预览轴的悬停帧（P4）', () => {
     useUiStore.getState().setHoverPreview(null)
 
     expect(useUiStore.getState().hoverPreviewSec).toBeNull()
+  })
+})
+
+describe('uiStore · 帧级播放头（Task 5）', () => {
+  it('写入后能读回', () => {
+    expect(useUiStore.getState().playheadSec).toBe(0)
+    useUiStore.getState().setPlayheadSec(3.25)
+    expect(useUiStore.getState().playheadSec).toBe(3.25)
+  })
+
+  it('写同一个值不产生新 state（预览循环每帧都会调）', () => {
+    useUiStore.getState().setPlayheadSec(2)
+    const before = useUiStore.getState()
+    useUiStore.getState().setPlayheadSec(2)
+    expect(useUiStore.getState()).toBe(before)
+
+    // 计数器口径再钉一次：同值写入不应惊动订阅者
+    let calls = 0
+    const unsubscribe = useUiStore.subscribe(() => (calls += 1))
+    useUiStore.getState().setPlayheadSec(2)
+    unsubscribe()
+    expect(calls).toBe(0)
   })
 })

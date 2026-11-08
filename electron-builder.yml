@@ -13,6 +13,17 @@ files:
   - out/**/*
   - package.json
 
+# CLI 客户端放在安装目录 cli/ 下，旁边再放一个根目录快捷 cmd。
+# 不依赖 node_modules：客户端只用 Node 内置模块与全局 fetch。
+extraFiles:
+  - from: cli
+    to: cli
+    filter:
+      - 'focusnews-cli.mjs'
+      - 'focusnews.cmd'
+  - from: cli/focusnews-root.cmd
+    to: focusnews.cmd
+
 extraResources:
   - from: resources/ffmpeg
     to: ffmpeg

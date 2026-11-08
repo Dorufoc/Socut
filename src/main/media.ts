@@ -2,7 +2,16 @@ import { createReadStream, promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { protocol } from 'electron'
-import { mimeTypeOf, normalizePreviewPath, parseByteRange, type ByteRange } from './mediaRange'
+import {
+  isPreviewNotModified,
+  mimeTypeOf,
+  normalizePreviewPath,
+  parseByteRange,
+  previewFileVersion,
+  previewResponseHeaders,
+  previewUrlFor,
+  type ByteRange
+} from './mediaRange'
 
 /**
  * 参考视频预览协议（focusnews-media://）。
@@ -16,7 +25,6 @@ import { mimeTypeOf, normalizePreviewPath, parseByteRange, type ByteRange } from
  */
 
 export const MEDIA_SCHEME = 'focusnews-media'
-const MEDIA_HOST = 'preview'
 
 /** 已放行的绝对路径（由 video:previewUrl 登记）。 */
 const allowlist = new Set<string>()
@@ -38,14 +46,16 @@ export function registerMediaScheme(): void {
 export async function createPreviewUrl(candidate: string): Promise<string | null> {
   const resolved = normalizePreviewPath(candidate)
   if (!resolved) return null
+  let stat
   try {
-    const stat = await fs.stat(resolved)
-    if (!stat.isFile() || stat.size === 0) return null
+    stat = await fs.stat(resolved)
   } catch {
     return null
   }
+  if (!stat.isFile() || stat.size === 0) return null
   allowlist.add(resolved)
-  return `${MEDIA_SCHEME}://${MEDIA_HOST}/?path=${encodeURIComponent(resolved)}`
+  // URL 里带文件版本：同一路径换了文件就是新 URL，浏览器不会拿旧缓冲去播新内容
+  return previewUrlFor(resolved, previewFileVersion(stat))
 }
 
 function bodyOf(filePath: string, range?: ByteRange): ReadableStream<Uint8Array> {
@@ -77,10 +87,23 @@ export function installMediaProtocol(): void {
     if (!stat.isFile() || stat.size === 0) return new Response(null, { status: 404 })
 
     const mime = mimeTypeOf(target) ?? 'application/octet-stream'
+    const version = previewFileVersion(stat)
     const headers: Record<string, string> = {
       'Content-Type': mime,
-      'Accept-Ranges': 'bytes',
-      'Cache-Control': 'no-store'
+      ...previewResponseHeaders({ size: stat.size, mtimeMs: stat.mtimeMs, version })
+    }
+
+    // 命中缓存直接 304（不带 body）：Chrome 会继续用已缓冲的媒体段，
+    // 循环重播 / 切点切换不再重新读盘。URL 里的 v 不参与鉴权，此处也不校验。
+    if (
+      isPreviewNotModified({
+        ifNoneMatch: request.headers.get('If-None-Match'),
+        ifModifiedSince: request.headers.get('If-Modified-Since'),
+        version,
+        mtimeMs: stat.mtimeMs
+      })
+    ) {
+      return new Response(null, { status: 304, headers })
     }
 
     const range = parseByteRange(request.headers.get('Range'), stat.size)

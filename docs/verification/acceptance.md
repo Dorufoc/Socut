@@ -372,3 +372,49 @@ npm run verify:packaged   # 静默安装 → 断网等价冷启动 → 优雅退
 
 仍需人工：预览转场近似与成片逐帧观感对照；批量三画布与封面 PNG 的真机端到端；分组/标签的真实拖拽与 Ctrl+Z。
 
+
+## 预览播放流畅度与时间轴一致性（v12 · 2026-11-08 本机）
+
+真机取证脚本：`spikes/tmp-integration/preview-perf-e2e.mjs`（临时、gitignore）。隔离 profile：`--user-data-dir=<临时目录>` + CDP `Runtime.evaluate` / `Input.dispatchMouseEvent` / `Page.captureScreenshot`。
+夹具：1080p30 工程，主轨 3 段无空隙媒体段（0–2 / 2–4 / 4–6s）+ 第二条媒体轨叠加段（1–3s）+ 2 条字幕条；素材为 `spikes/app-smoke/app-smoke-overlay-640x360.mp4`（640×360 / 25fps / 6s）。
+读数入口：`window.__focusnewsPreviewPerf()` / `__focusnewsPreviewPerfReset()`（`src/renderer/src/render/previewPerf.ts`）。
+
+### 同构建 A/B 对照（只切换「帧去重 + GPU 画布 + 低采样」，其余优化保留）
+
+| 项 | 旧绘制模式（legacy paint） | 当前实现 | 变化 |
+|---|---|---|---|
+| 播放 8s 的 render+blit 次数 | 2187（**273.4 次/秒**，本机 rAF ≈ 240Hz） | 240（**30.0 次/秒**，= 工程帧率） | **−89.0%** |
+| 播放 8s 的绘制总耗时 | render 151.4ms + blit 1356.8ms = **1508.2ms**（占 8s 的 18.9%） | render 31.8ms + blit 30.5ms = **62.3ms**（占 0.78%） | **−95.9%** |
+| 单次绘制平均 | render 0.069ms + blit 0.620ms = 0.689ms | render 0.133ms + blit 0.127ms = 0.260ms | **−62.3%** |
+| 长帧（>2×帧间隔） | 0 | 0 | 单帧均未超阈值，收益体现在总耗时 |
+| 暂停空转 1.2s | **292 次** render+blit（blit 162.1ms） | **0 次**（`renders=0 / blits=0`，`skips` 持续增长） | 暂停不再空转 |
+| 播放 20s（回绕 3 次） | — | 600 次 = 30/s；`loopWraps=3`、`lateSwitches=0` | 多圈回绕无迟到切换 |
+
+### 预览轴（hover）横移
+
+| 项 | 读数 |
+|---|---|
+| 指针横移（41 次 mouseMoved / 1.54s） | `renders=15`、`blits=15`、`seekRequests=17`（一次更急促的扫过中同一元素出现 41 次在飞目标合并；是否合并取决于单次 seek 完成时序，合并逻辑另有单测） |
+| `Timeline` 自身渲染 | **0 次**（黄线由 `HoverGuide` 单独渲染） |
+| `PreviewStage` 渲染 | **13 次 / 1.54s ≈ 8.4 次/秒**（≤ 10/s，候选池锚点按 250ms 节流） |
+| 黄线 / 时间码 | `left=488px`、`00:00:06:00`、根类名 `timeline--hover-preview` 生效 |
+| 蓝线 | 仍停在播放头 `left=200px`（悬停不写 `displayTimeSec` / `playheadSec`） |
+
+### 行为验证
+
+- **切点与叠加**：8s/20s 播放覆盖 2 个无空隙切点与第二轨叠加段，`lateSwitches=0`（没有出现「目标段未就绪导致画面停在上一段」）。
+- **回绕无缝**：`restart()` 复位 + 回绕前瞻预对齐单测；20s 自动回绕 3 次，`loopWraps=3`。
+- **多圈起点帧一致（截图取证）**：在回绕的同一帧暂停并对 `.stage__frame` 截图，第 1/2/3 圈起点帧 **逐字节相同**（`preview-loop-1/2/3.png`，各 129358 B，`loopIdentical=true`）。
+- **seek 合并**：悬停横移 41 次指针事件产生 17 次 `currentTime` 写入；在更急促的扫过中同一元素出现 41 次在飞目标合并（`MediaPreviewLayer.test.tsx` 用可控 `seeking` 桩把「在飞只换目标」钉死）。
+- **导出/像素一致性路径未换画布**：`NativeStage` 默认仍 `readback: true`；`runPixelParityCheck` / `renderReviewSheet` / `useCoverExport` / `frameSource` 全部不传 `readback`。
+
+### 门禁与限制（本机）
+
+| 项 | 结果 |
+|---|---|
+| `npm run lint` / `npm run typecheck` | **exit 0**（node / web / tests 三个工程） |
+| `npm test` | **exit 0**：**78 文件 / 1156 用例**（含真实 FFmpeg 36 例；`MediaPreviewLayer` 新增切点/兜底/回绕/seek 合并/URL TTL 用例） |
+| `npm run check:env` | **失败（与本次改动无关）**：`src/main/cliServer.ts` 使用 Node 网络内置模块，触发离线交付纪律。该文件是工作区里另一条在途 CLI 功能的改动，未由本次预览优化触碰 |
+| 应用内导出/像素回归/评审表冒烟 | **未重跑**：本机 Electron 从仓库启动时 `app.isPackaged === true`，`FOCUSNEWS_SMOKE` / `FOCUSNEWS_PIXELCHECK` / `FOCUSNEWS_REVIEW_SHEET` 均被忽略（与 2026-11-07 记录的 visual:check 环境问题同源）；导出链路的回归由 `tests/ffmpegPipeline.test.ts` 36 例真实 FFmpeg 用例覆盖 |
+
+仍需人工：4K/MXF 代理预览未在本轮复测；转场近似与成片逐帧观感对照（沿用 v11 的待人工项）。

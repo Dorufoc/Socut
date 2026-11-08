@@ -15,7 +15,8 @@ export function appIconPath(): string {
   return path.join(resourcesRoot(), 'icons', 'icon.png')
 }
 
-export function createMainWindow(): BrowserWindow {
+export function createMainWindow(options: { hidden?: boolean } = {}): BrowserWindow {
+  const hidden = options.hidden === true
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -31,13 +32,17 @@ export function createMainWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // CLI 隐藏窗口需要持续渲染/响应逐帧导出，不能被后台节流冻住
+      backgroundThrottling: !hidden,
       // 关闭拼写/自动填充等无关能力，减少 Chromium 侧不确定行为
       spellcheck: false,
       devTools: !process.env.FOCUSNEWS_PROD
     }
   })
 
-  window.once('ready-to-show', () => window.show())
+  window.once('ready-to-show', () => {
+    if (!hidden) window.show()
+  })
 
   // 外链一律走系统浏览器，避免在主窗口内导航
   window.webContents.setWindowOpenHandler(({ url }) => {

@@ -1,5 +1,14 @@
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { mimeTypeOf, normalizePreviewPath, parseByteRange } from '../src/main/mediaRange'
+import {
+  isPreviewNotModified,
+  mimeTypeOf,
+  normalizePreviewPath,
+  parseByteRange,
+  previewFileVersion,
+  previewResponseHeaders,
+  previewUrlFor
+} from '../src/main/mediaRange'
 
 /**
  * 参考视频预览协议的纯逻辑：
@@ -67,5 +76,89 @@ describe('图片白名单（水印预览与视频同一条协议）', () => {
     expect(mimeTypeOf('D:/a.mp4')).toBe('video/mp4')
     expect(mimeTypeOf('D:/a.png')).toBe('image/png')
     expect(mimeTypeOf('D:/a.md')).toBeUndefined()
+  })
+})
+
+describe('previewFileVersion（URL 里的文件版本）', () => {
+  it('同 size + mtime 稳定，mtime 取整到秒（和 Last-Modified 对齐）', () => {
+    const stat = { size: 1024, mtimeMs: Date.UTC(2026, 10, 8, 3, 4, 5, 789) }
+    expect(previewFileVersion(stat)).toBe(`${stat.size}-${Math.floor(stat.mtimeMs)}`)
+    expect(previewFileVersion(stat)).toBe(previewFileVersion({ ...stat }))
+  })
+
+  it('size 或 mtime 变化都会产生新版本（换文件就不会命中旧缓冲）', () => {
+    const base = { size: 1024, mtimeMs: 1_700_000_000_000 }
+    expect(previewFileVersion({ ...base, size: 2048 })).not.toBe(previewFileVersion(base))
+    expect(previewFileVersion({ ...base, mtimeMs: base.mtimeMs + 1000 })).not.toBe(previewFileVersion(base))
+  })
+})
+
+describe('previewUrlFor（版本化协议地址）', () => {
+  it('同时带 path 与 v，路径按绝对路径规范化并整体 encode', () => {
+    const file = 'D:/clips/我的 参考 01.mp4'
+    const url = previewUrlFor(file, '1024-1700000000')
+    expect(url).toBe(
+      `focusnews-media://preview/?path=${encodeURIComponent(path.resolve(file))}&v=${encodeURIComponent('1024-1700000000')}`
+    )
+    // 空格与中文必须被编码，否则 custom scheme 的 query 会被截断
+    expect(url).toContain('%20')
+    expect(url).toContain('%E5%8F%82')
+    expect(url).not.toContain(' ')
+  })
+})
+
+describe('previewResponseHeaders（可缓存读取）', () => {
+  it('ETag / Last-Modified / Cache-Control 齐全，且不再阻止缓存', () => {
+    const mtimeMs = Date.UTC(2026, 10, 8, 3, 4, 5, 789)
+    const headers = previewResponseHeaders({ size: 1024, mtimeMs, version: '1024-1794097445' })
+    expect(headers['Accept-Ranges']).toBe('bytes')
+    expect(headers.ETag).toBe('"1024-1794097445"')
+    expect(headers['Last-Modified']).toBe(new Date(mtimeMs).toUTCString())
+    expect(headers['Cache-Control']).toContain('private')
+    expect(headers['Cache-Control']).toContain('max-age=31536000')
+    expect(headers['Cache-Control']).toContain('immutable')
+    expect(headers['Cache-Control']).not.toContain('no-store')
+    expect(headers['Content-Type']).toBeUndefined()
+  })
+})
+
+describe('isPreviewNotModified（304 判定）', () => {
+  const mtimeMs = Date.UTC(2026, 10, 8, 3, 4, 5)
+  const target = { version: '1024-1794097445', mtimeMs }
+
+  it('If-None-Match 精确命中版本（带双引号）→ 304', () => {
+    expect(
+      isPreviewNotModified({ ...target, ifNoneMatch: '"1024-1794097445"', ifModifiedSince: null })
+    ).toBe(true)
+    // 多值列表与 * 也按命中处理
+    expect(isPreviewNotModified({ ...target, ifNoneMatch: '"other", *', ifModifiedSince: null })).toBe(true)
+  })
+
+  it('If-Modified-Since 命中（按秒、允许相等）→ 304', () => {
+    expect(
+      isPreviewNotModified({
+        ...target,
+        ifNoneMatch: null,
+        ifModifiedSince: new Date(mtimeMs).toUTCString()
+      })
+    ).toBe(true)
+  })
+
+  it('ETag 与日期都不匹配 → 200（重新读文件）', () => {
+    expect(
+      isPreviewNotModified({
+        ...target,
+        ifNoneMatch: '"other"',
+        ifModifiedSince: new Date(mtimeMs - 5000).toUTCString()
+      })
+    ).toBe(false)
+    expect(isPreviewNotModified({ ...target, ifNoneMatch: null, ifModifiedSince: null })).toBe(false)
+  })
+
+  it('无效日期不抛错，一律当不匹配', () => {
+    expect(() =>
+      isPreviewNotModified({ ...target, ifNoneMatch: null, ifModifiedSince: 'not-a-date' })
+    ).not.toThrow()
+    expect(isPreviewNotModified({ ...target, ifNoneMatch: null, ifModifiedSince: 'not-a-date' })).toBe(false)
   })
 })

@@ -508,8 +508,9 @@ textarea {
 }
 
 .stage__badges .chip {
-  background: rgba(20, 20, 20, 0.72);
-  backdrop-filter: blur(8px);
+  /* 角标压在播放中的视频上：逐帧 backdrop-filter 背景模糊是纯 GPU 负担，
+     改用接近不透明的底色保证可读性（尺寸/排版不变）。 */
+  background: rgba(20, 20, 20, 0.92);
 }
 
 /* 播放控制栏 */

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import { app, BrowserWindow } from 'electron'
 import { APP_NAME, WINDOW_TITLE } from '../shared/constants'
+import { APP_VERSION } from './appVersion'
 import { ExportEngine } from './export/engine'
 import { registerIpc } from './ipc'
 import { createMainWindow } from './windows'
@@ -15,6 +16,7 @@ import { installStripProtocol, registerStripScheme } from './stripProtocol'
 import { installCoverProtocol, registerCoverScheme } from './coverProtocol'
 import { applyGpuPreferenceAtStartup } from './gpu'
 import { log } from './log'
+import { CliControlServer } from './cliServer'
 
 /**
  * 主进程入口（规格 §4.2）：
@@ -25,6 +27,22 @@ import { log } from './log'
  */
 
 const engine = new ExportEngine()
+/** CLI 自动拉起时带 `--cli-server`：窗口保持隐藏，只作为控制面/渲染后端。 */
+const cliOnly = process.argv.includes('--cli-server')
+let cliServer: CliControlServer | null = null
+
+async function ensureCliServer(): Promise<CliControlServer | null> {
+  if (cliServer) return cliServer
+  const server = new CliControlServer(engine)
+  try {
+    await server.start()
+    cliServer = server
+    return server
+  } catch (error) {
+    await log('error', `CLI 控制服务启动失败：${String(error)}`)
+    return null
+  }
+}
 
 // 自定义媒体协议必须在 app ready 之前声明（参考视频预览 + 素材库缩略图 + 时间帧预览条 + 启动页封面）
 registerMediaScheme()
@@ -59,11 +77,23 @@ const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
-    const focused = BrowserWindow.getAllWindows()[0]
+  app.on('second-instance', (_event, argv) => {
+    // 已有实例可能由普通启动创建、尚未开控制服务；CLI 自动拉起时补开一次。
+    if (argv.includes('--cli-server')) {
+      void ensureCliServer()
+      return
+    }
+    const focused = BrowserWindow.getAllWindows().find((window) => !window.isDestroyed() && window.isVisible())
     if (focused) {
       if (focused.isMinimized()) focused.restore()
       focused.focus()
+      return
+    }
+    // 之前是 `--cli-server` 隐藏实例：用户手动再启动时把窗口显示出来。
+    const hidden = BrowserWindow.getAllWindows().find((window) => !window.isDestroyed())
+    if (hidden) {
+      hidden.show()
+      hidden.focus()
     }
   })
   void bootstrap()
@@ -116,14 +146,17 @@ async function bootstrap(): Promise<void> {
   // 启动清理：崩溃遗留的临时目录
   const swept = await sweepStaleWorkspaces()
 
-  registerIpc(engine)
-  const window = createMainWindow()
+  const cli = await ensureCliServer()
+  registerIpc(engine, cli)
+  const window = createMainWindow({ hidden: cliOnly })
   window.setTitle(WINDOW_TITLE)
+  window.webContents.on('did-start-loading', () => cli?.notifyRendererGone())
+  window.on('closed', () => cli?.notifyRendererGone())
 
   const binaries = await resolveFfmpegBinaries()
   await log(
     'info',
-    `启动 FocusNews ${app.getVersion()}｜Electron ${process.versions.electron}｜Chromium ${process.versions.chrome}｜` +
+    `启动 FocusNews ${APP_VERSION}｜Electron ${process.versions.electron}｜Chromium ${process.versions.chrome}｜` +
       `FFmpeg ${binaries.source} (${binaries.ffmpeg})｜渲染显卡偏好 ${appliedGpuPreference}｜清理残留临时目录 ${swept} 个`
   )
   if (binaries.hint) await log('warn', binaries.hint)
@@ -167,6 +200,8 @@ async function cleanup(reason: string): Promise<void> {
   try {
     // 先等自动存档落盘：渲染侧 beforeunload 补发的最后一笔可能还在 IPC/写入队列里，
     // 直接 app.exit 会把它打断（规格 §4.6：关闭程序不丢编辑进度）
+    await cliServer?.stop()
+    cliServer = null
     await flushPendingAutosave()
     await engine.shutdown()
     const killed = await terminateAll()

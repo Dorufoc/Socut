@@ -135,6 +135,18 @@ export async function saveProjectAs(parent: BrowserWindow | null, project: Proje
   return result.filePath
 }
 
+/**
+ * CLI 专用：保存到显式路径（不弹对话框）。
+ * 与另存为共用同一套原子写 + 目录创建纪律；路径来自外部请求，必须 resolve 后使用。
+ */
+export async function writeProjectFile(file: string, project: Project): Promise<string> {
+  const target = path.resolve(file)
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  await atomicWrite(target, serialize(project))
+  await log('info', `工程写入：${target}`)
+  return target
+}
+
 /** 参考视频是否存在（工程恢复时提示重新定位，规格 §8 数据模型）。 */
 export async function fileExists(target: string): Promise<boolean> {
   try {

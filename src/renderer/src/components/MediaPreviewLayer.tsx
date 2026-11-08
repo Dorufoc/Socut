@@ -14,6 +14,7 @@ import type { Fps, MediaClip } from '@shared/types'
 import { attachPreviewAudio, setElementLevel, setPreservesPitch } from '../audio/previewAudioGraph'
 import {
   PREVIEW_DRIFT_SEC,
+  PREVIEW_LOOKAHEAD_SEC,
   isClipActiveAt,
   previewClipStartSourceTime,
   previewGradeFilterId,
@@ -23,6 +24,7 @@ import {
   type PreviewCandidate
 } from '../render/previewCandidates'
 import { transitionStyles, type PreviewTransitionState } from '../render/previewTransition'
+import { previewPerf } from '../render/previewPerf'
 
 /**
  * 媒体预览层（v10）：候选池的 DOM 实现。
@@ -38,6 +40,8 @@ import { transitionStyles, type PreviewTransitionState } from '../render/preview
 
 export interface MediaPreviewHandle {
   tick: (atSec: number, playing: boolean) => void
+  /** 回绕复位：清预卷/对齐标记，把每个元素送回入点（不 pause，交给下一帧 tick 决定播放状态） */
+  restart: () => void
 }
 
 export interface MediaPreviewLayerProps {
@@ -53,13 +57,36 @@ export interface MediaPreviewLayerProps {
   /** 当前负责出声的视频元素（null = 没有媒体原声） */
   onAudioChange?: (element: HTMLVideoElement | null, clip: MediaClip | null) => void
   onFailure?: (clipId: string) => void
-  /** 转场窗口内由 PreviewStage 计算；null / 缺省 = 当前单层行为不变 */
+  /**
+   * 转场窗口解析器：每 tick 用**实时** `atSec` 调用，避免转场窗口跟着 10Hz 节流时间晚一拍。
+   * 传入时优先使用；`transition` prop 只在没有 resolver 时作为显式覆盖。
+   */
+  transitionResolver?: (atSec: number) => PreviewTransitionState | null
+  /** 显式转场覆盖（静态用例/测试用）；有 resolver 时不再读取 */
   transition?: PreviewTransitionState | null
+  /**
+   * 时间轴循环总时长（秒，0 = 不循环）。回绕前瞻段在本轮已经「结束」，
+   * 需要提前把它对齐到入点，否则回绕瞬间要等一次异步 seek 才出首帧。
+   */
+  loopDurationSec?: number
 }
 
-/** 源路径 → 协议地址；null = 已失败，不再重试。跨挂载复用，避免每次切段重发 IPC。 */
-const previewUrlCache = new Map<string, string | null>()
+/** 源路径 → 协议地址 + 获取时刻；null = 已失败。跨挂载复用，避免每次切段重发 IPC。 */
+const previewUrlCache = new Map<string, { url: string | null; fetchedAt: number }>()
 const pendingPreviewUrls = new Set<string>()
+
+/** 协议地址的时效（毫秒）：源文件被同名替换后旧 URL 仍带长缓存头，会播到旧内容。 */
+export const PREVIEW_URL_TTL_MS = 10_000
+
+/** 缓存条目是否该重新解析：无条目 → true；超过 TTL → true。 */
+export function shouldRefreshPreviewUrl(
+  entry: { fetchedAt: number } | undefined,
+  now: number,
+  ttlMs = PREVIEW_URL_TTL_MS
+): boolean {
+  if (!entry) return true
+  return now - entry.fetchedAt >= ttlMs
+}
 
 const EPS = 1e-9
 
@@ -73,20 +100,25 @@ function mediaStyleOf(clip: MediaClip): CSSProperties {
   }
 }
 
-function seekVideo(video: HTMLVideoElement, target: number): void {
+/** 与 seek 同一口径的 duration 钳制（保留 1ms 余量，避免落在媒体末尾）。 */
+function clampSeekTarget(video: HTMLVideoElement, target: number): number {
   const duration = Number.isFinite(video.duration) ? video.duration : target
-  const clamped = Math.min(Math.max(0, target), Math.max(0, duration - 0.001))
-  if (Math.abs(video.currentTime - clamped) < 1e-4) return
-  try {
-    video.currentTime = clamped
-  } catch {
-    // 元数据尚未就绪：loadedmetadata / seeked 会再对齐
-  }
+  return Math.min(Math.max(0, target), Math.max(0, duration - 0.001))
+}
+
+/** `requestSeek` 的结果：调用方据此判断是否需要重新等待 seeked（`primeVideo` 的 pending 语义）。 */
+type SeekOutcome = 'aligned' | 'queued' | 'requested' | 'failed'
+
+interface SeekState {
+  /** 在飞期间被合并的目标（最后一次写入赢） */
+  wanted: number | null
+  /** 本地标记：已写过 currentTime、还没等到 seeked */
+  inFlight: boolean
 }
 
 export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLayerProps>(
   function MediaPreviewLayer(
-    { candidates, fps, audioEnabled = true, onVisibleChange, onAudioChange, onFailure, transition },
+    { candidates, fps, audioEnabled = true, loopDurationSec = 0, onVisibleChange, onAudioChange, onFailure, transition, transitionResolver },
     ref
   ) {
     const [urls, setUrls] = useState<Record<string, string | null>>({})
@@ -102,10 +134,15 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     const failedRef = useRef(new Set<string>())
     const pendingSeekRef = useRef(new Set<string>())
     const prerolledRef = useRef(new Set<string>())
+    /** 已做过「进入活动段首帧强制对齐」的 clipId：再次进入活动段（含回绕）要重新对齐 */
+    const alignedRef = useRef(new Set<string>())
+    /** 每元素 seek 合并状态：在飞期间只换目标，避免悬停逐帧拖动把 seek 排成风暴 */
+    const seekStateRef = useRef(new Map<string, SeekState>())
 
     const candidatesRef = useRef(candidates)
     const fpsRef = useRef(fps)
     const audioEnabledRef = useRef(audioEnabled)
+    const loopDurationRef = useRef(loopDurationSec)
     const onVisibleRef = useRef(onVisibleChange)
     const onAudioRef = useRef(onAudioChange)
     const onFailureRef = useRef(onFailure)
@@ -116,43 +153,65 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     const flashRef = useRef<HTMLDivElement | null>(null)
     /** 被转场命令式改过 transform/filter/zIndex 的 clipId；退出转场时按基座样式还原 */
     const transitionStyledRef = useRef(new Set<string>())
-    const transitionRef = useRef<PreviewTransitionState | null>(transition ?? null)
+    const transitionResolverRef = useRef(transitionResolver)
+    const transitionPropRef = useRef<PreviewTransitionState | null>(transition ?? null)
+    /** 上一次记过 lateSwitches 的目标 clipId：同一个目标只计一次 */
+    const lateSwitchRef = useRef<string | null>(null)
 
     candidatesRef.current = candidates
     fpsRef.current = fps
     audioEnabledRef.current = audioEnabled
+    loopDurationRef.current = loopDurationSec
     onVisibleRef.current = onVisibleChange
     onAudioRef.current = onAudioChange
     onFailureRef.current = onFailure
-    transitionRef.current = transition ?? null
+    transitionResolverRef.current = transitionResolver
+    transitionPropRef.current = transition ?? null
 
     const pathsKey = candidates.map((candidate) => candidate.sourcePath).join('\n')
 
     useEffect(() => {
-      const missing = [...new Set(candidates.map((candidate) => candidate.sourcePath))].filter(
-        (path) => !previewUrlCache.has(path) && !pendingPreviewUrls.has(path)
+      const now = performance.now()
+      const paths = [...new Set(candidates.map((candidate) => candidate.sourcePath))]
+      // 没缓存过的路径直接取；缓存过的按 TTL 判过期（同名替换后要换 URL）。
+      // 在飞路径走 `pendingPreviewUrls` 同键合并，避免并发重复 IPC。
+      const missing = paths.filter(
+        (path) => !pendingPreviewUrls.has(path) && previewUrlCache.get(path) === undefined
       )
-      if (missing.length === 0) return
-      for (const path of missing) pendingPreviewUrls.add(path)
+      const stale = paths.filter((path) => {
+        if (pendingPreviewUrls.has(path)) return false
+        const entry = previewUrlCache.get(path)
+        return entry !== undefined && shouldRefreshPreviewUrl(entry, now)
+      })
+      const toFetch = [...missing, ...stale]
+      if (toFetch.length === 0) return
+      for (const path of toFetch) pendingPreviewUrls.add(path)
       void Promise.all(
-        missing.map(async (path) => {
+        toFetch.map(async (path) => {
           const api = window.focusnews?.video
           const url = api ? await api.previewUrl(path).catch(() => null) : null
           return [path, url] as const
         })
       ).then((entries) => {
+        const fetchedAt = performance.now()
+        /** URL 真的变了才写回状态：未变时不动 `urls`，避免无谓重载 `<video>` */
+        const changed: Array<readonly [string, string | null]> = []
         for (const [path, url] of entries) {
-          previewUrlCache.set(path, url)
+          const previous = previewUrlCache.get(path)
+          previewUrlCache.set(path, { url, fetchedAt })
           pendingPreviewUrls.delete(path)
+          if (previous?.url === url) continue
+          changed.push([path, url])
           if (url) continue
           // 拿不到协议地址 = 这条源不可预览；没有元素也就不会有 error 事件，这里主动上报
           for (const candidate of candidatesRef.current) {
             if (candidate.sourcePath === path) onFailureRef.current?.(candidate.clip.id)
           }
         }
+        if (changed.length === 0) return
         setUrls((previous) => {
           const next = { ...previous }
-          for (const [path, url] of entries) next[path] = url
+          for (const [path, url] of changed) next[path] = url
           return next
         })
       })
@@ -172,11 +231,74 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       }
     }, [])
 
+    const seekStateFor = (clipId: string): SeekState => {
+      let state = seekStateRef.current.get(clipId)
+      if (!state) {
+        state = { wanted: null, inFlight: false }
+        seekStateRef.current.set(clipId, state)
+      }
+      return state
+    }
+
+    /**
+     * 唯一的 seek 入口（`seekVideo` 的替代）：
+     * - 已对齐（|currentTime - target| < 1e-4）→ 清掉排队目标，不动元素；
+     * - 元素正在 seek → 只把最新目标写进 `wanted`，等 seeked 后补一次；
+     * - 否则立即写 `currentTime`。
+     *
+     * 悬停逐帧拖动会在一帧内对同一元素发多次 seek，合并后浏览器只处理最后落点。
+     */
+    const requestSeek = (
+      clipId: string,
+      video: HTMLVideoElement,
+      target: number
+    ): SeekOutcome => {
+      const state = seekStateFor(clipId)
+      const clamped = clampSeekTarget(video, target)
+      if (Math.abs(video.currentTime - clamped) < 1e-4) {
+        state.wanted = null
+        return 'aligned'
+      }
+      if (video.seeking) {
+        state.wanted = clamped
+        previewPerf.seekCoalesced += 1
+        return 'queued'
+      }
+      state.wanted = null
+      state.inFlight = true
+      previewPerf.seekRequests += 1
+      try {
+        video.currentTime = clamped
+      } catch {
+        // 元数据尚未就绪：loadedmetadata / seeked 会再对齐
+        state.inFlight = false
+        return 'failed'
+      }
+      return 'requested'
+    }
+
+    /**
+     * 每帧结算一次：没有在飞 seek 时把排队目标补上（jsdom / 不允许 seek 的环境不发 seeked，
+     * 靠这里推进）；`video.seeking` 仍为真时直接返回，等真正的 seeked 事件。
+     */
+    const settleSeek = (clipId: string, video: HTMLVideoElement): void => {
+      const state = seekStateRef.current.get(clipId)
+      if (!state) return
+      if (video.seeking) return
+      state.inFlight = false
+      const wanted = state.wanted
+      if (wanted === null) return
+      state.wanted = null
+      requestSeek(clipId, video, wanted)
+    }
+
     const resetElement = (clipId: string): void => {
       readyRef.current.delete(clipId)
       failedRef.current.delete(clipId)
       pendingSeekRef.current.delete(clipId)
       prerolledRef.current.delete(clipId)
+      alignedRef.current.delete(clipId)
+      seekStateRef.current.delete(clipId)
     }
 
     const failElement = (clipId: string): void => {
@@ -196,16 +318,10 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       failedRef.current.delete(clipId)
       prerolledRef.current.delete(clipId)
       const target = previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
-      if (Math.abs(video.currentTime - target) < 1e-4) {
-        pendingSeekRef.current.delete(clipId)
-      } else {
-        pendingSeekRef.current.add(clipId)
-        try {
-          video.currentTime = target
-        } catch {
-          pendingSeekRef.current.delete(clipId)
-        }
-      }
+      // 首次 seek 完成前不算就绪：pending 语义不变，只是写入走合并器
+      const outcome = requestSeek(clipId, video, target)
+      if (outcome === 'aligned' || outcome === 'failed') pendingSeekRef.current.delete(clipId)
+      else pendingSeekRef.current.add(clipId)
       const rate = previewPlaybackRate(candidate.clip.speed)
       video.playbackRate = rate
       video.defaultPlaybackRate = rate
@@ -301,13 +417,12 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
      */
     const applyTransition = (
       list: PreviewCandidate[],
+      tr: PreviewTransitionState,
       atSec: number,
       playing: boolean,
       halfFrame: number
     ): boolean => {
-      const tr = transitionRef.current
-      if (!tr) return false
-      // 播放中 displayTime 每帧刷新后 transition 可能晚一拍才清空；用窗口再兜一层
+      // 播放中显示时间可能晚一拍；用窗口再兜一层，窗口外交给单层逻辑
       if (atSec < tr.startSec - EPS || atSec > tr.endSec + EPS) return false
 
       const left = list.find((candidate) => candidate.clip.id === tr.leftClipId)
@@ -355,10 +470,14 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
         const target = previewTransitionSourceTime(candidate.clip, atSec)
         if (playing) {
           if (element.paused) void element.play().catch(() => undefined)
-          if (Math.abs(element.currentTime - target) > PREVIEW_DRIFT_SEC) seekVideo(element, target)
+          if (Math.abs(element.currentTime - target) > PREVIEW_DRIFT_SEC) {
+            requestSeek(candidate.clip.id, element, target)
+          }
         } else {
           element.pause()
-          if (Math.abs(element.currentTime - target) > halfFrame) seekVideo(element, target)
+          if (Math.abs(element.currentTime - target) > halfFrame) {
+            requestSeek(candidate.clip.id, element, target)
+          }
         }
 
         const audible = playing && candidate === audioCandidate
@@ -381,6 +500,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     }
 
     const tick = (atSec: number, playing: boolean): void => {
+      previewPerf.layerTicks += 1
       const list = candidatesRef.current
       if (list.length === 0) {
         restoreTransitionStyles(list)
@@ -390,17 +510,30 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       }
 
       const halfFrame = frameIntervalSec(fpsRef.current) / 2
-      if (applyTransition(list, atSec, playing, halfFrame)) return
+      // 每帧先结算一次合并器：把在飞期间排队的 seek 目标补上。
+      // jsdom / 不发 seeked 的环境靠这一步推进；真的在 seek 时这里直接跳过。
+      for (const candidate of list) {
+        const element = elementsRef.current.get(candidate.clip.id)
+        if (element instanceof HTMLVideoElement) settleSeek(candidate.clip.id, element)
+      }
+      // 转场窗口用实时 atSec 现算（resolver 优先），不再等 PreviewStage 的节流值；
+      // 没有 resolver 时回落到显式 transition prop（静态用例）。
+      const resolver = transitionResolverRef.current
+      const tr = resolver ? resolver(atSec) : transitionPropRef.current
+      if (tr && applyTransition(list, tr, atSec, playing, halfFrame)) return
       restoreTransitionStyles(list)
 
       // 1. 该显示哪一段：上层 ready 优先；上层没就绪时回落到下层 ready；
       //    都没有就保留刚结束那一段的最后一帧（切点兜底）。
       let visible: PreviewCandidate | null = null
+      /** 当帧活动但还没就绪的候选（诊断用）：它才是「本该切过去」的目标 */
+      let pendingVisibleId: string | null = null
       for (const candidate of list) {
-        if (isClipActiveAt(candidate.clip, atSec) && readyRef.current.has(candidate.clip.id)) {
-          visible = candidate
-        }
+        if (!isClipActiveAt(candidate.clip, atSec)) continue
+        if (readyRef.current.has(candidate.clip.id)) visible = candidate
+        else pendingVisibleId = candidate.clip.id
       }
+      let fallback = false
       if (!visible) {
         let bestEnd = Number.NEGATIVE_INFINITY
         for (const candidate of list) {
@@ -411,8 +544,20 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
           ) {
             bestEnd = candidate.clip.timelineEndSec
             visible = candidate
+            fallback = true
           }
         }
+      }
+
+      // 诊断 lateSwitches：画面还停在上一段（兜底）且当帧有 active 未就绪的段 → 记一次迟到切换。
+      // 同一目标只计一次；切到目标后（visible 不再是兜底）或换目标时清空。
+      if (fallback && pendingVisibleId !== null) {
+        if (lateSwitchRef.current !== pendingVisibleId) {
+          lateSwitchRef.current = pendingVisibleId
+          previewPerf.lateSwitches += 1
+        }
+      } else {
+        lateSwitchRef.current = null
       }
 
       const visibleId = visible?.clip.id ?? null
@@ -445,6 +590,8 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
         if (!element || !(element instanceof HTMLVideoElement)) continue
         const clipId = candidate.clip.id
         const active = isClipActiveAt(candidate.clip, atSec)
+        // 非活动段退出「已对齐」状态：下次进入活动段（含回绕）要重新强制对齐首帧
+        if (!active) alignedRef.current.delete(clipId)
         const ready = readyRef.current.has(clipId)
         if (!ready) {
           element.pause()
@@ -461,13 +608,22 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
 
         if (active) {
           const target = previewSourceTimeAt(candidate.clip, atSec, candidate.useStabProxy)
+          // 首帧强制对齐：预卷点 / 暂停点可能停在别处，刚进入活动段的第一帧必须落在播放头；
+          // 之后才回到漂移判定，避免每帧都 seek。
+          const firstEnter = !alignedRef.current.has(clipId)
+          if (firstEnter) alignedRef.current.add(clipId)
           if (playing) {
             if (element.paused) void element.play().catch(() => undefined)
-            if (Math.abs(element.currentTime - target) > PREVIEW_DRIFT_SEC) seekVideo(element, target)
+            if (!firstEnter && Math.abs(element.currentTime - target) > PREVIEW_DRIFT_SEC) {
+              requestSeek(clipId, element, target)
+            }
           } else {
             element.pause()
-            if (Math.abs(element.currentTime - target) > halfFrame) seekVideo(element, target)
+            if (!firstEnter && Math.abs(element.currentTime - target) > halfFrame) {
+              requestSeek(clipId, element, target)
+            }
           }
+          if (firstEnter) requestSeek(clipId, element, target)
           const audible = playing && candidate === audioCandidate
           element.muted = !audible
           if (audible) {
@@ -493,7 +649,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
             const prerollTarget = previewPrerollTarget(candidate.clip, atSec, candidate.useStabProxy)
             if (prerollTarget !== null && !prerolledRef.current.has(clipId)) {
               prerolledRef.current.add(clipId)
-              seekVideo(element, prerollTarget)
+              requestSeek(clipId, element, prerollTarget)
               if (element.paused) void element.play().catch(() => undefined)
             }
           } else {
@@ -501,10 +657,32 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
             // 暂停期间清掉预卷标记：恢复播放时要重新预卷，否则会停在旧预卷点等切点
             prerolledRef.current.delete(clipId)
             const start = previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
-            if (Math.abs(element.currentTime - start) > halfFrame) seekVideo(element, start)
+            if (Math.abs(element.currentTime - start) > halfFrame) {
+              requestSeek(clipId, element, start)
+            }
           }
           element.muted = true
           setElementLevel(element, 0)
+          continue
+        }
+
+        // 回绕前瞻预对齐：头部片段在本轮已经「结束」，回绕后才能进入活动段。
+        // 提前送回入点，回绕瞬间直接出首帧，不用等一次异步 seek。
+        const loopDuration = loopDurationRef.current
+        const wrapStart = candidate.clip.timelineStartSec + loopDuration
+        const inWrapLookahead =
+          loopDuration > 0 &&
+          atSec >= loopDuration - PREVIEW_LOOKAHEAD_SEC - EPS &&
+          wrapStart > atSec + EPS &&
+          wrapStart <= atSec + PREVIEW_LOOKAHEAD_SEC + EPS
+        if (inWrapLookahead) {
+          element.pause()
+          element.muted = true
+          setElementLevel(element, 0)
+          const start = previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
+          if (Math.abs(element.currentTime - start) > halfFrame) {
+            requestSeek(clipId, element, start)
+          }
           continue
         }
 
@@ -515,7 +693,31 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       }
     }
 
-    useImperativeHandle(ref, () => ({ tick }), [])
+    /**
+     * 回绕复位（由 `usePreviewLoop` 的 `onLoop` 在 rAF 内直接调用，不依赖 React 渲染）：
+     * 1. 还原被转场改写的 style 与色块，回到「单层、无转场」基线；
+     * 2. 清预卷/已对齐标记，下一帧进入活动段时重新强制对齐；
+     * 3. 每个元素送回自己的入点。**不 pause**：播放状态交给同一帧的 tick 决定。
+     *
+     * `visibleRef` 刻意保持原值：回绕瞬间上报 false 会让 Canvas 画棋盘格闪一下。
+     */
+    const restart = (): void => {
+      const list = candidatesRef.current
+      restoreTransitionStyles(list)
+      prerolledRef.current.clear()
+      alignedRef.current.clear()
+      for (const candidate of list) {
+        const element = elementsRef.current.get(candidate.clip.id)
+        if (!(element instanceof HTMLVideoElement)) continue
+        requestSeek(
+          candidate.clip.id,
+          element,
+          previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
+        )
+      }
+    }
+
+    useImperativeHandle(ref, () => ({ tick, restart }), [])
 
     return (
       <>
@@ -576,7 +778,9 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
               onLoadedMetadata={(event) => primeVideo(candidate, event.currentTarget)}
               onLoadedData={(event) => markReadyIfDecoded(candidate.clip.id, event.currentTarget)}
               onCanPlay={(event) => markReadyIfDecoded(candidate.clip.id, event.currentTarget)}
-              onSeeked={() => {
+              onSeeked={(event) => {
+                // 顺序不能反：先让合并器应用最新目标（可能再发一次 seek），再把该段标成就绪
+                settleSeek(candidate.clip.id, event.currentTarget)
                 if (pendingSeekRef.current.delete(candidate.clip.id)) markReady(candidate.clip.id)
               }}
               onError={() => failElement(candidate.clip.id)}

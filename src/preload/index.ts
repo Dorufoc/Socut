@@ -26,6 +26,7 @@ import type {
 import type { EstimateInput, SmokeReport, WatermarkPickResult, CoverCaptureRect, NewProjectResult, OpenProjectResult, SaveProjectResult } from '../shared/api'
 import type { GpuPreference, VideoEncoderMode } from '../shared/gpu'
 import type { RecentProjectCard } from '../shared/recentProjects'
+import type { CliCommandRequest, CliResponse } from '../shared/cliProtocol'
 
 /**
  * preload：把主进程能力以最小面暴露给渲染进程（contextIsolation，零 Node 泄露）。
@@ -37,6 +38,18 @@ function on<T>(channel: string, handler: (payload: T) => void): () => void {
   ipcRenderer.on(channel, listener)
   return () => ipcRenderer.removeListener(channel, listener)
 }
+
+/**
+ * CLI 命令在渲染侧注册路由之前就可能到达（窗口还在 React 挂载）。
+ * preload 先接住并排队，等 onCommand 注册后一次性回放——否则命令会被静默丢掉。
+ */
+const pendingCliCommands: CliCommandRequest[] = []
+let cliCommandHandler: ((request: CliCommandRequest) => void) | null = null
+
+ipcRenderer.on(CHANNELS.cliCommand, (_event, request: CliCommandRequest) => {
+  if (cliCommandHandler) cliCommandHandler(request)
+  else pendingCliCommands.push(request)
+})
 
 const api = {
   app: {
@@ -54,6 +67,9 @@ const api = {
     open: () => ipcRenderer.invoke(CHANNELS.projectOpen) as Promise<OpenProjectResult | null>,
     saveAs: (project: Project) =>
       ipcRenderer.invoke(CHANNELS.projectSaveAs, project) as Promise<SaveProjectResult | null>,
+    /** CLI：保存到显式路径（主进程原子写 + 最近工程登记） */
+    writeToPath: (path: string, project: Project) =>
+      ipcRenderer.invoke(CHANNELS.projectWriteToPath, path, project) as Promise<SaveProjectResult>,
     autosaveRead: () => ipcRenderer.invoke(CHANNELS.projectAutosaveRead),
     /**
      * entryId 是当前工程在最近工程索引里的身份：
@@ -108,7 +124,10 @@ const api = {
   },
   watermark: {
     /** 选一张本机图片作水印，主进程探测原图尺寸（用户取消 null） */
-    pick: () => ipcRenderer.invoke(CHANNELS.watermarkPick) as Promise<WatermarkPickResult | null>
+    pick: () => ipcRenderer.invoke(CHANNELS.watermarkPick) as Promise<WatermarkPickResult | null>,
+    /** CLI：按显式路径探测图片原始尺寸 */
+    probe: (path: string) =>
+      ipcRenderer.invoke(CHANNELS.watermarkProbe, path) as Promise<{ width: number; height: number }>
   },
   gpu: {
     /** 渲染显卡体检：设备清单 / 当前使用 / 可用硬件编码器 */
@@ -171,6 +190,29 @@ const api = {
   job: {
     onProgress: (handler: (progress: JobProgress) => void) => on<JobProgress>(CHANNELS.jobProgress, handler),
     onResult: (handler: (result: JobResult) => void) => on<JobResult>(CHANNELS.jobResult, handler)
+  },
+  cli: {
+    /**
+     * 注册命令路由并回放 preload 期间排队的命令。
+     * 注册即视为就绪：主进程收到 cli:ready 后才开始转发外部命令。
+     */
+    onCommand: (handler: (request: CliCommandRequest) => void): (() => void) => {
+      cliCommandHandler = handler
+      while (pendingCliCommands.length > 0) {
+        const request = pendingCliCommands.shift()
+        if (request) handler(request)
+      }
+      ipcRenderer.send(CHANNELS.cliReady)
+      return () => {
+        if (cliCommandHandler === handler) cliCommandHandler = null
+      }
+    },
+    respond: (id: string, response: CliResponse) => {
+      ipcRenderer.send(CHANNELS.cliResponse, { id, response })
+    },
+    ready: () => {
+      ipcRenderer.send(CHANNELS.cliReady)
+    }
   }
 }
 

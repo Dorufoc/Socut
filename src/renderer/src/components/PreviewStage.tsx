@@ -8,11 +8,13 @@ import { activeAudioClips, mediaKindOf } from '@shared/audioClips'
 import { clipTimelineDurationSec, previewGainAt, previewPlaybackRate, previewPreservesPitch, sourceTimeAt } from '@shared/mediaClipAudio'
 import { attachPreviewAudio, elementLevelReader, setElementLevel, setPreservesPitch } from '../audio/previewAudioGraph'
 import { setPreviewLevelReader } from '../audio/previewLevel'
+import { frameIntervalSec } from '@shared/fps'
 import { computeWatermarkGeometry } from '@shared/ffmpegArgs'
 import type { AudioClip, MediaClip, MediaItem, RenderJobSpec } from '@shared/types'
 import { usePreviewLoop } from '../hooks/usePreviewLoop'
 import { containFrameRect, displayToNative, hitTestClips } from '../render/hitTest'
 import { selectPreviewCandidates, isClipActiveAt, type PreviewCandidate } from '../render/previewCandidates'
+import { previewPerf } from '../render/previewPerf'
 import {
   previewTransitionForTrack,
   type PreviewTransitionState
@@ -53,6 +55,12 @@ const EMPTY_AUDIO_CLIPS: AudioClip[] = []
 const MODE_LABEL: Record<string, string> = { standard: '标准', compact: '紧凑', ultrawide: '超宽' }
 
 /**
+ * 候选池重算节流（ms）：纯函数每帧调用是廉价的，但 `setState` 太频繁会让舞台
+ * 按 10Hz+ 重渲染；签名变化会立即同步，所以 250ms 只影响「同一候选集合内的锚点新鲜度」。
+ */
+const POOL_SYNC_MS = 250
+
+/**
  * 预览播放头对外的句柄：时间轴点击定位只用 seekTime，
  * 键盘逐帧跳转（←/→）要读当前帧号并知道总帧数，否则算不出落点。
  */
@@ -73,14 +81,25 @@ export interface PreviewStageProps {
 }
 
 export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElement {
+  previewPerf.stageRenders += 1
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const playing = useUiStore((state) => state.playing)
   const setLiveClipId = useUiStore((state) => state.setLiveClipId)
   const showSafeArea = useUiStore((state) => state.showSafeArea)
   const displayTime = useUiStore((state) => state.displayTimeSec)
-  /** P4：预览轴的悬停帧。非空时画面（Canvas 层与参考视频）改跟这一帧，蓝线/时间码仍走 displayTime */
-  const hoverPreviewSec = useUiStore((state) => state.hoverPreviewSec)
-  const previewTime = hoverPreviewSec ?? displayTime
+  /**
+   * P4：预览轴的悬停帧不再订阅——它每帧从 store 现读（`getOverrideSec` + `onTick`），
+   * 悬停换帧不触发整树 re-render。
+   */
+  const setPlayheadSec = useUiStore((state) => state.setPlayheadSec)
+  /**
+   * 候选池/转场窗口的实时采样锚点：由 rAF 的 `onTick` 以实时时间（或悬停帧）刷新，
+   * 不再用 10Hz 的 `displayTimeSec` 判定 —— 否则切点处目标 `<video>` 会晚 100ms 才挂载。
+   */
+  const [poolAnchorSec, setPoolAnchorSec] = useState(0)
+  /** 上次同步时的候选签名：签名一变立刻同步，其余情况按 250ms 节流（4Hz） */
+  const poolSignatureRef = useRef('')
+  const lastPoolSyncRef = useRef(0)
   const setDisplayTime = useUiStore((state) => state.setDisplayTime)
   const selectClip = useProjectStore((state) => state.selectClip)
   const project = useProjectStore((state) => state.project)
@@ -112,12 +131,23 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   }, [mediaClips, mediaTracks, visibleTracks])
 
   /**
+   * 时间轴循环总时长（= spec 帧数 × 帧间隔）：播放到末尾会自动回绕，
+   * 候选池据此把头部片段提前挂进前瞻窗口。`spec` 未就绪时为 0（不启用回绕前瞻）。
+   */
+  const loopDurationSec = useMemo(
+    () => (spec ? Math.max(0, spec.endFrame - spec.startFrame) * frameIntervalSec(spec.fps) : 0),
+    [spec]
+  )
+
+  /**
    * 转场预览：每条可见轨道各自算一次（切点/时长/进度与导出计划同一口径）。
    * 同一轨道同时只会有一个有效窗口；多轨可各自独立。
+   * 这里只取实时锚点算出的「转场对」，用于候选强制保留与代理选择；
+   * 图层内每帧另用 `transitionResolver` 按实时时间现算窗口。
    */
   const transitionByTrack = useMemo(() => {
     const map = new Map<string, PreviewTransitionState>()
-    const atSec = Math.max(0, previewTime)
+    const atSec = Math.max(0, poolAnchorSec)
     for (const track of visibleTracks) {
       const state = previewTransitionForTrack({
         clips: visibleClips,
@@ -129,7 +159,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
       if (state) map.set(track.id, state)
     }
     return map
-  }, [visibleTracks, visibleClips, project, projectFps, previewTime])
+  }, [visibleTracks, visibleClips, project, projectFps, poolAnchorSec])
 
   const transitionIds = useMemo(
     () =>
@@ -158,9 +188,10 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     const out: PreviewCandidate[] = []
     for (const clip of selectPreviewCandidates(
       visibleClips,
-      Math.max(0, previewTime),
+      Math.max(0, poolAnchorSec),
       trackOrder,
-      transitionIds
+      transitionIds,
+      { loopDurationSec }
     )) {
       const item = mediaPool.find((media) => media.id === clip.mediaId)
       if (!item) continue
@@ -220,7 +251,8 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     mediaTracks,
     visibleTracks,
     mediaPool,
-    previewTime,
+    poolAnchorSec,
+    loopDurationSec,
     stabApplied,
     proxyEntries,
     projectFps,
@@ -302,6 +334,36 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     return callback
   }
 
+  /**
+   * 实时转场 resolver：每个轨道一个**稳定**函数（按 trackId 缓存），内部读 ref 里的最新
+   * 片段/工程，避免每次渲染换身份导致图层重置。图层每帧用它按实时 `atSec` 现算窗口，
+   * 进入/退出转场不再等 10Hz 节流值。
+   */
+  const transitionResolverCallbacks = useRef(
+    new Map<string, (atSec: number) => PreviewTransitionState | null>()
+  )
+  const liveClipsRef = useRef(visibleClips)
+  const liveProjectRef = useRef(project)
+  const liveFpsRef = useRef(projectFps)
+  liveClipsRef.current = visibleClips
+  liveProjectRef.current = project
+  liveFpsRef.current = projectFps
+  const transitionResolverFor = (trackId: string): ((atSec: number) => PreviewTransitionState | null) => {
+    let resolver = transitionResolverCallbacks.current.get(trackId)
+    if (!resolver) {
+      resolver = (atSec) =>
+        previewTransitionForTrack({
+          clips: liveClipsRef.current,
+          atSec: Math.max(0, atSec),
+          project: liveProjectRef.current,
+          fps: liveFpsRef.current,
+          trackId
+        })
+      transitionResolverCallbacks.current.set(trackId, resolver)
+    }
+    return resolver
+  }
+
   const handleFailure = useCallback((clipId: string): void => {
     setFailedClipIds((previous) => (previous.has(clipId) ? previous : new Set(previous).add(clipId)))
   }, [])
@@ -330,7 +392,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     let bestRank = Number.NEGATIVE_INFINITY
     for (const candidate of candidates) {
       if (candidate.kind !== 'video' || !candidate.hasAudio) continue
-      if (!isClipActiveAt(candidate.clip, previewTime)) continue
+      if (!isClipActiveAt(candidate.clip, displayTime)) continue
       if (muted.has(candidate.clip.trackId)) continue
       const rank = trackOrder.get(candidate.clip.trackId) ?? -1
       if (rank > bestRank) {
@@ -339,7 +401,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
       }
     }
     return owner
-  }, [candidates, mediaTracks, previewTime, trackOrder])
+  }, [candidates, mediaTracks, displayTime, trackOrder])
 
   /** 每个可见轨道一层，按轨道升序排列：DOM 顺序就是合成顺序（底层先画、上层后画）。 */
   const layerGroups = useMemo(
@@ -429,13 +491,38 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     showSafeArea,
     transparent: mediaVisibleReady,
     transparentRef: mediaVisibleRef,
-    overrideSec: hoverPreviewSec,
+    getOverrideSec: () => useUiStore.getState().hoverPreviewSec,
     onDisplayTime: setDisplayTime,
+    onPlayhead: setPlayheadSec,
     onTick: (timelineSec, isPlaying) => {
+      // 候选池/转场判据用**实时**锚点（同一帧的 rAF 时间），不再用 10Hz 的 displayTimeSec：
+      // 签名变化立即同步，其余情况按 100ms 节流；纯函数规模小，每帧调用可接受。
+      const anchor = useUiStore.getState().hoverPreviewSec ?? timelineSec
+      const signature = selectPreviewCandidates(
+        visibleClips,
+        Math.max(0, anchor),
+        trackOrder,
+        transitionIds,
+        { loopDurationSec }
+      )
+        .map((clip) => clip.id)
+        .join('\n')
+      const now = performance.now()
+      if (signature !== poolSignatureRef.current || now - lastPoolSyncRef.current >= POOL_SYNC_MS) {
+        lastPoolSyncRef.current = now
+        poolSignatureRef.current = signature
+        setPoolAnchorSec(anchor)
+      }
       // 悬停时按静态帧预览：媒体层暂停在悬停帧，不跟着播放时钟跑。
+      // 悬停态每帧从 store 现读（不再依赖闭包里的订阅值，避免悬停换帧触发渲染）。
       // 按轨道升序逐层 tick（底层 → 顶层），出声轨由 audioEnabled 单独仲裁。
-      const play = isPlaying && hoverPreviewSec === null
+      const play = isPlaying && useUiStore.getState().hoverPreviewSec === null
       for (const track of visibleTracks) layerRefs.current.get(track.id)?.tick(timelineSec, play)
+    },
+    // 回绕复位：rAF 内直接调各层句柄（按轨道升序），不等 React 渲染；
+    // 随后同一帧的 onTick 会在 t=0 上重新选段。
+    onLoop: () => {
+      for (const track of visibleTracks) layerRefs.current.get(track.id)?.restart()
     }
   })
 
@@ -500,8 +587,9 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
             ref={layerRefFor(group.trackId)}
             candidates={group.candidates}
             fps={projectFps}
+            loopDurationSec={loopDurationSec}
             audioEnabled={group.trackId === audioOwnerTrackId}
-            transition={transitionByTrack.get(group.trackId) ?? null}
+            transitionResolver={transitionResolverFor(group.trackId)}
             onVisibleChange={(visible) => handleVisibleChange(group.trackId, visible)}
             onAudioChange={(element, clip) => handleAudioChange(group.trackId, element, clip)}
             onFailure={handleFailure}

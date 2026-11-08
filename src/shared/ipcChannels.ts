@@ -18,6 +18,8 @@ export const CHANNELS = {
 
   projectOpen: 'project:open',
   projectSaveAs: 'project:saveAs',
+  /** CLI：保存到显式路径（不弹另存为对话框） */
+  projectWriteToPath: 'project:writeToPath',
   projectAutosaveRead: 'project:autosaveRead',
   projectAutosaveWrite: 'project:autosaveWrite',
 
@@ -44,6 +46,8 @@ export const CHANNELS = {
   videoPreviewUrl: 'video:previewUrl',
   /** 水印：选择一张本机图片并探测原图尺寸（用户取消返回 null） */
   watermarkPick: 'watermark:pick',
+  /** CLI：按路径探测水印图片尺寸（不弹对话框） */
+  watermarkProbe: 'watermark:probe',
   /** v2：主进程 ffmpeg 抽帧缩略图，返回 focusnews-thumb://<mediaId>（失败返回 null） */
   mediaGenerateThumb: 'media:generateThumb',
   /** v2：将已登记的 thumb 绝对路径交回自定义协议可读 */
@@ -79,7 +83,14 @@ export const CHANNELS = {
   /** 主进程 → 渲染进程：进度 */
   jobProgress: 'job:progress',
   /** 主进程 → 渲染进程：结果 */
-  jobResult: 'job:result'
+  jobResult: 'job:result',
+
+  /** CLI 控制服务 → 渲染进程：执行一条编辑/导出命令 */
+  cliCommand: 'cli:command',
+  /** 渲染进程 → 主进程：命令结果 */
+  cliResponse: 'cli:response',
+  /** 渲染进程 → 主进程：命令路由已就绪 */
+  cliReady: 'cli:ready'
 } as const
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS]

@@ -27,8 +27,12 @@ export const PREVIEW_MAX_CANDIDATES = 4
 /** 预卷时长（时间轴秒）：切点前多久开始静音播放，抵消解码器起播延迟。 */
 export const PREVIEW_PREROLL_SEC = 0.35
 
-/** 播放中允许的漂移（秒）；超过才 seek，避免每帧 seek 卡顿。 */
-export const PREVIEW_DRIFT_SEC = 0.25
+/**
+ * 播放中允许的漂移（秒）；超过才 seek，避免每帧 seek 卡顿。
+ * 阈值不能太松：0.25s 在 30fps 下相当于画面与播放头差 7 帧以上，
+ * 切点后的第一帧就已经能看出「画面慢半拍」。0.12s（约 3–4 帧）是观感与 seek 次数的折中。
+ */
+export const PREVIEW_DRIFT_SEC = 0.12
 
 /** 转场窗口内必须同时存活的一对片段（左 = 前段，右 = 后段）。 */
 export interface PreviewTransitionIds {
@@ -67,24 +71,41 @@ function normalizeTransitionIds(
   return Array.isArray(input) ? [...input] : [input as PreviewTransitionIds]
 }
 
+export interface PreviewCandidateOptions {
+  /**
+   * 时间轴循环总时长（秒）。播放到末尾会回绕到 0，提供该值时在末尾前瞻窗口内
+   * 把「回绕后即将开始」的首部片段也纳入候选，回绕瞬间无需重新挂载/等元数据。
+   */
+  loopDurationSec?: number
+}
+
+/** 即将开始的候选：`effectiveStart` 用于排序（回绕候选 = loopDurationSec + 起点）。 */
+interface UpcomingEntry {
+  clip: MediaClip
+  effectiveStart: number
+}
+
 /**
  * 选出当前需要存活的候选段，顺序即 DOM 顺序：
  * 1. **所有当前图层**（按轨道序号升序：底层先画、上层后画）；
- * 2. **刚结束仍在 hold 窗口内的段**（最近结束的优先，用于接缝兜底）；
- * 3. **前瞻窗口内即将开始的段**（按开始时间升序）；
- * 4. 传入 `transitionIds` 时，转场左右两侧**强制保留**（优先于 2/3 的限流填充）。
+ * 2. 传入 `transitionIds` 时，转场左右两侧**强制保留**（永不裁剪）；
+ * 3. **即将开始的段**（含回绕前瞻，按有效开始时间升序）；
+ * 4. **刚结束仍在 hold 窗口内的段**（结束时间由近到远，用于接缝兜底）。
  *
  * `trackOrder` = 媒体轨 id → 数组索引（0 = 最底层），由 `tracks.ts / mediaTrackOrder` 生成；
- * 隐藏轨的片段应在调用前剔除。总数不超过 `PREVIEW_MAX_CANDIDATES`，但当前图层永远全部保留——
- * 多轨重叠时少挂一层会直接改变画面内容，不能为了限流牺牲正确性。
+ * 隐藏轨的片段应在调用前剔除。总数不超过 `PREVIEW_MAX_CANDIDATES`，但当前图层与转场对
+ * 永远全部保留——多轨重叠时少挂一层会直接改变画面内容，不能为了限流牺牲正确性。
+ *
+ * 顺序上「即将开始」排在 hold 之前：多轨 + 多 hold 时，限流只应丢兜底段，
+ * 不能让真正要切的下一段被挤出候选池（否则切点处目标 `<video>` 根本没挂载，
+ * 预览会一直停在上一段最后一帧）。
  */
 export function selectPreviewCandidates(
   tracks: MediaClip[],
   atSec: number,
   trackOrder: ReadonlyMap<string, number>,
-  transitionIds?:
-    | PreviewTransitionIds
-    | readonly PreviewTransitionIds[]
+  transitionIds?: PreviewTransitionIds | readonly PreviewTransitionIds[],
+  options?: PreviewCandidateOptions
 ): MediaClip[] {
   const rankOf = (clip: MediaClip): number => trackOrder.get(clip.trackId) ?? -1
   const active = tracks
@@ -110,21 +131,42 @@ export function selectPreviewCandidates(
     )
     .sort((a, b) => b.timelineEndSec - a.timelineEndSec)
 
-  const upcoming = tracks
+  const upcoming: UpcomingEntry[] = tracks
     .filter(
       (clip) =>
         !activeIds.has(clip.id) &&
         clip.timelineStartSec > atSec + EPS &&
         clip.timelineStartSec <= atSec + PREVIEW_LOOKAHEAD_SEC + EPS
     )
-    .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
+    .map((clip) => ({ clip, effectiveStart: clip.timelineStartSec }))
+
+  // 回绕前瞻：临近时间轴末尾时，头部片段要到回绕后才会开始。
+  // 距回绕点 d = loopDurationSec - atSec，起点 s 满足 d + s <= 前瞻窗口 即纳入；
+  // 排序按有效起点 loopDurationSec + s，所以它们总排在本轮末尾即将开始的段之后。
+  const loopDurationSec = options?.loopDurationSec ?? 0
+  if (loopDurationSec > 0 && atSec >= loopDurationSec - PREVIEW_LOOKAHEAD_SEC - EPS) {
+    const remaining = loopDurationSec - atSec
+    const seen = new Set(upcoming.map((entry) => entry.clip.id))
+    for (const clip of tracks) {
+      if (activeIds.has(clip.id) || seen.has(clip.id)) continue
+      if (remaining + clip.timelineStartSec > PREVIEW_LOOKAHEAD_SEC + EPS) continue
+      seen.add(clip.id)
+      upcoming.push({ clip, effectiveStart: loopDurationSec + clip.timelineStartSec })
+    }
+  }
+  upcoming.sort((a, b) => a.effectiveStart - b.effectiveStart)
 
   const out = [...active]
-  // 当前图层永远全部保留；转场对优先于 hold/前瞻的限流填充。
+  // 当前图层永远全部保留；转场对优先于 upcoming/held 的限流填充。
   for (const clip of forced) {
     if (!out.some((item) => item.id === clip.id)) out.push(clip)
   }
-  for (const clip of [...held, ...upcoming]) {
+  // 先填 upcoming（越近越优先），再填 held：上限只裁剪「更远的 upcoming」与兜底段。
+  for (const entry of upcoming) {
+    if (out.length >= PREVIEW_MAX_CANDIDATES) break
+    if (!out.some((item) => item.id === entry.clip.id)) out.push(entry.clip)
+  }
+  for (const clip of held) {
     if (out.length >= PREVIEW_MAX_CANDIDATES) break
     if (!out.some((item) => item.id === clip.id)) out.push(clip)
   }

@@ -5,7 +5,9 @@ import { CHANNELS } from '../shared/ipcChannels'
 import { APP_NAME, WINDOW_TITLE } from '../shared/constants'
 import { validateAllPresets } from '../shared/presets'
 import type { AudioPeaksRequest, AudioPeaksResult, CoverExportRequest, ExportRequest, Fps, MediaProxyRequest, MediaProxyResult, MediaProxyStatusResult, MediaStripRequest, MediaStripResult, Project, StabPreviewRequest, StabPreviewResult, VideoMeta } from '../shared/types'
-import type { AppInfo, CoverCaptureRect, EstimateInput } from '../shared/api'
+import type { AppInfo, CoverCaptureRect, EstimateInput, SaveProjectResult } from '../shared/api'
+import type { CliResponse } from '../shared/cliProtocol'
+import type { CliControlServer } from './cliServer'
 import { AUTOSAVE_ENTRY_ID, RECENT_ENTRY_ID_PATTERN, recentEntryIdForPath } from '../shared/recentProjects'
 import { describeBinarySource, resolveFfmpegBinaries, userFontsDir } from './paths'
 import { ffmpegVersion } from './ffrun'
@@ -16,7 +18,8 @@ import {
   autosaveWrite,
   fileExists,
   openProjectDialog,
-  saveProjectAs
+  saveProjectAs,
+  writeProjectFile
 } from './projectStore'
 import { pickAndProbeVideo, pickManyAndProbeVideos, probeVideo } from './videoImport'
 import {
@@ -31,7 +34,7 @@ import {
   setAutosaveOwner,
   updateEntryFromProject
 } from './recentProjectStore'
-import { pickAndProbeWatermark } from './watermark'
+import { pickAndProbeWatermark, probeImageSize } from './watermark'
 import { createPreviewUrl } from './media'
 import { ensureThumbRegistered, generateThumbnail, removeThumbnail, thumbUrlFor } from './thumbProtocol'
 import { generateStrip, removeStripsFor } from './stripProtocol'
@@ -73,9 +76,18 @@ function resolveDevPath(filePath: string, action: '读取' | '写入'): string {
   return target
 }
 
-export function registerIpc(engine: ExportEngine): void {
+export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null): void {
   // 帧回执监听只需注册一次（pull 模式的渲染侧应答入口）
   installFrameIpc()
+
+  // CLI 控制面：渲染侧命令路由的就绪握手与逐条结果回执
+  ipcMain.on(CHANNELS.cliReady, () => {
+    cli?.notifyRendererReady()
+  })
+  ipcMain.on(CHANNELS.cliResponse, (_event, payload: { id?: unknown; response?: CliResponse }) => {
+    if (!payload || typeof payload.id !== 'string' || !payload.response) return
+    cli?.handleResponse(payload.id, payload.response)
+  })
 
   ipcMain.handle(CHANNELS.appInfo, async (): Promise<AppInfo> => {
     const binaries = await resolveFfmpegBinaries()
@@ -249,6 +261,22 @@ export function registerIpc(engine: ExportEngine): void {
       return { path: savedPath, entryId: recentEntryIdForPath(savedPath) }
     }
   })
+
+  /** CLI：保存到显式路径（不弹对话框），并尽量登记最近工程。 */
+  ipcMain.handle(
+    CHANNELS.projectWriteToPath,
+    async (_event, target: string, project: Project): Promise<SaveProjectResult> => {
+      if (typeof target !== 'string' || target.length === 0) throw new Error('缺少工程保存路径')
+      const savedPath = await writeProjectFile(target, project)
+      try {
+        const entry = await registerFileProject(savedPath, project, { touchOpened: true })
+        return { path: savedPath, entryId: entry.id }
+      } catch (error) {
+        console.warn(`[recent] 登记 CLI 保存工程失败：${String(error)}`)
+        return { path: savedPath, entryId: recentEntryIdForPath(savedPath) }
+      }
+    }
+  )
 
   ipcMain.handle(CHANNELS.projectAutosaveRead, async () => autosaveRead())
 
@@ -460,6 +488,14 @@ export function registerIpc(engine: ExportEngine): void {
 
   /** 选一张本机图片作水印：主进程探测原图尺寸（几何换算的唯一输入）后交给渲染侧写入工程。 */
   ipcMain.handle(CHANNELS.watermarkPick, async (event) => pickAndProbeWatermark(senderWindow(event)))
+
+  /** CLI：按显式路径探测水印图片尺寸（不弹对话框）。 */
+  ipcMain.handle(CHANNELS.watermarkProbe, async (_event, target: string) => {
+    if (typeof target !== 'string' || target.length === 0) throw new Error('缺少水印图片路径')
+    const stat = await fs.stat(target).catch(() => null)
+    if (!stat?.isFile() || stat.size === 0) throw new Error(`图片不可读：${target}`)
+    return probeImageSize(target)
+  })
 
   // ---------------------------------------------------------------- 渲染显卡
   ipcMain.handle(CHANNELS.gpuDiagnostics, async (): Promise<GpuDiagnostics> => getGpuDiagnostics())

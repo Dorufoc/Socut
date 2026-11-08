@@ -26,6 +26,7 @@ import type {
 } from './types'
 import type { RecentProjectCard } from './recentProjects'
 import type { GpuDiagnostics, GpuPreference, RenderSettings, VideoEncoderMode } from './gpu'
+import type { CliCommandRequest, CliResponse } from './cliProtocol'
 
 /** preload 暴露给渲染进程的唯一 API 面（contextIsolation，零 Node 泄露）。 */
 
@@ -233,6 +234,8 @@ export interface FocusNewsApi {
   project: {
     open(): Promise<OpenProjectResult | null>
     saveAs(project: Project): Promise<SaveProjectResult | null>
+    /** CLI：保存到显式路径（不弹另存为对话框），并登记最近工程 */
+    writeToPath(path: string, project: Project): Promise<SaveProjectResult>
     autosaveRead(): Promise<Project | null>
     /**
      * entryId 是「当前工程在最近工程索引里的身份」：
@@ -285,6 +288,8 @@ export interface FocusNewsApi {
   watermark: {
     /** 选一张本机图片作水印并探测原图尺寸；用户取消 null，尺寸不可读时报错 */
     pick(): Promise<WatermarkPickResult | null>
+    /** CLI：按显式路径探测图片原始尺寸（不弹对话框） */
+    probe(path: string): Promise<{ width: number; height: number }>
   }
   /**
    * 渲染显卡（v11）：枚举核显/独显、选择预览渲染设备（Chromium 开关，重启生效）
@@ -338,6 +343,15 @@ export interface FocusNewsApi {
   job: {
     onProgress(handler: (progress: JobProgress) => void): Unsubscribe
     onResult(handler: (result: JobResult) => void): Unsubscribe
+  }
+  /**
+   * CLI 控制面（主进程本地 HTTP 服务 → 渲染进程）：
+   * 渲染进程注册命令路由后调用 ready()，主进程才开始转发外部命令。
+   */
+  cli: {
+    onCommand(handler: (request: CliCommandRequest) => void): Unsubscribe
+    respond(id: string, response: CliResponse): void
+    ready(): void
   }
 }
 

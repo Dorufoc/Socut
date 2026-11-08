@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { FPS_29_97, FPS_30 } from '@shared/constants'
 import { frameTimeSec } from '@shared/fps'
-import { choosePreviewFrame } from './previewFrame'
+import type { RenderJobSpec } from '@shared/types'
+import { choosePreviewFrame, decidePreviewRender, type PreviewRenderState } from './previewFrame'
 
 /**
  * 预览该出哪一帧（P4 预览轴接管）：
@@ -47,5 +48,53 @@ describe('choosePreviewFrame', () => {
     const secondFrame = choosePreviewFrame({ elapsedSec: 0, overrideSec: 1, fps: FPS_29_97, startFrame: 0, endFrame: 300 })
 
     expect(secondFrame.frame).toBe(29)
+  })
+})
+
+/**
+ * Task 2：rAF 每帧的「重画/上屏」判据。
+ * 内容输入（帧号、规格引用、安全区）变了才允许碰原生层；
+ * 只影响显示的条件（CSS 尺寸、DPR、透明底）只重新 blit；全都没变就整帧跳过。
+ */
+describe('decidePreviewRender', () => {
+  const jobA = { width: 1920, height: 1080 } as unknown as RenderJobSpec
+  const jobB = { width: 1920, height: 1080 } as unknown as RenderJobSpec
+  const base: PreviewRenderState = {
+    frame: 10,
+    spec: jobA,
+    cssWidth: 800,
+    cssHeight: 450,
+    dpr: 1,
+    safeArea: false,
+    transparent: false
+  }
+
+  it('force 或首帧（last == null）必须整帧出图', () => {
+    expect(decidePreviewRender(base, base, true)).toEqual({ render: true, blit: true })
+    expect(decidePreviewRender(base, null, false)).toEqual({ render: true, blit: true })
+    expect(decidePreviewRender(base, null, true)).toEqual({ render: true, blit: true })
+  })
+
+  it('全部相同且没有 force：既不重画也不重新上屏（暂停同帧的静默态）', () => {
+    expect(decidePreviewRender(base, { ...base }, false)).toEqual({ render: false, blit: false })
+  })
+
+  it('帧号 / spec 引用 / 安全区变化：必须重画原生层并上屏', () => {
+    expect(decidePreviewRender({ ...base, frame: 11 }, base, false)).toEqual({ render: true, blit: true })
+    expect(decidePreviewRender({ ...base, spec: jobB }, base, false)).toEqual({ render: true, blit: true })
+    expect(decidePreviewRender({ ...base, safeArea: true }, base, false)).toEqual({ render: true, blit: true })
+  })
+
+  it('只有 CSS 尺寸 / DPR / 透明底变化：只重新 blit，不重画字幕层', () => {
+    expect(decidePreviewRender({ ...base, cssWidth: 801 }, base, false)).toEqual({ render: false, blit: true })
+    expect(decidePreviewRender({ ...base, cssHeight: 451 }, base, false)).toEqual({ render: false, blit: true })
+    expect(decidePreviewRender({ ...base, dpr: 2 }, base, false)).toEqual({ render: false, blit: true })
+    expect(decidePreviewRender({ ...base, transparent: true }, base, false)).toEqual({ render: false, blit: true })
+  })
+
+  it('内容与显示同时变化：仍然按内容优先（整帧出图）', () => {
+    expect(
+      decidePreviewRender({ ...base, frame: 12, cssWidth: 900, transparent: true }, base, false)
+    ).toEqual({ render: true, blit: true })
   })
 })

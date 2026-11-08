@@ -49,6 +49,11 @@ export interface UiState {
   playing: boolean
   /** 播放头（秒），仅供 UI 文本显示，节流更新 */
   displayTimeSec: number
+  /**
+   * 帧级播放头位置（秒）：只给 `<Playhead>`（时间轴蓝线）定位用，每帧更新。
+   * `displayTimeSec` 仍是 10Hz 的 UI 文本值（时间码、拆分参照），两者不要混用。
+   */
+  playheadSec: number
   /** 界面模式：基础模式只留常用入口，高级模式展开全部样式与编码选项 */
   uiMode: UiMode
   showSafeArea: boolean
@@ -71,6 +76,7 @@ export interface UiState {
 
   setPlaying: (playing: boolean) => void
   setDisplayTime: (sec: number) => void
+  setPlayheadSec: (sec: number) => void
   setUiMode: (mode: UiMode) => void
   toggleSafeArea: () => void
   setPreviewCanvas: (kind: ExportCanvasKind | null) => void
@@ -122,6 +128,7 @@ export const useUiStore = create<UiState>((set) => ({
   setView: (view) => set((state) => (state.view === view ? state : { view })),
   playing: false,
   displayTimeSec: 0,
+  playheadSec: 0,
   // 规格：程序启动总是进入基础模式（不跨会话记住高级模式）
   uiMode: 'basic',
   showSafeArea: false,
@@ -139,6 +146,8 @@ export const useUiStore = create<UiState>((set) => ({
 
   setPlaying: (playing) => set({ playing }),
   setDisplayTime: (sec) => set({ displayTimeSec: sec }),
+  // 帧号不变时重复写入不产生新 state：预览循环每帧都会走到这里
+  setPlayheadSec: (sec) => set((state) => (state.playheadSec === sec ? state : { playheadSec: sec })),
   setUiMode: (mode) => set({ uiMode: mode }),
   toggleSafeArea: () => set((state) => ({ showSafeArea: !state.showSafeArea })),
   setPreviewCanvas: (kind) =>
