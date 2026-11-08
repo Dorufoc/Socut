@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * FocusNews CLI —— 无依赖 Node 客户端。
+ * Socut CLI —— 无依赖 Node 客户端。
  *
  * 设计目标：给 AI Agent 一个稳定的 JSON 控制面。命令通过本机 HTTP 服务
- * 驱动已经运行的 FocusNews；若应用未启动，则自动以 `--cli-server` 模式拉起。
+ * 驱动已经运行的 Socut；若应用未启动，则自动以 `--cli-server` 模式拉起。
  *
  * 用法：
- *   node cli/focusnews-cli.mjs app health --pretty
- *   node cli/focusnews-cli.mjs project open --path D:\work\demo.focusnews
- *   node cli/focusnews-cli.mjs export run --kind overlayMp4 --output-dir D:\out --file-name demo
+ *   node cli/socut-cli.mjs app health --pretty
+ *   node cli/socut-cli.mjs project open --path D:\work\demo.socut
+ *   node cli/socut-cli.mjs export run --kind overlayMp4 --output-dir D:\out --file-name demo
  */
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
@@ -191,26 +191,26 @@ function candidateServerFiles(config) {
   }
 
   add(config.serverFile)
-  add(process.env.FOCUSNEWS_CLI_SERVER_FILE)
-  if (process.env.FOCUSNEWS_USER_DATA) {
-    add(path.join(process.env.FOCUSNEWS_USER_DATA, 'cli', 'server.json'))
+  add(process.env.SOCUT_CLI_SERVER_FILE)
+  if (process.env.SOCUT_USER_DATA) {
+    add(path.join(process.env.SOCUT_USER_DATA, 'cli', 'server.json'))
   }
 
   const appData = process.env.APPDATA
   if (appData) {
-    for (const name of ['FocusNews', 'focusnews', 'Electron']) {
+    for (const name of ['Socut', 'socut', 'Electron']) {
       add(path.join(appData, name, 'cli', 'server.json'))
     }
   }
 
   const home = os.homedir()
   if (process.platform === 'darwin') {
-    for (const name of ['FocusNews', 'focusnews']) {
+    for (const name of ['Socut', 'socut']) {
       add(path.join(home, 'Library', 'Application Support', name, 'cli', 'server.json'))
     }
   } else if (process.platform !== 'win32') {
     const configHome = process.env.XDG_CONFIG_HOME || path.join(home, '.config')
-    for (const name of ['FocusNews', 'focusnews']) {
+    for (const name of ['Socut', 'socut']) {
       add(path.join(configHome, name, 'cli', 'server.json'))
     }
   }
@@ -284,7 +284,7 @@ function findRepoRoot(start) {
     if (existsSync(manifest)) {
       try {
         const parsed = JSON.parse(readFileSync(manifest, 'utf8'))
-        if (parsed && parsed.name === 'focusnews') return current
+        if (parsed && parsed.name === 'socut') return current
       } catch {
         // 继续向上找
       }
@@ -313,17 +313,17 @@ function launchCandidates() {
     candidates.push({ key, exe, args, cwd })
   }
 
-  if (process.env.FOCUSNEWS_EXE) {
-    add(process.env.FOCUSNEWS_EXE, ['--cli-server'], path.dirname(process.env.FOCUSNEWS_EXE))
+  if (process.env.SOCUT_EXE) {
+    add(process.env.SOCUT_EXE, ['--cli-server'], path.dirname(process.env.SOCUT_EXE))
   }
 
-  const packagedName = process.platform === 'win32' ? 'FocusNews.exe' : 'FocusNews'
+  const packagedName = process.platform === 'win32' ? 'Socut.exe' : 'Socut'
   const sibling = path.resolve(SCRIPT_DIR, '..', packagedName)
   add(sibling, ['--cli-server'], path.resolve(SCRIPT_DIR, '..'))
 
-  if (process.env.FOCUSNEWS_ELECTRON) {
+  if (process.env.SOCUT_ELECTRON) {
     const root = findRepoRoot(SCRIPT_DIR) || path.resolve(SCRIPT_DIR, '..')
-    add(process.env.FOCUSNEWS_ELECTRON, [root, '--cli-server'], root)
+    add(process.env.SOCUT_ELECTRON, [root, '--cli-server'], root)
   }
 
   const repoRoot = findRepoRoot(SCRIPT_DIR) || findRepoRoot(process.cwd())
@@ -332,10 +332,10 @@ function launchCandidates() {
     if (electron) add(electron, [repoRoot, '--cli-server'], repoRoot)
   }
 
-  // 打包版 .cmd 用 FocusNews.exe + ELECTRON_RUN_AS_NODE 运行本脚本：
+  // 打包版 .cmd 用 Socut.exe + ELECTRON_RUN_AS_NODE 运行本脚本：
   // 此时 process.execPath 就是 GUI exe，可直接作为自动拉起入口。
   const execName = path.basename(process.execPath).toLowerCase()
-  if (execName.includes('focusnews')) {
+  if (execName.includes('socut')) {
     add(process.execPath, ['--cli-server'], path.dirname(process.execPath))
   }
 
@@ -345,14 +345,14 @@ function launchCandidates() {
 async function launchAndWait(config) {
   if (config.noLaunch) {
     throw new CliError(
-      '未发现运行中的 FocusNews，且已指定 --no-launch。请先启动应用，或去掉 --no-launch。',
+      '未发现运行中的 Socut，且已指定 --no-launch。请先启动应用，或去掉 --no-launch。',
       'CLI_CONNECT_FAILED'
     )
   }
   const candidates = launchCandidates()
   if (candidates.length === 0) {
     throw new CliError(
-      '未发现运行中的 FocusNews，也找不到可自动拉起的可执行文件。请设置 FOCUSNEWS_EXE 指向 FocusNews.exe。',
+      '未发现运行中的 Socut，也找不到可自动拉起的可执行文件。请设置 SOCUT_EXE 指向 Socut.exe。',
       'CLI_LAUNCH_FAILED'
     )
   }
@@ -382,7 +382,7 @@ async function launchAndWait(config) {
     errors.push(`${candidate.exe}: 启动后 60 秒内未发现控制服务`)
   }
 
-  throw new CliError(`FocusNews 自动拉起失败：${errors.join('；')}`, 'CLI_LAUNCH_FAILED')
+  throw new CliError(`Socut 自动拉起失败：${errors.join('；')}`, 'CLI_LAUNCH_FAILED')
 }
 
 function childEnv() {
@@ -535,7 +535,7 @@ async function execute(config) {
   const command = normalizeCommand(config)
 
   if (config.version) {
-    return { name: 'focusnews-cli', version: CLI_VERSION, protocolVersion: PROTOCOL_VERSION }
+    return { name: 'socut-cli', version: CLI_VERSION, protocolVersion: PROTOCOL_VERSION }
   }
   if (config.help || command === '' || command === 'help') {
     printHelp()
@@ -575,10 +575,10 @@ function requiredString(params, key, flag) {
 function printHelp() {
   process.stdout.write(
     [
-      'FocusNews CLI',
+      'Socut CLI',
       '',
       '用法：',
-      '  focusnews-cli <命令> [参数...]',
+      '  socut-cli <命令> [参数...]',
       '',
       '常用命令：',
       '  app info | app health | app commands | app gpu | app shutdown',
@@ -598,18 +598,18 @@ function printHelp() {
       '  --progress          导出等待时把进度写到 stderr',
       '  --timeout <ms>      请求/等待超时，默认 1800000（30 分钟）',
       '  --server <file>     指定 server.json 路径',
-      '  --no-launch         不自动拉起 FocusNews',
+      '  --no-launch         不自动拉起 Socut',
       '  --token <token>     覆盖 server.json 中的 token（调试用）',
       '  --help              显示本帮助',
       '  --version           显示 CLI 版本',
       '',
       '参数示例：',
-      '  focusnews-cli project open --path D:\\\\work\\\\demo.focusnews',
-      '  focusnews-cli media import --path D:\\\\media\\\\a.mp4 --ack-non169 --vfr convert',
-      '  focusnews-cli export run --kind overlayMp4 --output-dir D:\\\\out --file-name demo',
-      '  focusnews-cli clip update --id clip-1 --patch \'{"content":{"main":"标题"}}\'',
+      '  socut-cli project open --path D:\\\\work\\\\demo.socut',
+      '  socut-cli media import --path D:\\\\media\\\\a.mp4 --ack-non169 --vfr convert',
+      '  socut-cli export run --kind overlayMp4 --output-dir D:\\\\out --file-name demo',
+      '  socut-cli clip update --id clip-1 --patch \'{"content":{"main":"标题"}}\'',
       '',
-      '完整命令清单：focusnews-cli app commands --pretty',
+      '完整命令清单：socut-cli app commands --pretty',
       ''
     ].join('\n')
   )

@@ -2,11 +2,11 @@ import type { ExportQuality, Fps, FontRecord, Resolution, ResolutionPreset, FpsP
 
 export const PROJECT_VERSION = 3
 
-export const APP_NAME = 'FocusNews'
-export const WINDOW_TITLE = 'FocusNews 新闻字幕条'
+export const APP_NAME = 'Socut'
+export const WINDOW_TITLE = 'Socut 新闻字幕条'
 
 /** 临时目录根名（app.getPath('temp') 下） */
-export const TEMP_ROOT = 'focusnews'
+export const TEMP_ROOT = 'socut'
 export const USER_DATA_DIRS = {
   fonts: 'fonts',
   projects: 'projects',
@@ -19,13 +19,13 @@ export const USER_DATA_DIRS = {
   stabPreview: 'stab-preview',
   /** v10：4K / MXF 预览代理（整片 720p H.264），按 素材+签名指纹 命名 */
   proxies: 'proxies',
-  /** 启动页工程封面（covers/<entryId>.png），由 focusnews-cover:// 协议只读提供 */
+  /** 启动页工程封面（covers/<entryId>.png），由 socut-cover:// 协议只读提供 */
   covers: 'covers'
 } as const
 
 export const FONTS_MANIFEST_FILE = 'fonts.json'
-export const AUTOSAVE_FILE = 'autosave.focusnews.json'
-export const AUTOSAVE_BACKUP_FILE = 'autosave.focusnews.bak.json'
+export const AUTOSAVE_FILE = 'autosave.socut.json'
+export const AUTOSAVE_BACKUP_FILE = 'autosave.socut.bak.json'
 /** 最近工程索引（userData/projects/history.json） */
 export const RECENT_HISTORY_FILE = 'history.json'
 
@@ -367,7 +367,7 @@ export const DEFAULT_FONT_ID = 'builtin-notosanssc-700'
  * FontFace 注册用的唯一 family 名（按 fontId 隔离）。
  * 避免同一 family 下不同字重相互干扰导致 Canvas 选中错误的字形。
  */
-export const FONT_FAMILY_PREFIX = 'FocusNews'
+export const FONT_FAMILY_PREFIX = 'Socut'
 export const cssFamilyFor = (fontId: string): string => `${FONT_FAMILY_PREFIX}-${fontId}`
 
 // ---------------------------------------------------------------------------

@@ -32,9 +32,9 @@ export function useMediaIntegrity(): void {
       const legacyPath = store.project.refVideo?.path ?? null
       const items = store.project.media.map((item) => ({ id: item.id, path: item.path, name: item.name }))
       const checks = await Promise.all(
-        items.map(async (item) => ({ ...item, exists: await window.focusnews.video.exists(item.path) }))
+        items.map(async (item) => ({ ...item, exists: await window.socut.video.exists(item.path) }))
       )
-      const legacyMissing = legacyPath ? !(await window.focusnews.video.exists(legacyPath)) : false
+      const legacyMissing = legacyPath ? !(await window.socut.video.exists(legacyPath)) : false
       if (cancelled) return
       const missing = checks.filter((item) => !item.exists)
       // v1 兼容：旧取证脚本只写 refVideo 时，缺失态落在 refVideoMissing 上
@@ -53,7 +53,7 @@ export function useMediaIntegrity(): void {
           useUiStore.getState().setNotice(`${item.name}：${TEXT.refVideoMissing.notice}`)
           continue
         }
-        const picked = await window.focusnews.video.pickAndProbe()
+        const picked = await window.socut.video.pickAndProbe()
         if (cancelled || !picked) {
           useUiStore.getState().setNotice(TEXT.refVideoMissing.notice)
           continue

@@ -132,7 +132,7 @@ root（position:absolute，left=right=布局边距，bottom=8vh，flex-direction
 1. 8 套 × {360p, 720p, 1080p, 2K, 4K, 9:16, 21:9} 布局快照已由 `tests/presets.test.ts` 覆盖，
    包括「副标题在上、左缘对齐、更矮、不越过右边距」的结构契约；
 2. 视觉检查已脚本化：`npm run visual:check`（8 预设 × 3 文案，出图 + 指标 + 退出码）；
-   逐帧动画评审表仍可用 `FOCUSNEWS_REVIEW_SHEET=<png>` 产出 8 预设 × 7 关键帧的动画总览；
+   逐帧动画评审表仍可用 `SOCUT_REVIEW_SHEET=<png>` 产出 8 预设 × 7 关键帧的动画总览；
 3. 任何「弹跳、回弹、缩放、旋转」类动效一律视为缺陷（曲线表已从源头禁止）；
 4. 自定义参数与预设的关系由 `tests/clipStyle.test.ts` + `projectStore.test.ts`「切预设与清除自定义」
    + `PresetPicker.test.tsx` / `ClipInspector.test.tsx` 共同守住（差集写入、切预设还原、播放头落到可见帧）。

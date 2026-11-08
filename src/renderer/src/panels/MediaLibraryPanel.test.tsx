@@ -128,7 +128,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   resetProject()
   useProxyStore.setState({ entries: {}, errors: {}, busy: {} })
-  delete (window as { focusnews?: unknown }).focusnews
+  delete (window as { socut?: unknown }).socut
   useUiStore.setState({ missingMediaIds: [], refVideoMissing: false })
   localStorage.clear()
 })
@@ -306,7 +306,7 @@ describe('预览代理（v10）', () => {
   } {
     const proxyStatus = vi.fn(async () => ({ fresh: true, path: 'D:/proxies/fresh.mp4', signature: 'sig' }))
     const removeProxy = vi.fn(async () => undefined)
-    Object.defineProperty(window, 'focusnews', {
+    Object.defineProperty(window, 'socut', {
       configurable: true,
       value: {
         media: {

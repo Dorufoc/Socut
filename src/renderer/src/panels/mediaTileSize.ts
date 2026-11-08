@@ -6,7 +6,7 @@
  * 绝不阻断素材库渲染。
  */
 
-export const MEDIA_TILE_SIZE_KEY = 'focusnews.media.tile-size.v1'
+export const MEDIA_TILE_SIZE_KEY = 'socut.media.tile-size.v1'
 
 /** 默认列宽（px）：默认左栏 300px 时排成 2 列，接近剪映导入面板的密度 */
 export const MEDIA_TILE_SIZE_DEFAULT = 120

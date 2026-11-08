@@ -12,7 +12,7 @@ const statusMock = vi.fn<(request: MediaProxyRequest) => Promise<MediaProxyStatu
 const removeMock = vi.fn<(mediaId: string) => Promise<void>>()
 
 function installApi(): void {
-  Object.defineProperty(window, 'focusnews', {
+  Object.defineProperty(window, 'socut', {
     configurable: true,
     value: { media: { proxy: proxyMock, proxyStatus: statusMock, removeProxy: removeMock } }
   })
@@ -52,7 +52,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetStore()
-  delete (window as { focusnews?: unknown }).focusnews
+  delete (window as { socut?: unknown }).socut
 })
 
 describe('proxyStore', () => {

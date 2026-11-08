@@ -15,7 +15,7 @@ import type { JobResult, MediaProxyRequest } from '@shared/types'
 export const MEDIA_PROXY_JOB_PREFIX = 'proxy-'
 
 export interface MediaProxyEntry {
-  /** 代理 mp4 绝对路径（focusnews-media:// 由预览层现取） */
+  /** 代理 mp4 绝对路径（socut-media:// 由预览层现取） */
   path: string
   /** 受理那一刻的签名（主进程用同一函数计算） */
   signature: string
@@ -58,7 +58,7 @@ export const useProxyStore = create<MediaProxyState>((set, get) => ({
   apply: async ({ mediaId, path, hasAudio, durationSec }) => {
     const existing = get().entries[mediaId]
     if (existing && existing.sourcePath === path) return
-    const api = window.focusnews?.media
+    const api = window.socut?.media
     if (!api?.proxy) {
       set((state) => ({ errors: { ...state.errors, [mediaId]: '当前环境不支持预览代理' } }))
       return
@@ -119,9 +119,9 @@ export const useProxyStore = create<MediaProxyState>((set, get) => ({
   revalidate: async (mediaId, path) => {
     const entry = get().entries[mediaId]
     if (!entry || entry.sourcePath !== path) return
-    let status: Awaited<ReturnType<typeof window.focusnews.media.proxyStatus>>
+    let status: Awaited<ReturnType<typeof window.socut.media.proxyStatus>>
     try {
-      const api = window.focusnews?.media
+      const api = window.socut?.media
       if (!api?.proxyStatus) return
       status = await api.proxyStatus({ mediaId, path })
     } catch {
@@ -155,7 +155,7 @@ export const useProxyStore = create<MediaProxyState>((set, get) => ({
     }))
     // 拿不到 IPC（预加载未注入 / 测试环境）也不能抛：一次「移出素材」的点击不该打断事件链
     if (removeFiles) {
-      void window.focusnews?.media?.removeProxy?.(mediaId)?.catch(() => undefined)
+      void window.socut?.media?.removeProxy?.(mediaId)?.catch(() => undefined)
     }
   },
 

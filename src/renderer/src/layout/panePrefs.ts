@@ -10,7 +10,7 @@ import { normalizePaneRatios, serializePaneRatios, type PaneRatios } from '@shar
  * 任何异常（隐私模式、配额、脏 JSON）都只回落到默认布局，绝不阻断界面渲染。
  */
 
-export const PANE_PREFS_KEY = 'focusnews.layout.panes.v1'
+export const PANE_PREFS_KEY = 'socut.layout.panes.v1'
 
 /** 只暴露读写删除三件事，测试可以直接传入内存实现。 */
 export type PanePrefsStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>

@@ -103,7 +103,7 @@ beforeAll(() => {
   originalPause = HTMLMediaElement.prototype.pause
   HTMLMediaElement.prototype.play = vi.fn(() => Promise.resolve())
   HTMLMediaElement.prototype.pause = vi.fn()
-  ;(window as unknown as { focusnews?: unknown }).focusnews = {
+  ;(window as unknown as { socut?: unknown }).socut = {
     video: {
       previewUrl: async (path: string) => `mock://${path}`
     }
@@ -118,7 +118,7 @@ afterAll(() => {
   } else {
     delete (HTMLMediaElement.prototype as unknown as { seeking?: unknown }).seeking
   }
-  delete (window as unknown as { focusnews?: unknown }).focusnews
+  delete (window as unknown as { socut?: unknown }).socut
 })
 
 beforeEach(() => resetPreviewPerf())

@@ -4,7 +4,7 @@ setlocal enableextensions
 cd /d "%~dp0"
 
 echo ==========================================
-echo   FocusNews one-click packaging (x64)
+echo   Socut one-click packaging (x64)
 echo ==========================================
 echo.
 

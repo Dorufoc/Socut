@@ -54,13 +54,13 @@ async function registerFonts(fontIndex: FontRecord[]): Promise<void> {
  * 门禁（CompatModal）在这里按“已确认”处理：它属于 UI 阻断行为，由 M3-2 覆盖。
  */
 async function runOverlaySmoke(config: SmokeConfig): Promise<void> {
-  if (!config.refVideoPath) throw new Error('overlay 场景缺少参考视频路径（FOCUSNEWS_SMOKE_REF）')
+  if (!config.refVideoPath) throw new Error('overlay 场景缺少参考视频路径（SOCUT_SMOKE_REF）')
   const startedAt = performance.now()
-  const fontIndex: FontRecord[] = await window.focusnews.fonts.list()
+  const fontIndex: FontRecord[] = await window.socut.fonts.list()
   if (fontIndex.length === 0) throw new Error('内置字体未就位（npm run fetch:fonts）')
   await registerFonts(fontIndex)
 
-  const probe = await window.focusnews.video.probe(config.refVideoPath)
+  const probe = await window.socut.video.probe(config.refVideoPath)
   if (!probe) throw new Error(`参考视频探测失败：${config.refVideoPath}`)
   // 本场景会排两个片段（各占时长一半 + 中间 0.4s 间隙）；参考太短会让布局退化，
   // 造成“出点提前”这种让人误会的失败，所以直接报前置条件不足。
@@ -145,7 +145,7 @@ async function runOverlaySmoke(config: SmokeConfig): Promise<void> {
     }
   }
   const resultPromise = waitForJobResult(jobId, 150_000)
-  await window.focusnews.export.start(request)
+  await window.socut.export.start(request)
   const result = await resultPromise
 
   await report({
@@ -189,7 +189,7 @@ async function runGateScenario(config: SmokeConfig): Promise<void> {
 
 async function runExportSmoke(config: SmokeConfig): Promise<void> {
   const startedAt = performance.now()
-  const fontIndex: FontRecord[] = await window.focusnews.fonts.list()
+  const fontIndex: FontRecord[] = await window.socut.fonts.list()
   if (fontIndex.length === 0) {
     await report({
       jobId: 'none',
@@ -257,7 +257,7 @@ async function runExportSmoke(config: SmokeConfig): Promise<void> {
   }
   // 结果订阅先于发起：避免极快任务下错过已完成事件
   const resultPromise = waitForJobResult(jobId, 150_000)
-  await window.focusnews.export.start(request)
+  await window.socut.export.start(request)
 
   // 取消场景：监控到**主进程已写出**若干帧后主动取消（验收第 8 条的取证入口）。
   // 不能改用渲染侧的 frameStats：帧先排入 IPC 队列，主进程可能一帧还没写盘就被取消，
@@ -265,7 +265,7 @@ async function runExportSmoke(config: SmokeConfig): Promise<void> {
   let framesDoneBeforeCancel = 0
   if (config.scenario === 'cancel') {
     framesDoneBeforeCancel = await waitProgressFrames(jobId, 8)
-    await window.focusnews.export.cancel(jobId)
+    await window.socut.export.cancel(jobId)
   }
 
   const result = await resultPromise
@@ -299,7 +299,7 @@ async function waitProgressFrames(jobId: string, minFrames: number): Promise<num
       off()
       resolve(seen)
     }
-    const off = window.focusnews.job.onProgress((progress) => {
+    const off = window.socut.job.onProgress((progress) => {
       if (progress.jobId !== jobId) return
       seen = Math.max(seen, progress.framesDone)
       if (seen >= minFrames) finish()
@@ -313,7 +313,7 @@ async function waitProgressFrames(jobId: string, minFrames: number): Promise<num
 async function waitForJobResult(jobId: string, timeoutMs: number): Promise<JobResult | null> {
   return new Promise((resolve) => {
     let settled = false
-    const off = window.focusnews.job.onResult((incoming) => {
+    const off = window.socut.job.onResult((incoming) => {
       if (incoming.jobId !== jobId) return
       settled = true
       off()
@@ -329,7 +329,7 @@ async function waitForJobResult(jobId: string, timeoutMs: number): Promise<JobRe
 
 async function report(payload: SmokeReport): Promise<void> {
   try {
-    await window.focusnews.app.smokeReport(payload)
+    await window.socut.app.smokeReport(payload)
   } catch (error) {
     // 主进程收不到上报时会被自身的超时看门狗终止
     console.error('冒烟上报失败', error)

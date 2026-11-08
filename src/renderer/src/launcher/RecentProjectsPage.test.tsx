@@ -39,7 +39,7 @@ function installApi(
 ): { recentList: ReturnType<typeof vi.fn>; renameRecent: ReturnType<typeof vi.fn> } {
   const recentList = vi.fn(async () => cards)
   const renameRecent = vi.fn(rename ?? (async () => null))
-  ;(window as unknown as { focusnews: unknown }).focusnews = {
+  ;(window as unknown as { socut: unknown }).socut = {
     project: { recentList, renameRecent }
   }
   return { recentList, renameRecent }
@@ -73,7 +73,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
-  delete (window as unknown as { focusnews?: unknown }).focusnews
+  delete (window as unknown as { socut?: unknown }).socut
 })
 
 describe('RecentProjectsPage', () => {

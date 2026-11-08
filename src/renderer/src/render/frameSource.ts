@@ -63,7 +63,7 @@ export function preparedJobCount(): number {
 /** 渲染并回传一帧；任何异常都以 error 字段回给主进程，由引擎判定任务失败。 */
 async function serveFrame(request: FrameRequest): Promise<void> {
   const entry = prepared.get(request.jobId)
-  const respond = (payload: FrameResponse): void => window.focusnews.export.sendFrame(payload)
+  const respond = (payload: FrameResponse): void => window.socut.export.sendFrame(payload)
   if (!entry) {
     respond({ jobId: request.jobId, index: request.index, error: '导出任务未就绪' })
     return
@@ -109,7 +109,7 @@ async function serveFrame(request: FrameRequest): Promise<void> {
 
 /** 订阅主进程的帧请求；返回卸载函数。 */
 export function attachFrameSource(): () => void {
-  return window.focusnews.export.onFrameRequest((message: FrameRequest | FrameEnd) => {
+  return window.socut.export.onFrameRequest((message: FrameRequest | FrameEnd) => {
     if (!message || typeof message !== 'object') return
     if ('reason' in message) {
       releaseExportJob(message.jobId)

@@ -58,7 +58,7 @@ function resetProject(): void {
 
 beforeEach(() => {
   resetProject()
-  ;(window as unknown as { focusnews: unknown }).focusnews = {
+  ;(window as unknown as { socut: unknown }).socut = {
     media: {
       generateThumb: vi.fn(async () => null)
     }

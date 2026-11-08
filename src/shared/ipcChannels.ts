@@ -4,9 +4,9 @@ export const CHANNELS = {
   chooseDirectory: 'app:chooseDirectory',
   revealPath: 'app:revealPath',
   writeLog: 'app:writeLog',
-  /** 应用内端到端冒烟（FOCUSNEWS_SMOKE=1）：渲染侧跑完后由主进程校验并退出 */
+  /** 应用内端到端冒烟（SOCUT_SMOKE=1）：渲染侧跑完后由主进程校验并退出 */
   smokeReport: 'app:smokeReport',
-  /** 仅开发：把渲染侧生成的取证图片（逐帧动画评审表）写盘（FOCUSNEWS_REVIEW_SHEET=<png>） */
+  /** 仅开发：把渲染侧生成的取证图片（逐帧动画评审表）写盘（SOCUT_REVIEW_SHEET=<png>） */
   devWriteFile: 'app:devWriteFile',
   /** 仅开发：读仓库 spikes/ 下的取证素材（评审表背景帧） */
   devReadFile: 'app:devReadFile',
@@ -42,13 +42,13 @@ export const CHANNELS = {
   videoProbe: 'video:probe',
   /** 参考视频文件是否仍存在（规格 §8：文件被移动时要提示重新定位） */
   videoExists: 'video:exists',
-  /** 参考视频预览地址：主进程校验后返回 focusnews-media:// 流地址（找不到返回 null） */
+  /** 参考视频预览地址：主进程校验后返回 socut-media:// 流地址（找不到返回 null） */
   videoPreviewUrl: 'video:previewUrl',
   /** 水印：选择一张本机图片并探测原图尺寸（用户取消返回 null） */
   watermarkPick: 'watermark:pick',
   /** CLI：按路径探测水印图片尺寸（不弹对话框） */
   watermarkProbe: 'watermark:probe',
-  /** v2：主进程 ffmpeg 抽帧缩略图，返回 focusnews-thumb://<mediaId>（失败返回 null） */
+  /** v2：主进程 ffmpeg 抽帧缩略图，返回 socut-thumb://<mediaId>（失败返回 null） */
   mediaGenerateThumb: 'media:generateThumb',
   /** v2：将已登记的 thumb 绝对路径交回自定义协议可读 */
   mediaThumbUrl: 'media:thumbUrl',

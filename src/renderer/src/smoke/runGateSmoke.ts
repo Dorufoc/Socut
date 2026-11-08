@@ -72,7 +72,7 @@ interface DriveResult {
 async function driveOnce(fixtureDir: string, file: string, decision: DialogAnswer): Promise<DriveResult> {
   resetProject()
   const absolute = `${fixtureDir.replace(/[\\/]+$/, '')}/${file}`
-  const probe = await window.focusnews.video.probe(absolute)
+  const probe = await window.socut.video.probe(absolute)
   if (!probe) throw new Error(`夹具探测失败：${absolute}（先跑 npm run make:fixtures）`)
   const flags = probe.flags
   const pending = importMediaWith({ path: absolute, probe })

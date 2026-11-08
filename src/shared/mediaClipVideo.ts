@@ -439,7 +439,7 @@ export function curveTableValues(video: MediaClipVideo, channel: 'r' | 'g' | 'b'
 }
 
 /** 该片段需要的 SVG 滤镜 id（与 PreviewStage 里 <filter> 的定义同源）。 */
-export const MEDIA_GRADE_FILTER_ID = 'focusnews-media-grade'
+export const MEDIA_GRADE_FILTER_ID = 'socut-media-grade'
 
 /**
  * 预览里的调色（CSS filter）。

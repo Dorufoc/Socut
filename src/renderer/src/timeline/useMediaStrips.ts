@@ -60,7 +60,7 @@ async function requestStrip(key: string, input: StripRequestInput): Promise<Stri
   const task = (async (): Promise<StripState> => {
     await acquireSlot()
     try {
-      const result = await window.focusnews.media.strip({
+      const result = await window.socut.media.strip({
         mediaId: input.mediaId,
         path: input.path,
         sourceInSec: input.sourceInSec,

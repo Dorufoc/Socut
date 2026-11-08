@@ -21,7 +21,7 @@ export function useProjectAutosave(): { lastError: string | null } {
     const write = (): void => {
       if (savedRevRef.current === revision) return
       // entryId 在真正写入时现取：debounce 窗口内另存为/打开切换了身份，也不会写错归属。
-      void window.focusnews.project
+      void window.socut.project
         .autosaveWrite(useProjectStore.getState().project, useProjectStore.getState().currentEntryId)
         .then(() => {
           savedRevRef.current = revision
@@ -29,7 +29,7 @@ export function useProjectAutosave(): { lastError: string | null } {
         })
         .catch((error: unknown) => {
           errorRef.current = String(error)
-          void window.focusnews.app.writeLog('error', `自动保存失败：${String(error)}`)
+          void window.socut.app.writeLog('error', `自动保存失败：${String(error)}`)
         })
     }
     timerRef.current = setTimeout(write, AUTOSAVE_DEBOUNCE_MS)

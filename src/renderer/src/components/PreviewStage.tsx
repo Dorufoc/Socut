@@ -462,7 +462,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     let cancelled = false
     setWatermarkUrl(null)
     if (!watermarkPath) return
-    void window.focusnews.video
+    void window.socut.video
       .previewUrl(watermarkPath)
       .then((url) => {
         if (!cancelled) setWatermarkUrl(url)
@@ -679,7 +679,7 @@ function AudioBed({ clips, media, atSec, playing }: AudioBedProps): ReactElement
         if (audioUrlCache.has(id)) return [id, audioUrlCache.get(id) ?? null] as const
         const item = media.find((m) => m.id === id)
         // 测试环境没有 preload 注入：拿不到协议地址就当“暂不可试听”，不能抛未处理拒绝
-        const api = item ? window.focusnews?.video : null
+        const api = item ? window.socut?.video : null
         const url = api ? await api.previewUrl(item!.path).catch(() => null) : null
         audioUrlCache.set(id, url)
         return [id, url] as const

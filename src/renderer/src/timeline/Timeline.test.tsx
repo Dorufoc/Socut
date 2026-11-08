@@ -401,7 +401,7 @@ describe('音频轨', () => {
     const mediaTrack = root.querySelector('.timeline__track--media') as HTMLElement
 
     const transfer = {
-      types: ['application/x-focusnews-media'],
+      types: ['application/x-socut-media'],
       setData: () => undefined,
       getData: () => 'media-1',
       dropEffect: 'copy'

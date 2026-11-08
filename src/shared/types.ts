@@ -356,7 +356,7 @@ export interface MediaItem {
   hdrAck: boolean
   vfrPolicy: VfrPolicy
   compactMode: 'auto' | 'compact' | 'ultrawide' | 'standard'
-  /** 主进程抽帧缩略图的自定义协议地址（focusnews-thumb://<mediaId>）；无图时为空字符串 */
+  /** 主进程抽帧缩略图的自定义协议地址（socut-thumb://<mediaId>）；无图时为空字符串 */
   thumbnailUrl: string
   importedAt: string
   /** v10：所属分组 id（缺省 = 未分组；必须指向存在的 `Project.mediaBins`） */
@@ -626,7 +626,7 @@ export interface MediaStripRequest {
 
 /** 生成结果：失败（源文件不在 / FFmpeg 缺失 / 抽帧报错）统一 url=null，渲染层显示占位符。 */
 export interface MediaStripResult {
-  /** focusnews-strip://<token>；不可用时 null */
+  /** socut-strip://<token>；不可用时 null */
   url: string | null
   /** 主进程实际使用的格数（可能与请求不同，渲染层以此为准） */
   frames: number

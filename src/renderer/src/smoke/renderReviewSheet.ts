@@ -10,7 +10,7 @@ import { NativeStage } from '../render/stage'
  * 逐帧动画评审表（计划 M4-7 的可自动化部分：8 预设 × 入场/出场关键帧）。
  * 全部走**生产同一套**像素生产者：buildRenderJob → computeClipBoxes → renderFrame(NativeStage)，
  * 因此这张表就是导出画面本身，不是第二套近似实现。
- * 只在开发环境由 FOCUSNEWS_REVIEW_SHEET 触发，写盘经主进程限定在仓库 spikes/ 下。
+ * 只在开发环境由 SOCUT_REVIEW_SHEET 触发，写盘经主进程限定在仓库 spikes/ 下。
  */
 
 const CLIP_SEC = 3
@@ -207,7 +207,7 @@ export async function renderReviewSheet(input: ReviewSheetInput): Promise<Review
 
   const blob = await sheet.convertToBlob({ type: 'image/png' })
   const buffer = await blob.arrayBuffer()
-  bytesWritten = await window.focusnews.app.writeFileDev(input.outputPath, new Uint8Array(buffer))
+  bytesWritten = await window.socut.app.writeFileDev(input.outputPath, new Uint8Array(buffer))
 
   return {
     presets: rows.length,

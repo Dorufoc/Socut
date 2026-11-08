@@ -140,7 +140,7 @@ describe('封面真机合成', () => {
   })
 
   afterAll(async () => {
-    if (process.env.FOCUSNEWS_CLEAN_TMP) await fs.rm(WORK_DIR, { recursive: true, force: true })
+    if (process.env.SOCUT_CLEAN_TMP) await fs.rm(WORK_DIR, { recursive: true, force: true })
   })
 
   it('合成单帧 PNG：尺寸正确、媒体区域为视频颜色、字幕区域保留透明层内容', async () => {

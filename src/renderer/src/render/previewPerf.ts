@@ -113,16 +113,16 @@ export function noteFrame(input: { renderMs: number; blitMs: number; frameInterv
 
 /**
  * 真机性能读数入口（SubTask 8.3）：CDP / devtools 控制台直接调用
- * `window.__focusnewsPreviewPerf()` 读快照、`__focusnewsPreviewPerfReset()` 清零。
+ * `window.__socutPreviewPerf()` 读快照、`__socutPreviewPerfReset()` 清零。
  */
 declare global {
   interface Window {
-    __focusnewsPreviewPerf?: () => PreviewPerfSnapshot
-    __focusnewsPreviewPerfReset?: () => void
+    __socutPreviewPerf?: () => PreviewPerfSnapshot
+    __socutPreviewPerfReset?: () => void
   }
 }
 
 if (typeof window !== 'undefined') {
-  window.__focusnewsPreviewPerf = () => previewPerfSnapshot()
-  window.__focusnewsPreviewPerfReset = () => resetPreviewPerf()
+  window.__socutPreviewPerf = () => previewPerfSnapshot()
+  window.__socutPreviewPerfReset = () => resetPreviewPerf()
 }

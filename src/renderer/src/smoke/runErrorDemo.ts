@@ -65,12 +65,12 @@ export async function runErrorDemo(fontIndex: FontRecord[]): Promise<ErrorDemoRe
   const request: ExportRequest = {
     jobId,
     // 不存在的盘符：FFmpeg 打不开输出文件，必然失败并带上 argv
-    target: { kind: 'transparentMov', outputDir: 'Z:\\focusnews-does-not-exist', fileName: 'err-demo.mov' },
+    target: { kind: 'transparentMov', outputDir: 'Z:\\socut-does-not-exist', fileName: 'err-demo.mov' },
     frameSpec: frameSpecOf(spec),
     frameDelivery: 'pipe',
     codec: 'prores4444'
   }
-  const startPromise = window.focusnews.export.start(request)
+  const startPromise = window.socut.export.start(request)
   // 等失败结果回到渲染侧（这就是失败面板的数据源）
   const result = await waitForResult(jobId, 60_000)
   await startPromise

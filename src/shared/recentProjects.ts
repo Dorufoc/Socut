@@ -7,7 +7,7 @@ import type { Fps, Project, Resolution } from './types'
  * 避免「日期命名」和「括号序号」在两个进程里各写一遍然后慢慢跑偏。
  *
  * 记录保存位置：userData/projects/history.json（由主进程原子写）。
- * 封面保存位置：userData/covers/<entryId>.png（由 focusnews-cover:// 协议读取）。
+ * 封面保存位置：userData/covers/<entryId>.png（由 socut-cover:// 协议读取）。
  */
 
 export const RECENT_HISTORY_VERSION = 1
@@ -277,5 +277,5 @@ export function filterRecentProjects<T extends RecentProjectEntry>(entries: read
 export function coverUrlFor(entry: Pick<RecentProjectEntry, 'id' | 'hasCover' | 'modifiedAt'>): string | null {
   if (!entry.hasCover) return null
   const version = Date.parse(entry.modifiedAt)
-  return `focusnews-cover://${entry.id}?v=${Number.isFinite(version) ? version : 0}`
+  return `socut-cover://${entry.id}?v=${Number.isFinite(version) ? version : 0}`
 }

@@ -37,7 +37,7 @@ const stubBridge = (
   stabPreview: (request: StabPreviewRequest) => Promise<StabPreviewResult>,
   remove = vi.fn().mockResolvedValue(undefined)
 ): void => {
-  ;(window as unknown as { focusnews: unknown }).focusnews = {
+  ;(window as unknown as { socut: unknown }).socut = {
     video: { stabPreview, stabPreviewRemove: remove },
     export: { cancel: vi.fn().mockResolvedValue(undefined) }
   }

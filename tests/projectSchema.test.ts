@@ -276,7 +276,7 @@ describe('时间轴合法性', () => {
   })
 
   it('自动存档文件名常量稳定（工程与备份成对）', () => {
-    expect(AUTOSAVE_FILE).toBe('autosave.focusnews.json')
+    expect(AUTOSAVE_FILE).toBe('autosave.socut.json')
     expect(PRESETS.length).toBe(8)
   })
 })

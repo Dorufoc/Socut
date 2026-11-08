@@ -58,14 +58,14 @@ const item: MediaItem = {
   hdrAck: true,
   vfrPolicy: 'none',
   compactMode: 'auto',
-  thumbnailUrl: 'focusnews-thumb://media-1',
+  thumbnailUrl: 'socut-thumb://media-1',
   importedAt: '2026-01-01T00:00:00.000Z'
 }
 
 /** 可控的 strip IPC：默认成功返回长图地址，单个用例可临时改写 */
 let stripCalls: MediaStripRequest[] = []
 let stripImpl: (request: MediaStripRequest) => Promise<MediaStripResult> = async (request) => ({
-  url: `focusnews-strip://${request.frames}`,
+  url: `socut-strip://${request.frames}`,
   frames: request.frames,
   key: 'token',
   cached: false
@@ -108,7 +108,7 @@ beforeAll(() => {
     peaksCalls.push(request)
     return peaksImpl(request)
   })
-  ;(window as unknown as { focusnews: unknown }).focusnews = {
+  ;(window as unknown as { socut: unknown }).socut = {
     media: { strip, peaks },
     app: { writeLog: async () => undefined }
   }
@@ -116,7 +116,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   stripCalls = []
-  stripImpl = async (request) => ({ url: `focusnews-strip://${request.frames}`, frames: request.frames, key: 'token', cached: false })
+  stripImpl = async (request) => ({ url: `socut-strip://${request.frames}`, frames: request.frames, key: 'token', cached: false })
   peaksCalls = []
   peaksImpl = async (request) => ({
     peaks: Array.from({ length: request.buckets }, () => 1),
@@ -175,7 +175,7 @@ describe('MediaClipCard 时间帧预览条', () => {
     // 卡片 6s × 100px/s = 600px → 12 格（约 44px 一格取档位）；整条轨道再长也不影响密度
     expect(stripCalls[0]!.frames).toBe(12)
     const strip = card.querySelector('.media-clip-card__strip') as HTMLImageElement
-    expect(strip.src).toContain('focusnews-strip://12')
+    expect(strip.src).toContain('socut-strip://12')
     // 有长图时不再显示占位符
     expect(card.querySelector('.media-clip-card__fallback')).toBeNull()
   })

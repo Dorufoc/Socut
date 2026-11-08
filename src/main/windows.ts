@@ -36,7 +36,7 @@ export function createMainWindow(options: { hidden?: boolean } = {}): BrowserWin
       backgroundThrottling: !hidden,
       // 关闭拼写/自动填充等无关能力，减少 Chromium 侧不确定行为
       spellcheck: false,
-      devTools: !process.env.FOCUSNEWS_PROD
+      devTools: !process.env.SOCUT_PROD
     }
   })
 

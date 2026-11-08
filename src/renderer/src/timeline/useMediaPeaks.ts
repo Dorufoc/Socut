@@ -57,7 +57,7 @@ async function requestPeaks(key: string, input: {
     await acquireSlot()
     try {
       // 测试环境没有 preload 注入：拿不到取样就当「这条不画频谱」，不能抛未处理拒绝
-      const api = window.focusnews?.media
+      const api = window.socut?.media
       if (!api?.peaks) {
         const state: SpectrumState = { status: 'failed', peaks: [], buckets: input.buckets }
         memoryCache.set(key, state)

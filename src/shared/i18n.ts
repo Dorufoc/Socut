@@ -9,7 +9,7 @@
  *    不写规格编号、FFmpeg 参数名、「分支/令牌/广播级」这类内部术语。
  */
 export const TEXT = {
-  appTitle: 'FocusNews 新闻字幕条',
+  appTitle: 'Socut 新闻字幕条',
 
   // 兼容性模态（规格 §6.1 / §6.2 / §6.3）
   modalNon169: {
@@ -431,7 +431,7 @@ export const TEXT = {
     error: '显卡检测失败',
     saveError: '设置保存失败',
     retry: '重试',
-    restartNote: '已保存。重启 FocusNews 后切换到所选显卡。'
+    restartNote: '已保存。重启 Socut 后切换到所选显卡。'
   },
 
   /** 主界面伸缩布局：区域名用于分隔线实时读数与无障碍朗读 */

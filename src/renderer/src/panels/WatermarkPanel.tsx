@@ -39,7 +39,7 @@ export function WatermarkPanel(): ReactElement {
   const [readiness, setReadiness] = useState<Readiness>('idle')
   const [picking, setPicking] = useState(false)
 
-  // 图片与参考视频共用 focusnews-media 协议：主进程校验存在 + 扩展名后才登记可读
+  // 图片与参考视频共用 socut-media 协议：主进程校验存在 + 扩展名后才登记可读
   const path = settings?.path ?? null
   useEffect(() => {
     let cancelled = false
@@ -49,7 +49,7 @@ export function WatermarkPanel(): ReactElement {
       return
     }
     setReadiness('loading')
-    void window.focusnews.video
+    void window.socut.video
       .previewUrl(path)
       .then((resolved) => {
         if (cancelled) return
@@ -67,7 +67,7 @@ export function WatermarkPanel(): ReactElement {
   const pick = async (): Promise<void> => {
     setPicking(true)
     try {
-      const picked = await window.focusnews.watermark.pick()
+      const picked = await window.socut.watermark.pick()
       if (!picked) return // 用户取消：不改工程
       useProjectStore.getState().setWatermark({
         enabled: true,

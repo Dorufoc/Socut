@@ -66,7 +66,7 @@ async function peek(file, pick) {
 
 /**
  * 取证产物在本轮启动前先删掉。
- * 不这么做会假绿：应用有单实例锁，用户开着 FocusNews 时冒烟实例会**秒退且退出码 0**，
+ * 不这么做会假绿：应用有单实例锁，用户开着 Socut 时冒烟实例会**秒退且退出码 0**，
  * 于是上一轮留下的 report.json 被当成本轮结果读出来（实测读数：每步 frames=0 / 1.08s）。
  */
 async function clearArtifacts(pickFile, extraFiles = []) {
@@ -113,7 +113,7 @@ async function step(label, file, args, env, timeoutMs, pick, extraArtifacts = []
   if (!ok) {
     const reason =
       missing !== null
-        ? `取证文件未产出（${missing}）——若本机正开着 FocusNews 窗口，请先关掉再跑，单实例锁会让冒烟秒退`
+        ? `取证文件未产出（${missing}）——若本机正开着 Socut 窗口，请先关掉再跑，单实例锁会让冒烟秒退`
         : facts === null && pick !== undefined
           ? `取证文件无法解析（${pick.file}）`
           : ''
@@ -149,7 +149,7 @@ async function main() {
     // 隔离 profile：单实例锁会让冒烟实例秒退（退出码仍 0），上一轮报告会被当成本轮结果
     const gateUserData = path.join(root, 'spikes', 'tmp-integration', 'gate-userdata')
     await fs.mkdir(gateUserData, { recursive: true })
-    const base = { FOCUSNEWS_SMOKE: '1', FOCUSNEWS_USER_DATA: gateUserData, FOCUSNEWS_SMOKE_GATE: '0', FOCUSNEWS_SMOKE_OVERLAY: '0', FOCUSNEWS_SMOKE_CANCEL: '0', FOCUSNEWS_SMOKE_KIND: 'transparentMov', FOCUSNEWS_SMOKE_DELIVERY: 'pipe', FOCUSNEWS_SMOKE_AUDIO: '', FOCUSNEWS_PIXELCHECK: '', FOCUSNEWS_SHOT: '', FOCUSNEWS_SHOT_ERROR: '', FOCUSNEWS_SHOT_REFMISSING: '', FOCUSNEWS_REVIEW_SHEET: '' }
+    const base = { SOCUT_SMOKE: '1', SOCUT_USER_DATA: gateUserData, SOCUT_SMOKE_GATE: '0', SOCUT_SMOKE_OVERLAY: '0', SOCUT_SMOKE_CANCEL: '0', SOCUT_SMOKE_KIND: 'transparentMov', SOCUT_SMOKE_DELIVERY: 'pipe', SOCUT_SMOKE_AUDIO: '', SOCUT_PIXELCHECK: '', SOCUT_SHOT: '', SOCUT_SHOT_ERROR: '', SOCUT_SHOT_REFMISSING: '', SOCUT_REVIEW_SHEET: '' }
     const reportPick = {
       file: 'spikes/app-smoke/report.json',
       select: (json) => ({
@@ -160,34 +160,34 @@ async function main() {
       })
     }
 
-    await step('应用内：1080p30/10s 透明 MOV（验收 2/3）', node, [vite, 'dev'], { ...base, FOCUSNEWS_SMOKE_W: '1920', FOCUSNEWS_SMOKE_H: '1080', FOCUSNEWS_SMOKE_FPS: '30', FOCUSNEWS_SMOKE_SEC: '10' }, 600_000, reportPick)
-    await step('应用内：4K60/2s 冒烟（M4-6）', node, [vite, 'dev'], { ...base, FOCUSNEWS_SMOKE_W: '3840', FOCUSNEWS_SMOKE_H: '2160', FOCUSNEWS_SMOKE_FPS: '60', FOCUSNEWS_SMOKE_SEC: '2' }, 600_000, reportPick)
-    await step('应用内：取消透明 MOV（验收 8）', node, [vite, 'dev'], { ...base, FOCUSNEWS_SMOKE_CANCEL: '1', FOCUSNEWS_SMOKE_W: '640', FOCUSNEWS_SMOKE_H: '360', FOCUSNEWS_SMOKE_SEC: '20' }, 600_000, reportPick)
-    await step('应用内：PNG 序列独立出口（C40）', node, [vite, 'dev'], { ...base, FOCUSNEWS_SMOKE_KIND: 'pngSequence', FOCUSNEWS_SMOKE_W: '640', FOCUSNEWS_SMOKE_H: '360', FOCUSNEWS_SMOKE_SEC: '2' }, 600_000, reportPick)
-    await step('应用内：取消 PNG 序列（目录回收 C41）', node, [vite, 'dev'], { ...base, FOCUSNEWS_SMOKE_KIND: 'pngSequence', FOCUSNEWS_SMOKE_CANCEL: '1', FOCUSNEWS_SMOKE_W: '640', FOCUSNEWS_SMOKE_H: '360', FOCUSNEWS_SMOKE_SEC: '20' }, 600_000, reportPick)
-    await step('应用内：MOV 的 pngSequence 回退（C42）', node, [vite, 'dev'], { ...base, FOCUSNEWS_SMOKE_DELIVERY: 'pngSequence', FOCUSNEWS_SMOKE_W: '640', FOCUSNEWS_SMOKE_H: '360', FOCUSNEWS_SMOKE_SEC: '2' }, 600_000, reportPick)
+    await step('应用内：1080p30/10s 透明 MOV（验收 2/3）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_W: '1920', SOCUT_SMOKE_H: '1080', SOCUT_SMOKE_FPS: '30', SOCUT_SMOKE_SEC: '10' }, 600_000, reportPick)
+    await step('应用内：4K60/2s 冒烟（M4-6）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_W: '3840', SOCUT_SMOKE_H: '2160', SOCUT_SMOKE_FPS: '60', SOCUT_SMOKE_SEC: '2' }, 600_000, reportPick)
+    await step('应用内：取消透明 MOV（验收 8）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_CANCEL: '1', SOCUT_SMOKE_W: '640', SOCUT_SMOKE_H: '360', SOCUT_SMOKE_SEC: '20' }, 600_000, reportPick)
+    await step('应用内：PNG 序列独立出口（C40）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_KIND: 'pngSequence', SOCUT_SMOKE_W: '640', SOCUT_SMOKE_H: '360', SOCUT_SMOKE_SEC: '2' }, 600_000, reportPick)
+    await step('应用内：取消 PNG 序列（目录回收 C41）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_KIND: 'pngSequence', SOCUT_SMOKE_CANCEL: '1', SOCUT_SMOKE_W: '640', SOCUT_SMOKE_H: '360', SOCUT_SMOKE_SEC: '20' }, 600_000, reportPick)
+    await step('应用内：MOV 的 pngSequence 回退（C42）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_DELIVERY: 'pngSequence', SOCUT_SMOKE_W: '640', SOCUT_SMOKE_H: '360', SOCUT_SMOKE_SEC: '2' }, 600_000, reportPick)
     await step('应用内：叠加 720p23.976（验收 4/5/6/7）', node, [vite, 'dev'], {
-      ...base, FOCUSNEWS_SMOKE_OVERLAY: '1', FOCUSNEWS_SMOKE_REF: path.join(artifacts, 'ref-720p23976.mp4')
+      ...base, SOCUT_SMOKE_OVERLAY: '1', SOCUT_SMOKE_REF: path.join(artifacts, 'ref-720p23976.mp4')
     }, 600_000, reportPick)
-    await step('应用内：门禁端到端（验收 5/6）', node, [vite, 'dev'], { ...base, FOCUSNEWS_SMOKE_GATE: '1' }, 600_000, reportPick)
+    await step('应用内：门禁端到端（验收 5/6）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_GATE: '1' }, 600_000, reportPick)
     await step('应用内：逐像素一致性（M1-7）', node, [vite, 'dev'], {
-      ...base, FOCUSNEWS_SMOKE: '0', FOCUSNEWS_PIXELCHECK: path.join(outDir, 'pixel-parity.json')
+      ...base, SOCUT_SMOKE: '0', SOCUT_PIXELCHECK: path.join(outDir, 'pixel-parity.json')
     }, 600_000, {
       file: 'spikes/app-smoke/pixel-parity.json',
       select: (json) => ({ passed: json.passed, frames: json.frames?.length, dpr: json.devicePixelRatio, blitSize: json.frames?.[0]?.scaled?.blitSize })
     })
     await step('应用内：错误呈现取证（M4-2/§9）', node, [vite, 'dev'], {
-      ...base, FOCUSNEWS_SMOKE: '0', FOCUSNEWS_SHOT_ERROR: '1'
+      ...base, SOCUT_SMOKE: '0', SOCUT_SHOT_ERROR: '1'
     }, 600_000, {
       file: 'spikes/app-smoke/error-demo.json',
       select: (json) => ({ passed: json.passed, argvSegments: json.argvSegments, stderrTailBytes: json.stderrTailBytes })
     })
     await step('应用内：逐帧动画评审表出图（M4-7）', node, [vite, 'dev'], {
-      ...base, FOCUSNEWS_SMOKE: '0', FOCUSNEWS_REVIEW_SHEET: path.join(artifacts, 'review-sheet-1080p.png'), FOCUSNEWS_REVIEW_BACKDROP: path.join(artifacts, 'review-backdrop.png')
+      ...base, SOCUT_SMOKE: '0', SOCUT_REVIEW_SHEET: path.join(artifacts, 'review-sheet-1080p.png'), SOCUT_REVIEW_BACKDROP: path.join(artifacts, 'review-backdrop.png')
     }, 600_000, undefined, ['spikes/artifacts/review-sheet-1080p.png'])
     // 视觉检查：8 预设 × 短/常规/长文案，出图 + 指标，失败时非 0 退出码
-    // 注意要显式传隔离 profile：它自己会清掉所有 FOCUSNEWS_*，不传就会撞上用户正在开的实例（单实例锁 → 秒退）
-    await step('应用内：字幕条视觉检查（8 预设 × 3 文案）', node, ['scripts/visual-check.mjs'], { FOCUSNEWS_USER_DATA: gateUserData }, 600_000, {
+    // 注意要显式传隔离 profile：它自己会清掉所有 SOCUT_*，不传就会撞上用户正在开的实例（单实例锁 → 秒退）
+    await step('应用内：字幕条视觉检查（8 预设 × 3 文案）', node, ['scripts/visual-check.mjs'], { SOCUT_USER_DATA: gateUserData }, 600_000, {
       file: 'spikes/artifacts/visual-check/report.json',
       select: (json) => ({ passed: json.passed, cases: json.cases?.length, failures: json.failures })
     }, ['spikes/artifacts/visual-check/sheet.png'])

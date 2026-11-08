@@ -46,7 +46,7 @@ manifest.json 里的 `note` / `versionLine` / `license` 由脚本根据**实际�
 | 随包 FFmpeg（未压缩） | 200.8MB（essentials 同源构建） |
 | 随包字体 | 76.3MB + 3 份许可证 |
 | `release/win-unpacked` | 643.5MB / 88 个文件（含 Electron 本体；`verify:packaged` 实测安装后 88 文件 / 643.5MB） |
-| **NSIS 安装包** | **227.64 MB**（`FocusNews-0.1.0-Setup-win-x64.exe`，238 697 492 字节） |
+| **NSIS 安装包** | **227.64 MB**（`Socut-0.1.0-Setup-win-x64.exe`，238 697 492 字节） |
 | 安装包 SHA256 | `EC12C25370BA1AF53F9F55EF285205A056D8EF33C0110F1D07FDF3793618166A`（本轮重建产物；改代码后需重算） |
 
 安装/升级/卸载取证（`npm run verify:packaged`）：静默安装 → 断网冷启动 → 优雅退出 → **覆盖安装（升级）** → 再次断网冷启动 → 静默卸载。
@@ -125,11 +125,11 @@ manifest.json 里的 `note` / `versionLine` / `license` 由脚本根据**实际�
 2. **完整性校验**：建议随包公告 SHA256。本次构建（2026-11-04）：
 
    ```
-   FocusNews-0.1.0-Setup-win-x64.exe   238,695,308 B（227.64 MB）
+   Socut-0.1.0-Setup-win-x64.exe   238,695,308 B（227.64 MB）
    SHA256 3B06154B0F50053D298E1306802CCE290B9A9DC815901ACE8876C12F675B6B90
    ```
 
-   重算命令：`Get-FileHash .\FocusNews-0.1.0-Setup-win-x64.exe -Algorithm SHA256`。
+   重算命令：`Get-FileHash .\Socut-0.1.0-Setup-win-x64.exe -Algorithm SHA256`。
    注：安装包内容一变（含字体/FFmpeg/代码）哈希就变，上值只对当前产物有效；发布时以实际重算为准。
 
 ## 第三方素材与品牌边界

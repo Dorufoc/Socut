@@ -86,7 +86,7 @@ export function RecentProjectsPage({
             <span className="launcher__mark-glyph" />
           </span>
           <span className="launcher__brand-text">
-            <span className="launcher__product">FocusNews</span>
+            <span className="launcher__product">Socut</span>
             <span className="launcher__tagline">新闻视频工作台</span>
           </span>
         </div>

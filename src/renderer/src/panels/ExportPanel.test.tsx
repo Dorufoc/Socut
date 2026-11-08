@@ -102,7 +102,7 @@ function stubApi(): void {
     sufficientDisk: true,
     freeBytes: 100000
   }))
-  ;(window as unknown as { focusnews: unknown }).focusnews = {
+  ;(window as unknown as { socut: unknown }).socut = {
     app: { chooseDirectory: vi.fn(async () => null) },
     export: { estimate },
     video: { exists: vi.fn(async () => true) }
@@ -135,7 +135,7 @@ async function flush(ms = 20): Promise<void> {
 }
 
 beforeEach(() => {
-  localStorage.setItem('focusnews.lastOutputDir', 'D:/out')
+  localStorage.setItem('socut.lastOutputDir', 'D:/out')
   seedProject()
   stubApi()
   mocks.start.mockReset()
@@ -158,7 +158,7 @@ afterEach(() => {
   localStorage.clear()
   useProjectStore.setState({ project: createDefaultProject('空'), fonts: [], revision: 0 })
   useUiStore.setState({ missingMediaIds: [], refVideoMissing: false, notice: null })
-  delete (window as unknown as { focusnews?: unknown }).focusnews
+  delete (window as unknown as { socut?: unknown }).socut
 })
 
 describe('多画布导出', () => {
@@ -264,7 +264,7 @@ describe('多画布导出', () => {
     expect((screen.getByRole('button', { name: /导出封面/ }) as HTMLButtonElement).disabled).toBe(true)
     cleanup()
 
-    localStorage.setItem('focusnews.lastOutputDir', 'D:/out')
+    localStorage.setItem('socut.lastOutputDir', 'D:/out')
     useUiStore.getState().setMissingMediaIds(['m1'])
     render(<ExportPanel spec={SPEC} fontLoading={false} ffmpegAvailable />)
     expect((screen.getByRole('button', { name: /开始导出/ }) as HTMLButtonElement).disabled).toBe(true)

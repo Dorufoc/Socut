@@ -42,7 +42,7 @@ export function SettingsPage({ onBack, appVersion }: SettingsPageProps): ReactEl
     setLoading(true)
     setError(null)
     try {
-      const api = window.focusnews?.gpu
+      const api = window.socut?.gpu
       if (!api) throw new Error(TEXT.settings.error)
       const next = await api.diagnostics()
       setDiagnostics(next)
@@ -68,7 +68,7 @@ export function SettingsPage({ onBack, appVersion }: SettingsPageProps): ReactEl
     setBusy('preference')
     setSaveError(null)
     try {
-      const api = window.focusnews?.gpu
+      const api = window.socut?.gpu
       if (!api) throw new Error(TEXT.settings.error)
       const result = await api.setPreference(next)
       setDiagnostics((current) =>
@@ -96,7 +96,7 @@ export function SettingsPage({ onBack, appVersion }: SettingsPageProps): ReactEl
     setBusy('encoder')
     setSaveError(null)
     try {
-      const api = window.focusnews?.gpu
+      const api = window.socut?.gpu
       if (!api) throw new Error(TEXT.settings.error)
       await api.setEncoder(mode)
       const next = await api.diagnostics()
@@ -147,7 +147,7 @@ export function SettingsPage({ onBack, appVersion }: SettingsPageProps): ReactEl
             <span className="launcher__mark-glyph" />
           </span>
           <span className="launcher__brand-text">
-            <span className="launcher__product">FocusNews</span>
+            <span className="launcher__product">Socut</span>
             <span className="launcher__tagline">新闻视频工作台</span>
           </span>
         </div>

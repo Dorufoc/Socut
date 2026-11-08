@@ -1,9 +1,9 @@
 {
-  "name": "focusnews",
+  "name": "socut",
   "version": "0.1.0",
   "description": "离线广播级新闻字幕条（Lower Third）生成与透明 MOV / MP4 叠加导出工具",
   "main": "out/main/index.js",
-  "author": "FocusNews",
+  "author": "Socut",
   "license": "UNLICENSED",
   "private": true,
   "engines": {
@@ -11,7 +11,7 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
-    "cli": "node cli/focusnews-cli.mjs",
+    "cli": "node cli/socut-cli.mjs",
     "build": "electron-vite build",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",

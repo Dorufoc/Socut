@@ -61,16 +61,16 @@ describe('previewPerf', () => {
   })
 
   it('安装 CDP 可读的全局读数入口，reset 生效', () => {
-    expect(typeof window.__focusnewsPreviewPerf).toBe('function')
-    expect(typeof window.__focusnewsPreviewPerfReset).toBe('function')
+    expect(typeof window.__socutPreviewPerf).toBe('function')
+    expect(typeof window.__socutPreviewPerfReset).toBe('function')
 
     previewPerf.renders = 2
     previewPerf.layerTicks = 5
-    const snapshot = window.__focusnewsPreviewPerf!()
+    const snapshot = window.__socutPreviewPerf!()
     expect(snapshot.renders).toBe(2)
     expect(snapshot.layerTicks).toBe(5)
 
-    window.__focusnewsPreviewPerfReset!()
+    window.__socutPreviewPerfReset!()
     expect(previewPerf.renders).toBe(0)
     expect(previewPerf.layerTicks).toBe(0)
   })

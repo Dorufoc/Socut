@@ -14,7 +14,7 @@ import {
 } from './mediaRange'
 
 /**
- * 参考视频预览协议（focusnews-media://）。
+ * 参考视频预览协议（socut-media://）。
  *
  * 用途：把本机视频以带 Range 支持的流交给渲染进程的 <video>，让预览里能看到
  * 「字幕条叠在参考视频上」的合成效果（此前预览只有棋盘格，看不出叠加结果）。
@@ -24,7 +24,7 @@ import {
  * 绝对路径可读；渲染进程无法借这个协议读取任意文件。
  */
 
-export const MEDIA_SCHEME = 'focusnews-media'
+export const MEDIA_SCHEME = 'socut-media'
 
 /** 已放行的绝对路径（由 video:previewUrl 登记）。 */
 const allowlist = new Set<string>()

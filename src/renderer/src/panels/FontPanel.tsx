@@ -53,8 +53,8 @@ export function FontPanel(): ReactElement {
               title={TEXT.fonts.remove}
               aria-label={`${TEXT.fonts.remove} ${record.displayName}`}
               onClick={async () => {
-                await window.focusnews.fonts.remove(record.fontId)
-                setFonts(await window.focusnews.fonts.list())
+                await window.socut.fonts.remove(record.fontId)
+                setFonts(await window.socut.fonts.list())
               }}
             >
               ✕
@@ -129,9 +129,9 @@ export function FontPanel(): ReactElement {
             type="button"
             className="btn"
             onClick={async () => {
-              const result = await window.focusnews.fonts.import()
+              const result = await window.socut.fonts.import()
               if (!result) return
-              setFonts(await window.focusnews.fonts.list())
+              setFonts(await window.socut.fonts.list())
             }}
           >
             {TEXT.fonts.import}

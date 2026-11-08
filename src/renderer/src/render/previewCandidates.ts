@@ -47,7 +47,7 @@ export interface PreviewCandidate {
   clip: MediaClip
   kind: 'video' | 'image'
   hasAudio: boolean
-  /** 实际要挂到 `focusnews-media://` 的文件（原片或防抖代理） */
+  /** 实际要挂到 `socut-media://` 的文件（原片或防抖代理） */
   sourcePath: string
   /** `sourcePath` 是否为防抖代理：源坐标要换成代理坐标 */
   useStabProxy: boolean

@@ -110,7 +110,7 @@ export async function openProjectDialog(parent: BrowserWindow | null): Promise<L
     title: '打开工程',
     defaultPath: await ensureDir(),
     properties: ['openFile'] as ['openFile'],
-    filters: [{ name: `FocusNews 工程 (*.${PROJECT_FILE_EXTENSION})`, extensions: [PROJECT_FILE_EXTENSION, 'json'] }]
+    filters: [{ name: `Socut 工程 (*.${PROJECT_FILE_EXTENSION})`, extensions: [PROJECT_FILE_EXTENSION, 'json'] }]
   }
   const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
   if (result.canceled || result.filePaths.length === 0) return null
@@ -126,7 +126,7 @@ export async function saveProjectAs(parent: BrowserWindow | null, project: Proje
   const options = {
     title: '另存为',
     defaultPath: path.join(dir, `${project.name || '未命名工程'}.${PROJECT_FILE_EXTENSION}`),
-    filters: [{ name: `FocusNews 工程 (*.${PROJECT_FILE_EXTENSION})`, extensions: [PROJECT_FILE_EXTENSION] }]
+    filters: [{ name: `Socut 工程 (*.${PROJECT_FILE_EXTENSION})`, extensions: [PROJECT_FILE_EXTENSION] }]
   }
   const result = parent ? await dialog.showSaveDialog(parent, options) : await dialog.showSaveDialog(options)
   if (result.canceled || !result.filePath) return null

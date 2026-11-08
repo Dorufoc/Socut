@@ -12,7 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 const root = process.cwd()
-const userData = path.join(os.tmpdir(), 'focusnews-e2e-drag')
+const userData = path.join(os.tmpdir(), 'socut-e2e-drag')
 const projectsDir = path.join(userData, 'projects')
 const PORT = 9333
 
@@ -78,12 +78,12 @@ const seed = {
 
 await fs.rm(userData, { recursive: true, force: true })
 await fs.mkdir(projectsDir, { recursive: true })
-await fs.writeFile(path.join(projectsDir, 'autosave.focusnews.json'), JSON.stringify(seed, null, 2), 'utf8')
+await fs.writeFile(path.join(projectsDir, 'autosave.socut.json'), JSON.stringify(seed, null, 2), 'utf8')
 
 const electron = path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe')
 const child = spawn(electron, ['.', `--remote-debugging-port=${PORT}`], {
   cwd: root,
-  env: { ...process.env, FOCUSNEWS_USER_DATA: userData },
+  env: { ...process.env, SOCUT_USER_DATA: userData },
   stdio: ['ignore', 'pipe', 'pipe']
 })
 child.stdout.on('data', (d) => process.stdout.write(`[app] ${d}`))

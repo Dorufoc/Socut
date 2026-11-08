@@ -41,7 +41,7 @@ export function useExportJob(): {
   }, [start])
 
   const cancel = useCallback(async (jobId: string): Promise<void> => {
-    await window.focusnews.export.cancel(jobId)
+    await window.socut.export.cancel(jobId)
   }, [])
 
   return { start: startWith, retryLast, cancel }

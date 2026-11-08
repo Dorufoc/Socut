@@ -78,7 +78,7 @@ import type {
  * - createClip / duplicateClip：默认值集中，避免 UI 与主进程口径不一致。
  */
 
-export const PROJECT_FILE_EXTENSION = 'focusnews.json'
+export const PROJECT_FILE_EXTENSION = 'socut.json'
 export { AUTOSAVE_FILE }
 
 /**

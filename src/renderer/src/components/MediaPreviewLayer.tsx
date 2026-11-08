@@ -37,7 +37,7 @@ import { previewPerf } from '../render/previewPerf'
  * 2. 命令式翻转 opacity（**不走 React state**，切点不能等一次 re-render）；
  * 3. 同步时间 / 倍速 / 音量包络，并在切点前静音预卷。
  *
- * 路径解析（`focusnews-media://`）也在这里做，结果按源路径缓存；IPC 只申请一次。
+ * 路径解析（`socut-media://`）也在这里做，结果按源路径缓存；IPC 只申请一次。
  */
 
 export interface MediaPreviewHandle {
@@ -102,7 +102,7 @@ function requestPreviewUrl(path: string): Promise<PreviewUrlEntry> {
   const pending = previewUrlRequests.get(path)
   if (pending) return pending
   const request = (async (): Promise<PreviewUrlEntry> => {
-    const api = window.focusnews?.video
+    const api = window.socut?.video
     const url = api ? await api.previewUrl(path).catch(() => null) : null
     const entry: PreviewUrlEntry = { url, fetchedAt: performance.now() }
     previewUrlCache.set(path, entry)

@@ -80,7 +80,7 @@ export function previewFileVersion(stat: { size: number; mtimeMs: number }): str
  * 不参与鉴权；能不能读仍只看主进程的 allowlist。
  */
 export function previewUrlFor(filePath: string, version: string): string {
-  return `focusnews-media://preview/?path=${encodeURIComponent(path.resolve(filePath))}&v=${encodeURIComponent(version)}`
+  return `socut-media://preview/?path=${encodeURIComponent(path.resolve(filePath))}&v=${encodeURIComponent(version)}`
 }
 
 /**

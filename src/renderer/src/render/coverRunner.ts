@@ -31,7 +31,7 @@ export interface CoverExportInput {
 }
 
 function coverFileName(project: Project, suffix: string, width: number, height: number): string {
-  const name = project.name || 'focusnews'
+  const name = project.name || 'socut'
   return `${name}-cover-${suffix}-${width}x${height}.png`
 }
 
@@ -102,5 +102,5 @@ export async function runCoverExport(input: CoverExportInput): Promise<CoverExpo
         }
       : {})
   }
-  return window.focusnews.export.cover(request)
+  return window.socut.export.cover(request)
 }

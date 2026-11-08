@@ -1,10 +1,10 @@
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-if ($env:FOCUSNEWS_ROOT) { $root = $env:FOCUSNEWS_ROOT } else { $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath) }
-$installDir = Join-Path $root '.tmp-install\FocusNews'
+if ($env:SOCUT_ROOT) { $root = $env:SOCUT_ROOT } else { $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath) }
+$installDir = Join-Path $root '.tmp-install\Socut'
 $setup = Get-ChildItem (Join-Path $root 'release') -Filter '*Setup-win-x64.exe' | Select-Object -First 1
-$logFile = Join-Path $env:APPDATA 'focusnews\logs\app.log'
+$logFile = Join-Path $env:APPDATA 'socut\logs\app.log'
 $shotDir = Join-Path $root 'spikes\artifacts'
 New-Item -ItemType Directory -Force -Path $shotDir | Out-Null
 Add-Type -AssemblyName System.Drawing
@@ -32,12 +32,12 @@ Step "installer-exit=$($p.ExitCode)"
 Step "installed-files=$((Get-ChildItem $installDir -Recurse -File | Measure-Object).Count) / $([math]::Round((Get-ChildItem $installDir -Recurse -File | Measure-Object Length -Sum).Sum/1MB,1)) MB"
 
 # 2) 断网冷启动：把 Chromium 的所有请求指向一个无人监听的端口（等价于无网络）
-$exe = Join-Path $installDir 'FocusNews.exe'
+$exe = Join-Path $installDir 'Socut.exe'
 $app = Start-Process -FilePath $exe -ArgumentList '--proxy-server=127.0.0.1:9' -PassThru
 Step "launched pid=$($app.Id) args=--proxy-server=127.0.0.1:9"
 Start-Sleep -Seconds 22
 
-$procs = Get-Process -Name 'FocusNews' -ErrorAction SilentlyContinue
+$procs = Get-Process -Name 'Socut' -ErrorAction SilentlyContinue
 Step "alive-processes=$($procs.Count) workingset=$([math]::Round(($procs | Measure-Object WorkingSet64 -Sum).Sum/1MB,1))MB"
 $main = $procs | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $main) { Step 'NO-MAIN-WINDOW'; }
@@ -66,7 +66,7 @@ Get-Content $logFile -Tail 8 | ForEach-Object { "  $_" }
 # 4) 优雅关闭：验证退出纪律
 if ($main) { [void]$main.CloseMainWindow() }
 Start-Sleep -Seconds 8
-Step "after-close-alive=$((Get-Process -Name 'FocusNews' -ErrorAction SilentlyContinue).Count)"
+Step "after-close-alive=$((Get-Process -Name 'Socut' -ErrorAction SilentlyContinue).Count)"
 Step '--- app.log after close ---'
 Get-Content $logFile -Tail 3 | ForEach-Object { "  $_" }
 
@@ -79,18 +79,18 @@ Step "upgrade-ffmpeg-bundled=$((Get-ChildItem $installDir -Recurse -File -Filter
 $app2 = Start-Process -FilePath $exe -ArgumentList '--proxy-server=127.0.0.1:9' -PassThru
 Step "upgrade-launched pid=$($app2.Id)"
 Start-Sleep -Seconds 18
-$alive2 = @(Get-Process -Name 'FocusNews' -ErrorAction SilentlyContinue)
+$alive2 = @(Get-Process -Name 'Socut' -ErrorAction SilentlyContinue)
 Step "upgrade-alive-processes=$($alive2.Count)"
 Step '--- app.log tail after upgrade ---'
 Get-Content $logFile -Tail 4 | ForEach-Object { "  $_" }
 foreach ($proc in $alive2) { try { [void]$proc.CloseMainWindow() } catch { } }
 Start-Sleep -Seconds 6
-$left = @(Get-Process -Name 'FocusNews' -ErrorAction SilentlyContinue)
+$left = @(Get-Process -Name 'Socut' -ErrorAction SilentlyContinue)
 Step "upgrade-after-close-alive=$($left.Count)"
 if ($left.Count -gt 0) { $left | Stop-Process -Force; Step 'upgrade force-killed residual' }
 
 # 5) 静默卸载
-$uninstaller = Join-Path $installDir 'Uninstall FocusNews.exe'
+$uninstaller = Join-Path $installDir 'Uninstall Socut.exe'
 $u = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
 Step "uninstaller-exit=$($u.ExitCode)"
 Start-Sleep -Seconds 3

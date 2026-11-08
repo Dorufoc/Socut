@@ -98,7 +98,7 @@ describe('previewUrlFor（版本化协议地址）', () => {
     const file = 'D:/clips/我的 参考 01.mp4'
     const url = previewUrlFor(file, '1024-1700000000')
     expect(url).toBe(
-      `focusnews-media://preview/?path=${encodeURIComponent(path.resolve(file))}&v=${encodeURIComponent('1024-1700000000')}`
+      `socut-media://preview/?path=${encodeURIComponent(path.resolve(file))}&v=${encodeURIComponent('1024-1700000000')}`
     )
     // 空格与中文必须被编码，否则 custom scheme 的 query 会被截断
     expect(url).toContain('%20')

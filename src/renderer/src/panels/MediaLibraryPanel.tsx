@@ -33,7 +33,7 @@ import { nextMediaTileSize, readMediaTileSize, writeMediaTileSize } from './medi
  * 选中素材后的「归类与标签」编辑区。分组只是轻量组织，不影响时间轴引用。
  */
 
-const DRAG_MEDIA_MIME = 'application/x-focusnews-media'
+const DRAG_MEDIA_MIME = 'application/x-socut-media'
 
 /** 网格容器的内联样式：只暴露一个卡片尺寸变量，具体列数交给 CSS 的 auto-fill */
 type MediaGridStyle = CSSProperties & Record<'--media-tile-size', string>
@@ -121,7 +121,7 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
   useEffect(() => {
     for (const item of media) {
       if (!item.thumbnailUrl) continue
-      void window.focusnews.media.thumbUrl(item.id, item.thumbnailUrl).catch(() => undefined)
+      void window.socut.media.thumbUrl(item.id, item.thumbnailUrl).catch(() => undefined)
     }
     // 只在集合变化时重放，避免 thumbnailUrl 写回引起的循环
   }, [media.map((item) => `${item.id}:${item.thumbnailUrl}`).join('|')])
@@ -162,7 +162,7 @@ export function MediaLibraryPanel({ onPlaceAtPlayhead }: MediaLibraryPanelProps)
   const removeItem = (item: MediaItem): void => {
     // 引用它的媒体片段连带删除（素材移出池，时间轴上的段失去源）
     useProjectStore.getState().removeMedia(item.id)
-    void window.focusnews?.media?.removeThumb?.(item.id)?.catch(() => undefined)
+    void window.socut?.media?.removeThumb?.(item.id)?.catch(() => undefined)
     // v10：代理只属于这枚素材，移出池时连同磁盘缓存一起回收（内部同时取消在跑作业）
     useProxyStore.getState().clearForMedia(item.id, true)
     if (selectedMediaId === item.id) setSelectedMediaId(null)

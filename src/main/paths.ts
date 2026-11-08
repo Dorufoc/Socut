@@ -160,6 +160,6 @@ export function buildOutputBaseName(input: {
   height: number
   fpsLabel: string
 }): string {
-  const safeProject = input.project.replace(/[^\w\u4e00-\u9fa5.-]+/g, '_').slice(0, 40) || 'focusnews'
+  const safeProject = input.project.replace(/[^\w\u4e00-\u9fa5.-]+/g, '_').slice(0, 40) || 'socut'
   return `${safeProject}-${input.kind}-${input.width}x${input.height}-${input.fpsLabel}`
 }

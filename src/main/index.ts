@@ -52,13 +52,13 @@ registerCoverScheme()
 
 /**
  * 自动化取证专用（仅开发）：把 userData 换到隔离目录。
- * 单实例锁的锁文件就住在 userData 里——用户正开着 FocusNews 时，冒烟/取证实例
+ * 单实例锁的锁文件就住在 userData 里——用户正开着 Socut 时，冒烟/取证实例
  * 抢不到锁会**秒退且退出码仍为 0**，取证脚本于是把上一轮的旧报告当成本轮结果（假绿）。
  * 隔离 profile 后门禁与人工使用互不干扰；打包版一律忽略，不影响交付。
  */
 function applyDevUserDataOverride(): void {
   if (app.isPackaged) return
-  const target = process.env.FOCUSNEWS_USER_DATA
+  const target = process.env.SOCUT_USER_DATA
   if (!target) return
   try {
     app.setPath('userData', target)
@@ -102,7 +102,7 @@ if (!gotLock) {
 async function bootstrap(): Promise<void> {
   await app.whenReady()
   app.name = APP_NAME
-  app.setAppUserModelId('com.focusnews.app')
+  app.setAppUserModelId('com.socut.app')
 
   installMediaProtocol()
   installThumbProtocol()
@@ -119,7 +119,7 @@ async function bootstrap(): Promise<void> {
     }, 180_000).unref?.()
   }
   // 逐帧评审表模式：渲染侧写完即退，卡住也要有终局（否则 CI 只能靠外部超时）
-  if (!app.isPackaged && process.env.FOCUSNEWS_REVIEW_SHEET) {
+  if (!app.isPackaged && process.env.SOCUT_REVIEW_SHEET) {
     setTimeout(() => {
       console.log('✗ 逐帧动画评审表超时未产出（150s）')
       void log('error', '逐帧动画评审表超时未产出')
@@ -127,7 +127,7 @@ async function bootstrap(): Promise<void> {
     }, 150_000).unref?.()
   }
   // 像素一致性回归（M1-7）同样必须有终局
-  if (!app.isPackaged && process.env.FOCUSNEWS_PIXELCHECK) {
+  if (!app.isPackaged && process.env.SOCUT_PIXELCHECK) {
     setTimeout(() => {
       console.log('✗ 像素一致性回归超时未产出报告（120s）')
       void log('error', '像素一致性回归超时未产出报告')
@@ -135,7 +135,7 @@ async function bootstrap(): Promise<void> {
     }, 120_000).unref?.()
   }
   // 错误呈现取证（M4-2）也一样
-  if (!app.isPackaged && process.env.FOCUSNEWS_SHOT_ERROR) {
+  if (!app.isPackaged && process.env.SOCUT_SHOT_ERROR) {
     setTimeout(() => {
       console.log('✗ 错误呈现取证超时未产出报告（120s）')
       void log('error', '错误呈现取证超时未产出报告')
@@ -156,7 +156,7 @@ async function bootstrap(): Promise<void> {
   const binaries = await resolveFfmpegBinaries()
   await log(
     'info',
-    `启动 FocusNews ${APP_VERSION}｜Electron ${process.versions.electron}｜Chromium ${process.versions.chrome}｜` +
+    `启动 Socut ${APP_VERSION}｜Electron ${process.versions.electron}｜Chromium ${process.versions.chrome}｜` +
       `FFmpeg ${binaries.source} (${binaries.ffmpeg})｜渲染显卡偏好 ${appliedGpuPreference}｜清理残留临时目录 ${swept} 个`
   )
   if (binaries.hint) await log('warn', binaries.hint)
@@ -166,15 +166,15 @@ async function bootstrap(): Promise<void> {
 }
 
 /**
- * 开发专用的 UI 取证截图（FOCUSNEWS_SHOT=<png 路径>）。
+ * 开发专用的 UI 取证截图（SOCUT_SHOT=<png 路径>）。
  * 无人值守环境里屏幕为黑（非交互式会话），所以只能走 Chromium 自己的
  * capturePage 拿真实绘制结果；打包版本一律忽略。
  */
 async function maybeCaptureUiShot(window: BrowserWindow): Promise<void> {
-  const target = process.env.FOCUSNEWS_SHOT
+  const target = process.env.SOCUT_SHOT
   if (!target || app.isPackaged) return
   // 等字体注册 + 首帧预览绘制完成（与 useFontLoader/预览循环的实际耗时对齐）
-  await new Promise((resolve) => setTimeout(resolve, Number(process.env.FOCUSNEWS_SHOT_DELAY_MS ?? 8000)))
+  await new Promise((resolve) => setTimeout(resolve, Number(process.env.SOCUT_SHOT_DELAY_MS ?? 8000)))
   try {
     const image = await window.webContents.capturePage()
     await fs.writeFile(target, image.toPNG())

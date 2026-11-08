@@ -26,7 +26,7 @@ async function flush(): Promise<void> {
   })
 }
 
-function stubApi(pickResult: typeof PICKED | null, preview: string | null = 'focusnews-media://preview/?path=logo'): { pick: ReturnType<typeof vi.fn> } {
+function stubApi(pickResult: typeof PICKED | null, preview: string | null = 'socut-media://preview/?path=logo'): { pick: ReturnType<typeof vi.fn> } {
   const pick = vi.fn(async () => {
     if (pickResult) return pickResult
     return null
@@ -35,7 +35,7 @@ function stubApi(pickResult: typeof PICKED | null, preview: string | null = 'foc
     video: { previewUrl: vi.fn(async () => preview) },
     watermark: { pick }
   }
-  ;(window as unknown as { focusnews: unknown }).focusnews = api
+  ;(window as unknown as { socut: unknown }).socut = api
   return { pick }
 }
 
@@ -62,7 +62,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   emptyProject()
   useUiStore.getState().setNotice(null)
-  delete (window as unknown as { focusnews?: unknown }).focusnews
+  delete (window as unknown as { socut?: unknown }).socut
 })
 
 describe('导入水印', () => {
@@ -95,7 +95,7 @@ describe('导入水印', () => {
 
   it('探测失败（主进程报错）时只提示，不留下半个水印', async () => {
     emptyProject()
-    ;(window as unknown as { focusnews: unknown }).focusnews = {
+    ;(window as unknown as { socut: unknown }).socut = {
       video: { previewUrl: vi.fn(async () => null) },
       watermark: { pick: vi.fn(async () => { throw new Error('无法读取图片尺寸：broken.png') }) }
     }
@@ -142,10 +142,10 @@ describe('换算读数', () => {
 
   it('已导入时缩略图使用预览地址', async () => {
     seedWatermark()
-    stubApi(null, 'focusnews-media://preview/?path=logo')
+    stubApi(null, 'socut-media://preview/?path=logo')
     render(<WatermarkPanel />)
     const img = await screen.findByRole('presentation')
-    expect(img.getAttribute('src')).toBe('focusnews-media://preview/?path=logo')
+    expect(img.getAttribute('src')).toBe('socut-media://preview/?path=logo')
   })
 })
 

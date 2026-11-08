@@ -9,7 +9,7 @@ import { FPS_23_976 } from '@shared/constants'
  */
 describe('命令行脱敏（规格 §9）', () => {
   it('绝对路径只保留文件名，参数结构不变', () => {
-    expect(maskArgument('D:\\Users\\abc\\Desktop\\code\\FocusNews\\resources\\ffmpeg\\ffmpeg.exe')).toBe('…/ffmpeg.exe')
+    expect(maskArgument('D:\\Users\\abc\\Desktop\\code\\Socut\\resources\\ffmpeg\\ffmpeg.exe')).toBe('…/ffmpeg.exe')
     expect(maskArgument('E:/素材/参考视频.mp4')).toBe('…/参考视频.mp4')
     expect(maskArgument('/home/user/out.mov')).toBe('…/out.mov')
   })

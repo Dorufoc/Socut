@@ -10,14 +10,14 @@ import { log } from './log'
 /**
  * 素材卡片缩略图（v2 素材库）。
  *
- * 协议：focusnews-thumb://<mediaId> —— host 就是素材 id，渲染进程拿到的地址
- * 只有经主进程抽帧成功并登记过的素材才可读（同 focusnews-media 的最小暴露纪律）。
+ * 协议：socut-thumb://<mediaId> —— host 就是素材 id，渲染进程拿到的地址
+ * 只有经主进程抽帧成功并登记过的素材才可读（同 socut-media 的最小暴露纪律）。
  *
  * 落盘：userData/thumbs/<mediaId>.jpg，由 MediaItem.thumbnailUrl 持久化引用；
  * 跨机器打开工程时文件不存在，渲染侧会重新生成（阶段 8 完整性看护负责清理失效引用）。
  */
 
-export const THUMB_SCHEME = 'focusnews-thumb'
+export const THUMB_SCHEME = 'socut-thumb'
 /** 素材卡片的显示宽度（目标分辨率无关，纯 UI 尺寸）。 */
 export const THUMB_WIDTH_PX = 320
 

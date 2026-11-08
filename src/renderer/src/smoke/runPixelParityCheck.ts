@@ -26,7 +26,7 @@ import { ensureFontRegistered } from '../hooks/useFontLoader'
  *     并与 motionAt 的 wipeTo 逐帧对照（容差 2%）。同时记录短/长文案的条宽，
  *     证明「宽度跟随文字、超上限才换行」。
  *
- * 只在开发环境由 FOCUSNEWS_PIXELCHECK=<json 路径> 触发，主进程把报告里的 passed 翻译成退出码。
+ * 只在开发环境由 SOCUT_PIXELCHECK=<json 路径> 触发，主进程把报告里的 passed 翻译成退出码。
  */
 
 /** 部分透明像素的 PNG 往返容差（通道级）。不透明/全透明像素要求 0。 */
@@ -458,7 +458,7 @@ export async function runPixelParityCheck(input: PixelCheckInput): Promise<Pixel
   const failures: string[] = []
   const frames: FrameResult[] = []
 
-  const fontIndex: FontRecord[] = await window.focusnews.fonts.list()
+  const fontIndex: FontRecord[] = await window.socut.fonts.list()
   if (fontIndex.length === 0) throw new Error('内置字体未就位（npm run fetch:fonts）')
   for (const record of fontIndex) {
     try {
@@ -600,6 +600,6 @@ export async function runPixelParityCheck(input: PixelCheckInput): Promise<Pixel
   }
 
   const payload = new TextEncoder().encode(`${JSON.stringify(report, null, 2)}\n`)
-  await window.focusnews.app.writeFileDev(input.outputPath, payload)
+  await window.socut.app.writeFileDev(input.outputPath, payload)
   return report
 }

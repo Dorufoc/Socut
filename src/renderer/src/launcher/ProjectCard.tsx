@@ -76,7 +76,7 @@ export function ProjectCard({ entry, onOpen, onRename, onRemove, onReveal }: Pro
     entry.source === 'file' &&
     Boolean(entry.filePath) &&
     typeof window !== 'undefined' &&
-    typeof window.focusnews?.app?.revealPath === 'function'
+    typeof window.socut?.app?.revealPath === 'function'
 
   const openNow = (): void => {
     if (entry.missing) {
@@ -149,7 +149,7 @@ export function ProjectCard({ entry, onOpen, onRename, onRemove, onReveal }: Pro
       onReveal(entry)
       return
     }
-    void window.focusnews.app.revealPath(entry.filePath).catch(() => {
+    void window.socut.app.revealPath(entry.filePath).catch(() => {
       setNotice('无法在文件夹中显示该工程')
     })
   }

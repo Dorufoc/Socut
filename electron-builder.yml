@@ -1,6 +1,6 @@
-appId: com.focusnews.app
-productName: FocusNews
-copyright: Copyright © 2026 FocusNews
+appId: com.socut.app
+productName: Socut
+copyright: Copyright © 2026 Socut
 
 directories:
   output: release
@@ -19,10 +19,10 @@ extraFiles:
   - from: cli
     to: cli
     filter:
-      - 'focusnews-cli.mjs'
-      - 'focusnews.cmd'
-  - from: cli/focusnews-root.cmd
-    to: focusnews.cmd
+      - 'socut-cli.mjs'
+      - 'socut.cmd'
+  - from: cli/socut-root.cmd
+    to: socut.cmd
 
 extraResources:
   - from: resources/ffmpeg
@@ -64,9 +64,9 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: FocusNews
-  artifactName: FocusNews-${version}-Setup-win-x64.${ext}
-  uninstallDisplayName: FocusNews 新闻字幕条
+  shortcutName: Socut
+  artifactName: Socut-${version}-Setup-win-x64.${ext}
+  uninstallDisplayName: Socut 新闻字幕条
 
 # 离线交付：不发布任何更新源
 publish: null

@@ -457,7 +457,7 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
                 {previewFresh ? TEXT.stab.previewApplied : previewStale ? TEXT.stab.previewReapply : TEXT.stab.previewApply}
               </button>
               {stabJobActive ? (
-                <button type="button" className="btn btn--sm" title={TEXT.stab.previewCancel} onClick={() => void window.focusnews.export.cancel(stabJobId)}>
+                <button type="button" className="btn btn--sm" title={TEXT.stab.previewCancel} onClick={() => void window.socut.export.cancel(stabJobId)}>
                   ✕
                 </button>
               ) : null}

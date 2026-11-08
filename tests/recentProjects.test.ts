@@ -19,7 +19,7 @@ import type { Project } from '../src/shared/types'
 function entry(over: Partial<RecentProjectEntry> & Pick<RecentProjectEntry, 'id' | 'name'>): RecentProjectEntry {
   return {
     source: 'file',
-    filePath: `C:/projects/${over.id}.focusnews.json`,
+    filePath: `C:/projects/${over.id}.socut.json`,
     createdAt: '2026-01-01T08:00:00.000Z',
     modifiedAt: '2026-01-01T09:00:00.000Z',
     lastOpenedAt: '2026-01-01T10:00:00.000Z',
@@ -180,11 +180,11 @@ describe('进度判据与统计', () => {
 
 describe('路径 id 与索引归一化', () => {
   it('同路径不同斜杠/大小写得到同一个 id', () => {
-    const a = recentEntryIdForPath('C:\\Projects\\A.focusnews.json')
-    const b = recentEntryIdForPath('c:/projects/a.focusnews.json')
+    const a = recentEntryIdForPath('C:\\Projects\\A.socut.json')
+    const b = recentEntryIdForPath('c:/projects/a.socut.json')
     expect(a).toBe(b)
     expect(a).toMatch(/^p[0-9a-f]{16}$/)
-    expect(recentEntryIdForPath('C:/projects/b.focusnews.json')).not.toBe(a)
+    expect(recentEntryIdForPath('C:/projects/b.socut.json')).not.toBe(a)
   })
 
   it('坏 JSON / 坏条目被丢弃，重复 id 只留第一条', () => {
@@ -195,7 +195,7 @@ describe('路径 id 与索引归一化', () => {
           id: 'p00000000000000c1',
           name: '好工程',
           source: 'file',
-          filePath: 'C:/p/a.focusnews.json',
+          filePath: 'C:/p/a.socut.json',
           createdAt: '2026-01-01T00:00:00.000Z',
           modifiedAt: '2026-01-02T00:00:00.000Z',
           lastOpenedAt: '2026-01-03T00:00:00.000Z',
@@ -208,7 +208,7 @@ describe('路径 id 与索引归一化', () => {
           id: 'p00000000000000c1',
           name: '重复',
           source: 'file',
-          filePath: 'C:/p/a.focusnews.json'
+          filePath: 'C:/p/a.socut.json'
         },
         {
           id: AUTOSAVE_ENTRY_ID,
@@ -241,6 +241,6 @@ describe('路径 id 与索引归一化', () => {
       hasCover: true,
       modifiedAt: '2026-01-03T04:05:06.000Z'
     })
-    expect(url).toBe(`focusnews-cover://p00000000000000c1?v=${Date.parse('2026-01-03T04:05:06.000Z')}`)
+    expect(url).toBe(`socut-cover://p00000000000000c1?v=${Date.parse('2026-01-03T04:05:06.000Z')}`)
   })
 })

@@ -79,7 +79,7 @@ export function ProgressPanel(): ReactElement | null {
                 <button
                   type="button"
                   className="btn btn--sm btn--danger"
-                  onClick={() => void window.focusnews.export.cancel(job.jobId)}
+                  onClick={() => void window.socut.export.cancel(job.jobId)}
                 >
                   {TEXT.export.cancel}
                 </button>
@@ -113,7 +113,7 @@ export function LastResultPanel(): ReactElement | null {
               <span className="list-row__name mono" title={output}>
                 {output}
               </span>
-              <button type="button" className="btn btn--sm" onClick={() => void window.focusnews.app.revealPath(output)}>
+              <button type="button" className="btn btn--sm" onClick={() => void window.socut.app.revealPath(output)}>
                 {TEXT.export.reveal}
               </button>
             </div>

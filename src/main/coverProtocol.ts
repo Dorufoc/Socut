@@ -4,14 +4,14 @@ import { RECENT_ENTRY_ID_PATTERN } from '../shared/recentProjects'
 import { userCoverPath } from './paths'
 
 /**
- * 启动页封面协议：focusnews-cover://<entryId>?v=<modifiedAt>。
+ * 启动页封面协议：socut-cover://<entryId>?v=<modifiedAt>。
  *
  * host 就是最近工程 id，主进程只按 id 映射到 userData/covers/<id>.png，
  * 不接受任何路径片段——渲染进程拿不到读任意文件的能力。
- * 与 focusnews-thumb 保持同一套权限声明（标准 + 安全 + Fetch API）。
+ * 与 socut-thumb 保持同一套权限声明（标准 + 安全 + Fetch API）。
  */
 
-export const COVER_SCHEME = 'focusnews-cover'
+export const COVER_SCHEME = 'socut-cover'
 
 /** 必须在 app ready 之前调用（与其它自定义协议并列注册）。 */
 export function registerCoverScheme(): void {

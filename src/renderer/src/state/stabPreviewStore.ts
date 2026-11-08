@@ -17,7 +17,7 @@ import type { Fps, JobResult, MediaClip, MediaClipStab, StabPreviewRequest } fro
 export const STAB_JOB_ID_PREFIX = 'stab-'
 
 export interface StabPreviewClipState {
-  /** 代理 mp4 绝对路径（focusnews-media:// 由 PreviewStage 现取） */
+  /** 代理 mp4 绝对路径（socut-media:// 由 PreviewStage 现取） */
   path: string
   /** 应用那一刻的签名（PreviewStage/Inspector 据此判新鲜度） */
   signature: string
@@ -74,9 +74,9 @@ export const useStabPreviewStore = create<StabPreviewState>((set, get) => ({
       stab,
       hasAudio
     }
-    let outcome: Awaited<ReturnType<typeof window.focusnews.video.stabPreview>>
+    let outcome: Awaited<ReturnType<typeof window.socut.video.stabPreview>>
     try {
-      outcome = await window.focusnews.video.stabPreview(request)
+      outcome = await window.socut.video.stabPreview(request)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       set((state) => ({
@@ -110,7 +110,7 @@ export const useStabPreviewStore = create<StabPreviewState>((set, get) => ({
     }))
     // 回收磁盘缓存：拿不到 IPC（预加载未注入 / 测试环境）也不能抛，
     // 否则一次「关掉防抖」的点击会把渲染进程的事件处理链整个打断
-    if (removeFiles) void window.focusnews?.video?.stabPreviewRemove?.(clipId)?.catch(() => undefined)
+    if (removeFiles) void window.socut?.video?.stabPreviewRemove?.(clipId)?.catch(() => undefined)
   },
 
   handleJobResult: (result) => {

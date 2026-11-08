@@ -120,7 +120,7 @@ function handleProjectCommand(request: CliCommandRequest): unknown {
     case 'project.save': {
       const target = optionalString(params, 'path') ?? store.currentPath
       if (!target) throw new CliCommandError(CLI_ERROR_CODES.BAD_PARAMS, '缺少保存路径：path')
-      return window.focusnews.project.writeToPath(target, store.project).then((saved) => {
+      return window.socut.project.writeToPath(target, store.project).then((saved) => {
         useProjectStore.getState().adoptSavedEntry(saved.path, saved.entryId)
         return saved
       })
@@ -164,7 +164,7 @@ async function handleMediaCommand(request: CliCommandRequest): Promise<unknown> 
   switch (command) {
     case 'media.import': {
       const path = requireString(params, 'path')
-      const probe = await window.focusnews.video.probe(path)
+      const probe = await window.socut.video.probe(path)
       if (!probe) throw mediaProbeFailure(path)
       const vfr = optionalEnum(params, 'vfr', ['none', 'raw', 'convert', 'reject'] as const) ?? 'reject'
       const outcome = await importMediaWithPolicy(
@@ -196,14 +196,14 @@ async function handleMediaCommand(request: CliCommandRequest): Promise<unknown> 
       const id = requireString(params, 'id')
       const removeClips = optionalBoolean(params, 'removeClips') !== false
       store.removeMedia(id, { removeClips })
-      void window.focusnews.media.removeThumb(id).catch(() => undefined)
-      void window.focusnews.media.removeProxy(id).catch(() => undefined)
+      void window.socut.media.removeThumb(id).catch(() => undefined)
+      void window.socut.media.removeProxy(id).catch(() => undefined)
       return { id, removeClips }
     }
     case 'media.relocate': {
       const id = requireString(params, 'id')
       const path = requireString(params, 'path')
-      const probe = await window.focusnews.video.probe(path)
+      const probe = await window.socut.video.probe(path)
       if (!probe) throw mediaProbeFailure(path)
       store.relocateMedia(id, { path, meta: probe.meta })
       return { id, path, meta: probe.meta }
@@ -598,7 +598,7 @@ async function handleWatermarkCommand(request: CliCommandRequest): Promise<unkno
               width: optionalNumber(params, 'sourceWidth') as number,
               height: optionalNumber(params, 'sourceHeight') as number
             }
-          : await window.focusnews.watermark.probe(path)
+          : await window.socut.watermark.probe(path)
       const settings: WatermarkSettings = {
         enabled: optionalBoolean(params, 'enabled') !== false,
         path,
@@ -725,18 +725,18 @@ export async function handleCliCommand(request: CliCommandRequest): Promise<unkn
 
 /** main.tsx 挂载：注册路由并回放 preload 期间排队的命令。 */
 export function installCliCommandRouter(): () => void {
-  return window.focusnews.cli.onCommand((request) => {
+  return window.socut.cli.onCommand((request) => {
     void handleCliCommand(request)
       .then((result) => {
         const response: CliResponse = { ok: true, result }
-        window.focusnews.cli.respond(request.id, response)
+        window.socut.cli.respond(request.id, response)
       })
       .catch((error: unknown) => {
         const info =
           error instanceof GateError
             ? { code: CLI_ERROR_CODES.GATE_BLOCKED, message: error.message }
             : toCliErrorInfo(error)
-        window.focusnews.cli.respond(request.id, { ok: false, error: info })
+        window.socut.cli.respond(request.id, { ok: false, error: info })
       })
   })
 }

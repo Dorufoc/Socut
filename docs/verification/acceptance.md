@@ -7,15 +7,15 @@
 | # | 验收标准（原文） | 取证入口 | 状态 |
 |---|---|---|---|
 | 1 | 安装包在无 FFmpeg、无 Node、无 Python 的 Windows 机器上可离线运行 | `npm run dist:win` → `npm run verify:packaged`（静默安装 → 断网冷启动 → 优雅退出 → **覆盖安装（升级）** → 再冷启动 → 卸载）；`npm run check:env` 静态禁网 + 生产 CSP；打包日志 `FFmpeg bundled (<安装目录>\resources\ffmpeg\ffmpeg.exe)` | **部分**：随包二进制、断网等价（`--proxy-server=127.0.0.1:9`）、无外部依赖、**安装/升级/卸载三态**已证（升级后 `ffmpeg-bundled=1`、仍能冷启动）；「真正没装任何运行库的第二台机器」需实机（清单 C1/C2/C8） |
-| 2 | 1080p30、10 秒字幕条透明 MOV 导出耗时 ≤ 30 秒 | `FOCUSNEWS_SMOKE=1 …SMOKE_W=1920 H=1080 SEC=10`；`node scripts/smoke-export.mjs --width 1920 --height 1080 --fps 30/1 --seconds 10` | **通过**：应用内 6.67s（300 帧，吞吐 45 fps）；CLI 侧（合成帧，非真实绘制）约 3.5–4s |
+| 2 | 1080p30、10 秒字幕条透明 MOV 导出耗时 ≤ 30 秒 | `SOCUT_SMOKE=1 …SMOKE_W=1920 H=1080 SEC=10`；`node scripts/smoke-export.mjs --width 1920 --height 1080 --fps 30/1 --seconds 10` | **通过**：应用内 6.67s（300 帧，吞吐 45 fps）；CLI 侧（合成帧，非真实绘制）约 3.5–4s |
 | 3 | ProRes 4444 MOV 在 Premiere、DaVinci Resolve 中透明通道正确，无黑边、无预乘问题 | FFmpeg 侧：`smoke-export` 断言 `pix_fmt=yuva*`/`fourcc=ap4h`/alpha 均值 14.77（非全 255）；`tests/ffmpegPipeline.test.ts` 的 alpha 枚举表 + 期望像素 192/64/64；计划 C2 修正 | **待外部条件**：DCC 里的终评必须人工完成（清单第 3 节） |
-| 4 | 同一工程导出 1080p30 透明 MOV 与叠加到 **720p 23.976** 参考视频，入出点时间误差 < 1 帧 | `FOCUSNEWS_SMOKE_OVERLAY=1 FOCUSNEWS_SMOKE_REF=<ref-720p23976.mp4>`（主进程逐帧 PSNR 从产物像素量区间）+ `tests/presets.test.ts` M3-7（帧算法逐段 <1 帧） | **通过**：产物 144 帧=参考、`yuv420p`、24000/1001；实测可见区间帧 13..130 vs 声明 12..132（入点 1 帧、出点 2 帧，均在淡入 6/淡出 3 帧窗口内，无泄漏）；算法层面逐段误差 <1 帧 |
-| 5 | 非 16:9、HDR 视频导入均触发模态提示，未确认不可继续 | `FOCUSNEWS_SMOKE_GATE=1`（走生产 `importMediaWith` + CompatModal 同一应答动作） | **通过**（v2 枚级）：portrait.mp4→`non169`、hdr.mp4→`hdr`；未确认时 `gateBlocked` 逐枚检查素材池为真（导出按钮禁用并在原因里带展示名）；选「取消」素材池不写入（poolSize=0 断言） |
+| 4 | 同一工程导出 1080p30 透明 MOV 与叠加到 **720p 23.976** 参考视频，入出点时间误差 < 1 帧 | `SOCUT_SMOKE_OVERLAY=1 SOCUT_SMOKE_REF=<ref-720p23976.mp4>`（主进程逐帧 PSNR 从产物像素量区间）+ `tests/presets.test.ts` M3-7（帧算法逐段 <1 帧） | **通过**：产物 144 帧=参考、`yuv420p`、24000/1001；实测可见区间帧 13..130 vs 声明 12..132（入点 1 帧、出点 2 帧，均在淡入 6/淡出 3 帧窗口内，无泄漏）；算法层面逐段误差 <1 帧 |
+| 5 | 非 16:9、HDR 视频导入均触发模态提示，未确认不可继续 | `SOCUT_SMOKE_GATE=1`（走生产 `importMediaWith` + CompatModal 同一应答动作） | **通过**（v2 枚级）：portrait.mp4→`non169`、hdr.mp4→`hdr`；未确认时 `gateBlocked` 逐枚检查素材池为真（导出按钮禁用并在原因里带展示名）；选「取消」素材池不写入（poolSize=0 断言） |
 | 6 | VFR 视频转换 CFR 后 ffprobe 确认帧率一致；直接导入 VFR 时二次提醒生效 | 同上 gate 场景（选「转换并导入」）+ `tests/ffmpegPipeline.test.ts` VFR→CFR PTS 偏差 | **通过**（前半）：CFR 产物主进程独立 ffprobe 得 `r=30/1 == avg=30/1`，重探不再判 VFR，枚级 `vfrPolicy=converted` 且保留 `sourcePath`。（后半）二次提醒为 UI 模态，代码路径 `askVfrSecondConfirm` 在任一段 `vfrPolicy==='raw'` 时必经；真机手机素材需人工（清单 C11） |
 | 7 | 音频 `-c:a copy` 成功；不可复制时回退 AAC 并提示 | overlay 冒烟（aac 参考 → copy 成功）+ overlay 冒烟（pcm_s16le 参考 → 预检转 AAC 且带 notice）+ `tests/overlayAudioFallback.test.ts`（注入退出码，5 例） | **通过**：copy 路径产物音轨 `aac` 与参考一致；`pcm_s16le → aac` 且 notices = ["音频已转码为 AAC 192k（原音轨 pcm_s16le 不能直接复制）。"]；运行期 copy 失败只重试一次、不无限重试 |
-| 8 | 导出取消后无孤儿 FFmpeg 进程，临时文件被清理 | `FOCUSNEWS_SMOKE_CANCEL=1`（**两种出口各跑一次**：透明 MOV 与 PNG 序列） | **通过**：MOV 中途 15/600 帧、PNG 序列中途 41/600 帧取消；`errorCode=CANCELLED`、`activeJobs=[]`、`artifactExists=false`（PNG 是**目录**型半成品，走 `kind==='dir'` 递归删除分支）、`staleTempDirs=[]`。注：清理发生在结果事件之后的 `finally`，校验用有界轮询（实测 200ms 内完成）而不是单时间点采样 |
-| 9 | Yoga 布局在 360p 至 4K、竖屏、超宽屏下字号与条高可读且不失控 | `tests/presets.test.ts` 8 预设 × 8 档（含 9:16 与 21:9）+ 分支覆盖计数 + **标题宽度法则专项**（结构断言两条矩形 `maxWidth === BAR_MAX_WIDTH` 且 root `left === right`；几何断言长文案右缘落在「画宽 − 左边距」上、短文案仍 hug）；`FOCUSNEWS_REVIEW_SHEET` 出图 | **通过**（机器可判部分）：整数像素网格、字号硬上限、compact 副标题单行省略；4K 条高 ≈ 360p 的 6 倍；**标题宽度**：1080p 下短/长文案条宽 440→1717（上限 = root 内容宽 1728，右缘落在 1824 = 1920 − 96；左缘均 x=96）。「观感是否廉价」仍需人看 |
-| 10 | 预设样式在真实 1080p 画面上逐帧评审，动画无网页式弹跳与轻浮感 | `FOCUSNEWS_REVIEW_SHEET=…`（8 预设 × 7 关键帧 + 末行「长文案换行」共 9 行，画面由生产同一套 `renderFrame` 产出）；曲线表从源头禁 overshoot（`validatePreset` + `tests/projectSchema.test.ts`）；擦除进度逐帧与 `motionAt` 对照（`FOCUSNEWS_PIXELCHECK` 的 `wipe` 段） | **部分**：评审表可一键产出且每帧都是真实导出像素；动画已是「整体左→右擦除」（无位移、无淡入，仍无 overshoot）；背景为 FFmpeg `testsrc2` 合成画面，**实拍素材观感判定必须人工**（清单第 3 节） |
+| 8 | 导出取消后无孤儿 FFmpeg 进程，临时文件被清理 | `SOCUT_SMOKE_CANCEL=1`（**两种出口各跑一次**：透明 MOV 与 PNG 序列） | **通过**：MOV 中途 15/600 帧、PNG 序列中途 41/600 帧取消；`errorCode=CANCELLED`、`activeJobs=[]`、`artifactExists=false`（PNG 是**目录**型半成品，走 `kind==='dir'` 递归删除分支）、`staleTempDirs=[]`。注：清理发生在结果事件之后的 `finally`，校验用有界轮询（实测 200ms 内完成）而不是单时间点采样 |
+| 9 | Yoga 布局在 360p 至 4K、竖屏、超宽屏下字号与条高可读且不失控 | `tests/presets.test.ts` 8 预设 × 8 档（含 9:16 与 21:9）+ 分支覆盖计数 + **标题宽度法则专项**（结构断言两条矩形 `maxWidth === BAR_MAX_WIDTH` 且 root `left === right`；几何断言长文案右缘落在「画宽 − 左边距」上、短文案仍 hug）；`SOCUT_REVIEW_SHEET` 出图 | **通过**（机器可判部分）：整数像素网格、字号硬上限、compact 副标题单行省略；4K 条高 ≈ 360p 的 6 倍；**标题宽度**：1080p 下短/长文案条宽 440→1717（上限 = root 内容宽 1728，右缘落在 1824 = 1920 − 96；左缘均 x=96）。「观感是否廉价」仍需人看 |
+| 10 | 预设样式在真实 1080p 画面上逐帧评审，动画无网页式弹跳与轻浮感 | `SOCUT_REVIEW_SHEET=…`（8 预设 × 7 关键帧 + 末行「长文案换行」共 9 行，画面由生产同一套 `renderFrame` 产出）；曲线表从源头禁 overshoot（`validatePreset` + `tests/projectSchema.test.ts`）；擦除进度逐帧与 `motionAt` 对照（`SOCUT_PIXELCHECK` 的 `wipe` 段） | **部分**：评审表可一键产出且每帧都是真实导出像素；动画已是「整体左→右擦除」（无位移、无淡入，仍无 overshoot）；背景为 FFmpeg `testsrc2` 合成画面，**实拍素材观感判定必须人工**（清单第 3 节） |
 
 ## 关键纪律（规格 §11）的机器化程度
 
@@ -26,14 +26,14 @@
 | FFmpeg 二进制必须在 asar 外 | `electron-builder.yml` `files` 白名单 + `extraResources`；`check-env` 硬校验；asar 内 172 项不含 ffmpeg | 通过 |
 | 时间轴存秒、帧率存分数、全程整数运算 | `src/shared/fps.ts`（含 BigInt 片段区间）+ `tests/fps.test.ts` 互逆 | 通过 |
 | 非 16:9 与 HDR 模态阻断，未确认不得导入或导出 | `CompatModal` + `gateBlocked`（v2 枚级：逐枚检查素材池，UI 禁用导出按钮）+ `useExportJob.assertGate`（主路径二次拦截） | 通过 |
-| 渲染以帧序号驱动，预览 Canvas 不参与坐标计算 | `renderFrame(ctx, job, globalFrame)` 单一像素生产者 + `FOCUSNEWS_PIXELCHECK` 逐像素比对（导出字节 = 预览原生层，DPR=1.5 下仍成立） | 通过 |
+| 渲染以帧序号驱动，预览 Canvas 不参与坐标计算 | `renderFrame(ctx, job, globalFrame)` 单一像素生产者 + `SOCUT_PIXELCHECK` 逐像素比对（导出字节 = 预览原生层，DPR=1.5 下仍成立） | 通过 |
 
 ## 三个出口的覆盖情况（规格 §2.3）
 
 | 出口 | 应用内真实管线 | CLI 不依赖 Electron | 备注 |
 |---|---|---|---|
 | 透明 ProRes 4444 MOV（主路径 rawvideo 直送 stdin） | 通过（6.78s/300 帧；取消已证） | 通过 | `ap4h`/`yuva444p12le`/alpha 非全 255 |
-| 透明 MOV 的 PNG 序列回退（`frameDelivery='pngSequence'`） | **通过**（`FOCUSNEWS_SMOKE_DELIVERY=pngSequence`：60 帧 / 1.57s，产物 `ap4h`+`yuva444p12le`+30/1+tv，预估/实际 1.46） | 通过（`--png-seq`） | 回退本质上多一次逐帧 PNG 压缩 + 落盘 + 二次编码，外推 1080p30/10s = 70.5s；≤30s 只适用于默认路径（否则是假阳性失败），回退路径单独给 150s 上界 |
+| 透明 MOV 的 PNG 序列回退（`frameDelivery='pngSequence'`） | **通过**（`SOCUT_SMOKE_DELIVERY=pngSequence`：60 帧 / 1.57s，产物 `ap4h`+`yuva444p12le`+30/1+tv，预估/实际 1.46） | 通过（`--png-seq`） | 回退本质上多一次逐帧 PNG 压缩 + 落盘 + 二次编码，外推 1080p30/10s = 70.5s；≤30s 只适用于默认路径（否则是假阳性失败），回退路径单独给 150s 上界 |
 | PNG 序列独立出口 | **通过**（60 帧全为合法 RGBA PNG；取消时目录回收已证） | — | C40 修复前它产出的是裸 RGBA 假 PNG |
 | MP4 叠加压制 | 通过（720p23.976 与 1080p30/pcm 两个参考） | 通过（`--overlay`） | 逐帧 PSNR 量出入出点包络 |
 
@@ -57,7 +57,7 @@
 
 ## 标题宽度、层叠顺序、逐字过渡与擦除动画（像素级判据）
 
-判据不靠「看截图」，而是写进 `FOCUSNEWS_PIXELCHECK` 的 `wipe` 段（`spikes/pixel-parity.json`）：
+判据不靠「看截图」，而是写进 `SOCUT_PIXELCHECK` 的 `wipe` 段（`spikes/pixel-parity.json`）：
 在主条 / 副条高度中段扫描不透明像素包围盒，逐帧与 `motionAt` 对照（容差 2%）。
 
 > **2026-11-05 更正（双轨重构随修）**：自「字幕条自适应宽度 + 整体擦除」重设计后，
@@ -84,33 +84,33 @@
 打包版取证脚本里的屏幕截图（`CopyFromScreen`）现在能拿到真实桌面像素，
 但**拿到的是 IDE 而不是应用窗口**：`SetForegroundWindow` 在 Windows 前台锁定策略下并未生效，
 窗口虽在 `GetWindowRect` 返回的坐标上却被遮盖。因此屏幕截图不能当作应用 UI 的证据；
-可靠路径仍是应用自身的 `webContents.capturePage()`（`FOCUSNEWS_SHOT=<png>`），
+可靠路径仍是应用自身的 `webContents.capturePage()`（`SOCUT_SHOT=<png>`），
 它拿的是 Chromium 内容区的真实绘制结果（已证：`ui-shot-1080p.png`、`ui-shot-directpipe.png`、`ui-shot-refmissing.png`）。
 
 ## 双轨时间轴与素材库（v2，阶段 2–9）的机器化验收
 
 | 能力 | 实现 | 取证入口 / 状态 |
 |---|---|---|
-| 主进程批量导入 + 枚级缩略图协议 | `video:pickManyAndProbe`（多选逐文件探测，单文件失败不阻断整批）；`thumbProtocol.ts`：ffmpeg 抽帧落 `userData/thumbs/<mediaId>.jpg`，`focusnews-thumb://<mediaId>` 仅读已登记项；移出池回收文件 | `tests/ffmpegArgs.test.ts`（缩略图 argv 快照）；应用内启动路径随 `npm run verify:all` 门禁通过 |
+| 主进程批量导入 + 枚级缩略图协议 | `video:pickManyAndProbe`（多选逐文件探测，单文件失败不阻断整批）；`thumbProtocol.ts`：ffmpeg 抽帧落 `userData/thumbs/<mediaId>.jpg`，`socut-thumb://<mediaId>` 仅读已登记项；移出池回收文件 | `tests/ffmpegArgs.test.ts`（缩略图 argv 快照）；应用内启动路径随 `npm run verify:all` 门禁通过 |
 | 素材池/媒体轨 store 动作 | `projectStore`：addMedia/removeMedia/relocateMedia/ack 枚级、insert/move/trim/remove、`splitTargetAt`/`removeTargetAt`/`removeSelected`（v10 P3：目标段由 `shared/timelineTargets` 统一解析）；时长恒等式 `timelineEnd-timelineStart === sourceOut-sourceIn` 唯一写入口 | `src/renderer/src/state/projectStore.test.ts` + `tests/mediaClips.test.ts`（纯函数：拆分/仅重叠右移/时间↔源换算）+ `tests/timelineTargets.test.ts`（目标解析与字幕/音频拆分） |
 | 旧工程迁移 | `normalizeProject` v1→v2：`refVideo` 折叠为 `media[0]` + 覆盖整段的 mediaClip，旧字段不回流 | `tests/projectSchema.test.ts`（迁移两组） |
-| 左侧 Tab 壳 + 素材库 | `App.tsx` rail__tabs 由 `shared` 的 `LEFT_TABS` 生成（v10 P6 后 4 个：素材库/包装/导出/进度，同一时刻只展开一个，窄侧栏里自动换行而不被裁切）；卡片拖拽携带 `application/x-focusnews-media` | `tests/projectSchema.test.ts`「leftTab 归一化」5 例 + `Timeline.test.tsx` v2 媒体轨 4 例 + `FOCUSNEWS_SHOT` 出图（`spikes/artifacts/ui-wrap-rail.png`） |
+| 左侧 Tab 壳 + 素材库 | `App.tsx` rail__tabs 由 `shared` 的 `LEFT_TABS` 生成（v10 P6 后 4 个：素材库/包装/导出/进度，同一时刻只展开一个，窄侧栏里自动换行而不被裁切）；卡片拖拽携带 `application/x-socut-media` | `tests/projectSchema.test.ts`「leftTab 归一化」5 例 + `Timeline.test.tsx` v2 媒体轨 4 例 + `SOCUT_SHOT` 出图（`spikes/artifacts/ui-wrap-rail.png`） |
 | 水印（Watermark）模块 | `WatermarkPanel`（v10 P6 起在左侧「包装」Tab 内、字幕区下方）：导入本机图片（`watermark:pick` 用 ffprobe 取原图宽高）、启用/停用/移除；`ffmpegArgs.computeWatermarkGeometry` 以 1080P 为基准（显示尺寸 = 原图 32%，距顶/左各 30px）按输出高度等比换算，四条合成路径统一作为**最后一层** overlay 叠在字幕条之上；预览用同一函数定位 `<img>`（不进 Canvas，透明出口永不烧录台标） | `tests/watermark.test.ts`（几何/argv/图片解析/持久化 20 例）+ `WatermarkPanel.test.tsx`（导入/开关/移除/读数 9 例）+ `WrapPanel.test.tsx`（合并后仍在包装区内）+ `tests/ffmpegPipeline.test.ts`（真机 FFmpeg 取像素判定：两阶段单输入 / trim+concat 拼接 / 直管道 3 例） |
 | 双轨时间轴 + 落点高亮 | 媒体轨/字幕轨共享尺规与播放头；拖拽悬停显示吸附落点竖线；v10 P3：工具栏只留一个「拆分」与一个「删除」，作用于选中段（未选中退到播放头处媒体轨最下层），没有目标就给提示而不是置灰 | `Timeline.test.tsx`（拆分/删除目标解析、空隙提示、选中/尺规跟随） |
 | 预览按 mediaClip 切源 | `PreviewStage`：播放头落在哪段，`<video>` 就换那枚源文件，`currentTime` 按 `sourceTimeOf` 换算；段间空隙回棋盘格；无 mediaClips 时保留 v1 兼容 | 逐像素一致性（M1-7）仍走同一 `renderFrame`，本次重跑通过 |
 | Ctrl+B 剪切 | `App.tsx` keydown：输入控件内不拦；先暂停再 `splitTargetAt(displayTimeSec)`；Delete 走 `removeSelected()`（只删选中的段，不做播放头默认解析） | UI 快捷键（可人工验证）；拆分本体由 store 单测覆盖 |
 | 多输入 trim+concat 导出 | `ExportRequest.overlay.segments`（主进程按段 trim 后 concat，空隙补黑+静音；单段整段覆盖时回退旧单输入 argv 不变）；拼接路径音频强制 AAC 并提示 | `tests/ffmpegArgs.test.ts` v2 新增 5 例（滤镜链/两阶段/直管道 argv）；叠加冒烟（单段回退）仍通过 |
-| 素材完整性枚级看护 | `useMediaIntegrity` 遍历 MediaItem 池查存在性 → `missingMediaIds` 驱动卡片角标与叠加禁用；重新定位走生产导入路径 | 代码路径与 v1 同构（旧 `useRefVideoIntegrity` 删除）；`FOCUSNEWS_SHOT_REFMISSING` 取证保留 v1 兼容分支 |
+| 素材完整性枚级看护 | `useMediaIntegrity` 遍历 MediaItem 池查存在性 → `missingMediaIds` 驱动卡片角标与叠加禁用；重新定位走生产导入路径 | 代码路径与 v1 同构（旧 `useRefVideoIntegrity` 删除）；`SOCUT_SHOT_REFMISSING` 取证保留 v1 兼容分支 |
 | leftTab 持久化与旧值迁移 | `uiStore.leftTab` 为真值，`App.tsx` 分叉时补写 `project.ui.leftTab`，自动保存落盘、启动恢复；v10 P6：`normalizeLeftTab` 把旧工程的 `captions` / `watermark` 一律迁到 `wrap`，不认识的值丢弃（避免恢复出一个已经不存在的 Tab） | `tests/projectSchema.test.ts`「leftTab 归一化与旧值迁移」5 例；隔离 profile 写入 `leftTab: "captions"` 冷启动后落在「包装」（`spikes/artifacts/ui-wrap-tab.png`） |
 
 ## 主界面伸缩布局（v3）的机器化验收
 
 | 能力 | 实现 | 取证入口 / 状态 |
 |---|---|---|
-| 三栏 + 下方轨道的可拖拽分区 | `.shell`（CSS 变量宿主 + 测量目标）→ `.body` 五列 Grid（`--pane-left` / 分隔线 / `minmax(0,1fr)` / 分隔线 / `--pane-right`）+ 横分隔线 + `--pane-timeline`；`Splitter` 为 `role=separator` 的独立网格项，面板各自 `min-width/height:0` + `overflow` 裁切，层级不互叠 | `tests/paneLayout.test.ts`（总宽/总高恒等容器、极窄容器让位、保底不越界）；`FOCUSNEWS_SHOT=spikes/artifacts/ui-pane-layout.png` 已出图 |
+| 三栏 + 下方轨道的可拖拽分区 | `.shell`（CSS 变量宿主 + 测量目标）→ `.body` 五列 Grid（`--pane-left` / 分隔线 / `minmax(0,1fr)` / 分隔线 / `--pane-right`）+ 横分隔线 + `--pane-timeline`；`Splitter` 为 `role=separator` 的独立网格项，面板各自 `min-width/height:0` + `overflow` 裁切，层级不互叠 | `tests/paneLayout.test.ts`（总宽/总高恒等容器、极窄容器让位、保底不越界）；`SOCUT_SHOT=spikes/artifacts/ui-pane-layout.png` 已出图 |
 | 拖拽实时反馈与双向拖拽 | 指针捕获 + 命令式写 CSS 变量（拖拽中**不重渲染**外层界面），HUD 气泡显示「被治理区域 + 邻居」的 px 与百分比；同一条线同时改两区（时间轴 +40 ↔ 预览 −40） | `Splitter.test.tsx`（按下/跟随/抬起、钳制、方向系数、键盘、双击复位、ARIA 读数）+ `usePaneLayout.test.tsx`（拖拽期间渲染次数不变、变量已生效） |
-| 布局偏好持久化 | `shared/paneLayout` 存比例（与分辨率无关）+ `layout/panePrefs` 落 `localStorage` 键 `focusnews.layout.panes.v1`（带版本）；脏数据/隐私模式/配额异常一律回落默认，不阻断渲染 | `tests/paneLayout.test.ts`（像素↔比例往返、脏数据丢弃）+ `panePrefs.test.ts`（读写/删除/异常存储 5 例）+ `usePaneLayout.test.tsx`（冷启动默认、按比例恢复、窗口缩放保持比例、恢复默认清存档） |
-| 预览叠加层绑定画面框 | 伸缩布局会把预览区拖成任意宽高比，而目标分辨率比例不变：`containFrameRect`（`render/hitTest.ts`，内缩 `STAGE_INSET_PX`）算出**与目标分辨率同比例**的画面框，Canvas / 参考视频 / 水印 / 角标 / 提示语全部装进同一个 `.stage__frame`；`usePreviewLoop` 另监听 Canvas 盒子，尺寸一变就置脏重画（否则暂停态下浏览器只能把旧位图非等比拉伸到新盒子 → 画面被压扁）；点选 `displayToNative` 改用画面框为 rect（拿容器盒子算会把黑边算进画面） | `tests/hitTest.test.ts`「画面框」6 例（比例只由目标分辨率决定、容器内不越界、扁/高容器居中装入、比边距还小时不为负、水印相对画面占比不变、点选不再有黑边偏差）；逐像素一致性（M1-7）在 `verify:all` 重跑仍通过（dpr 1.5 / blitSize 1440x810）；`FOCUSNEWS_SHOT=spikes/artifacts/ui-stage-frame.png` 可见棋盘格即为 16:9 画面矩形 |
+| 布局偏好持久化 | `shared/paneLayout` 存比例（与分辨率无关）+ `layout/panePrefs` 落 `localStorage` 键 `socut.layout.panes.v1`（带版本）；脏数据/隐私模式/配额异常一律回落默认，不阻断渲染 | `tests/paneLayout.test.ts`（像素↔比例往返、脏数据丢弃）+ `panePrefs.test.ts`（读写/删除/异常存储 5 例）+ `usePaneLayout.test.tsx`（冷启动默认、按比例恢复、窗口缩放保持比例、恢复默认清存档） |
+| 预览叠加层绑定画面框 | 伸缩布局会把预览区拖成任意宽高比，而目标分辨率比例不变：`containFrameRect`（`render/hitTest.ts`，内缩 `STAGE_INSET_PX`）算出**与目标分辨率同比例**的画面框，Canvas / 参考视频 / 水印 / 角标 / 提示语全部装进同一个 `.stage__frame`；`usePreviewLoop` 另监听 Canvas 盒子，尺寸一变就置脏重画（否则暂停态下浏览器只能把旧位图非等比拉伸到新盒子 → 画面被压扁）；点选 `displayToNative` 改用画面框为 rect（拿容器盒子算会把黑边算进画面） | `tests/hitTest.test.ts`「画面框」6 例（比例只由目标分辨率决定、容器内不越界、扁/高容器居中装入、比边距还小时不为负、水印相对画面占比不变、点选不再有黑边偏差）；逐像素一致性（M1-7）在 `verify:all` 重跑仍通过（dpr 1.5 / blitSize 1440x810）；`SOCUT_SHOT=spikes/artifacts/ui-stage-frame.png` 可见棋盘格即为 16:9 画面矩形 |
 
 ## 字幕条自定义参数与预设联动（v3.1）的机器化验收
 
@@ -124,7 +124,7 @@
 
 | 能力 | 实现 | 取证入口 / 状态 |
 |---|---|---|
-| 字幕轨只留一条上下更窄的示意条 | `ClipCard` 不再渲染副标题/预设名/秒数行：摆位本身就是该字幕在当前画面的**入点→出点**区间（与全局播放头同一 `secToPx` 口径）；CSS 高度 56/50px → 22px 并用 `top:50% + translateY` 居中；入出点拖拽手柄与平移保留；完整读数不丢，进 `title` / `aria-label` | `Timeline.test.tsx`「Timeline 字幕轨示意条」3 例（标签只有主标题、旧 meta 行消失但 title 里仍有时间码、无主标题时用可读占位）；`FOCUSNEWS_SHOT=spikes/artifacts/ui-caption-strip.png` 已出图 |
+| 字幕轨只留一条上下更窄的示意条 | `ClipCard` 不再渲染副标题/预设名/秒数行：摆位本身就是该字幕在当前画面的**入点→出点**区间（与全局播放头同一 `secToPx` 口径）；CSS 高度 56/50px → 22px 并用 `top:50% + translateY` 居中；入出点拖拽手柄与平移保留；完整读数不丢，进 `title` / `aria-label` | `Timeline.test.tsx`「Timeline 字幕轨示意条」3 例（标签只有主标题、旧 meta 行消失但 title 里仍有时间码、无主标题时用可读占位）；`SOCUT_SHOT=spikes/artifacts/ui-caption-strip.png` 已出图 |
 | 当前位置相对出入点的可视化 | 播放头落在区间内时条内画一条细游标（`clip-card__cursor`，left 由 `secToPx(playhead) - left` 给出）并提亮条体（`clip-card--onair`） | 同上：区间外无游标、区间内有游标且 left 为有限正像素值 |
 | 左侧「字幕」Tab：按时间顺序的标题列表 | 新 `CaptionListPanel`（`leftTab === 'captions'`）；面板内显式 `sort(startTime)`（不依赖片段写入顺序）；每项 = 主标题 + 副标题 + 入点→出点时间码 + 预设名，播放头落在区间内的项标「正在显示」 | `CaptionListPanel.test.tsx` 7 例（乱序工程仍按时间输出、每项含主/副标题、空态、选中态 aria-pressed、onAir 只标一条） |
 | 点一条 = 选中 + 跳到入点（预览与轨道同步） | `selectClip(id)` → 右侧检查器随即显示；`uiStore.seekHandler`（App 注册的 `seekTo`，含 `setDisplayTime`）落到 `clip.startTime`；播放中先 `setPlaying(false)`（与时间轴刮擦接管播放头同一口径，否则跳过去立刻被时钟带走） | `CaptionListPanel.test.tsx`：seek 收到入点秒、播放中点击先暂停、无 seekHandler 时仍选中不抛异常 |
@@ -146,7 +146,7 @@
 | 选中媒体段 → 右栏切到视频编辑器；选中字幕条 → 保持原字幕检查器 | `projectStore.selectionKind`（`selectClip` 置 `subtitle`、`selectMediaClip` 置 `media`、删除最后一条媒体段时退回 `subtitle`），`ClipInspector` 只当分流，原字幕实现原封不动搬到 `SubtitleClipInspector` | `projectStore.test.ts`「媒体段画面编辑与检查器分流」5 例 + `MediaClipInspector.test.tsx` 前两例（三段分区、切回字幕检查器） |
 | 几何变换：缩放 / 水平位移 / 垂直位移 / 旋转 | `MediaClip.video`（v6，缩到片段级；默认 100% / 0 / 0°）→ `shared/mediaClipVideo.mediaVideoTransform` 输出**固定顺序**的 CSS transform（平移→旋转→缩放→镜像），预览里直接作用在 `<video>` 上 | `tests/mediaClipVideo.test.ts`（默认 none、组合顺序、单项输出、越界夹心）+ `MediaClipInspector.test.tsx`（滑杆写回、拉回 100% 即整键删除） |
 | 画面交互层：拖角缩放 / 拖画面平移（含辅助线）/ 拖旋转手柄 | 选中媒体段且该段在播放头下才挂出 `StageTransformOverlay`（`selectionKind==='media'` + `uiStore.stageInteract` + 段匹配），画面轮廓与手柄吃指针、其余穿透；几何计算全在 `shared/mediaClipVideo`（`mediaVideoCorners` / `scaleFromPointer` / `rotationFromPointers` / `snapOffset`），拖拽只写同一个 `updateMediaClipVideo`，所以面板数字实时跟着变；命中「居中 / 边对齐」时吸附并画虚线导引线，拖拽中出读数 HUD；面板上的「交互」开关是遮住字幕点选时的逃生口 | `StageTransformOverlay.test.tsx` 7 例（手柄几何、拖角翻倍→200%、平移 5%、居中吸附回到默认整键删除、旋转 90° 与 350°+90°→80°）+ `mediaClipVideo.test.ts` 几何 7 例 + `MediaClipInspector.test.tsx`（开关同步 uiStore） |
-| 色彩与光影：亮度/曝光/对比度/饱和度/冷暖/光感 + 四条自由曲线 | 亮度/对比度/饱和度/光感补偿 → CSS `brightness/contrast/saturate`；曝光与冷暖 → 按通道增益；曲线（亮度 + R/G/B，可自由打点）→ `curveTableValues` 把「亮度曲线 → 单通道曲线 → 光感提亮 → 通道增益」合成 `feComponentTransfer tableValues`，三者汇成一张 SVG 滤镜（`focusnews-media-grade`）挂在同一个 `<video>` 上 | `mediaClipVideo.test.ts`（曲线归一/插值/合成顺序、直线不挂 SVG、tableValues 长度与夹心）+ `MediaClipInspector.test.tsx`（点空白加点并拖到 0.5→0.8、四通道切换只写对应通道、复位回直线） |
+| 色彩与光影：亮度/曝光/对比度/饱和度/冷暖/光感 + 四条自由曲线 | 亮度/对比度/饱和度/光感补偿 → CSS `brightness/contrast/saturate`；曝光与冷暖 → 按通道增益；曲线（亮度 + R/G/B，可自由打点）→ `curveTableValues` 把「亮度曲线 → 单通道曲线 → 光感提亮 → 通道增益」合成 `feComponentTransfer tableValues`，三者汇成一张 SVG 滤镜（`socut-media-grade`）挂在同一个 `<video>` 上 | `mediaClipVideo.test.ts`（曲线归一/插值/合成顺序、直线不挂 SVG、tableValues 长度与夹心）+ `MediaClipInspector.test.tsx`（点空白加点并拖到 0.5→0.8、四通道切换只写对应通道、复位回直线） |
 | 光感（Vibrance/光感）算法 | 放弃「当饱和度用」的旧口径，改为 `lightToneWeight` 中调加权（`4x(1-x)` × `(1-0.3x)`）+ 端点锁定：正值只抬中调、高光受保护，负值压中调；再叠一层很小的饱和补偿 `lightToneSaturate`（100 分只有 ×1.08，而饱和度滑杆是 ×2），对应 Premiere/剪映「通透不冲顶、肤色不炒熟」的手感 | `mediaClipVideo.test.ts`「光感（vibrance）」5 例：端点不动、中调幅度大于高光、负值压中调、补偿远小于饱和度滑杆、滤镜串里是 `saturate(1.040)` |
 | 画面翻转：水平 / 垂直镜像 | 两个独立开关（`flipH` / `flipV`），CSS `scaleX(-1)` / `scaleY(-1)` 接在缩放之后 | `mediaClipVideo.test.ts`（单项输出）+ `MediaClipInspector.test.tsx`（两开关互不影响、再点即关、aria-pressed） |
 | 一键恢复默认 | 顶部「恢复默认」走 `resetMediaClipVideo`（整键 `video` 删除）；曲线块另给「复位」（只清当前通道） | `projectStore.test.ts`（重置只清当前段）+ `MediaClipInspector.test.tsx`（无编辑时禁用、有编辑时一键清空） |
@@ -251,7 +251,7 @@
 | 验收项 | 实现口径 | 机器化证据 |
 |---|---|---|
 | P1 撤销/重做 | `state/projectHistory.ts`：订阅 `projectStore`，命边界（任一段数变 / 选中变 / 距上一步 >500ms）才压快照；上限 100 步、新编辑清空重做栈、`loadProject` 清空；比较与恢复忽略 `ui`（leftTab）与 `media[].thumbnailUrl`（派生缓存），恢复时从活态带回；Ctrl+Z / Ctrl+Shift+Z（输入控件内不接管）+ 工具栏两个按钮（无可撤销时置灰） | `state/projectHistory.test.ts`（边界合成、100 步丢最旧、volatile 过滤、载入清空）+ `hooks/useEditKeys.test.tsx`（快捷键与输入框豁免）+ `Timeline.test.tsx`「时间轴工具栏：撤销 / 重做」3 例 |
-| P2 字幕 Tab 为唯一入口 | `CaptionListPanel`：0 条时整块大虚线加号，≥1 条时列表末尾矮加号条；每张卡片常驻 16px SVG 垃圾桶（`stopPropagation`，不触发选中）；点卡片 = 选中 + 播放头跳到**区间中点**（先暂停）；时间轴工具栏的「新建片段」「删除片段」已移除 | `CaptionListPanel.test.tsx` 13 例（空态/尾部入口、删除不选中、跳中点、无 seekHandler 不抛）+ `Timeline.test.tsx`（工具栏不再有这两个入口）+ `FOCUSNEWS_SHOT=spikes/artifacts/ui-wrap-rail.png` |
+| P2 字幕 Tab 为唯一入口 | `CaptionListPanel`：0 条时整块大虚线加号，≥1 条时列表末尾矮加号条；每张卡片常驻 16px SVG 垃圾桶（`stopPropagation`，不触发选中）；点卡片 = 选中 + 播放头跳到**区间中点**（先暂停）；时间轴工具栏的「新建片段」「删除片段」已移除 | `CaptionListPanel.test.tsx` 13 例（空态/尾部入口、删除不选中、跳中点、无 seekHandler 不抛）+ `Timeline.test.tsx`（工具栏不再有这两个入口）+ `SOCUT_SHOT=spikes/artifacts/ui-wrap-rail.png` |
 | P3 拆分/删除按选中段解析 | `shared/timelineTargets.ts` 统一解析目标：选中哪类就作用于哪类（字幕/媒体/音频），未选中时退到**播放头处媒体轨最下层**（layer 号最大），都没有则不改工程只给提示；字幕拆分两段共用文字与样式、入出点切开 | `tests/timelineTargets.test.ts` + `projectStore.test.ts`（`splitTargetAt`/`removeTargetAt`/`removeSelected`）+ `Timeline.test.tsx`（三轨目标、空隙提示不置灰） |
 | P4 预览轴接管画面 | 悬停帧存 `uiStore.hoverPreviewSec`（null = 无悬停/播放中）；`PreviewStage` 与 `usePreviewLoop` 用 `previewFrame.choosePreviewFrame` 决定画哪一帧，而 `displayTimeSec`（蓝线、时间码、拆分参照）一律不动；播放时临时禁用、鼠标离开即回落；黄线在场时拆分以黄线为准 | `render/previewFrame.test.ts` + `uiStore.test.ts`（同帧不产生新 state）+ `Timeline.test.tsx`（悬停写入/离开清空/播放中禁用/拆分以黄线为准） |
 | P5 点段落只选中 | 媒体/音频/字幕卡片一律只 `onSelect`，不再 seek；`isStripTap` 与卡片点击跳转整体删除；跳转入口只留轨道空白处与尺规；编辑器顶部给「定位到这一段」（播放头在段外才出现，点击先暂停再跳到中点） | `Timeline.test.tsx`「点段落只选中不跳转」3 例 + `MediaClipCard.test.tsx`（点一格不再跳转）+ `ClipLocateButton.test.tsx` + 三个编辑器的「定位到这一段」用例 |
@@ -266,7 +266,7 @@
 | ←/→ 上一帧下一帧 | `App.stepFrame`：帧号取 `PreviewStage` 句柄的 `currentFrame()`（预览时钟的真实帧；UI 时间文本是 100ms 节流值，拿它折算会差好几帧），`shared/fps.stepLocalFrame` 夹在 `[0, totalFrames)` 后 `seekTo(frameTimeSec(...))`，并先接管播放时钟 | `tests/fps.test.ts`「逐帧跳转的落点」4 例（单步/两端夹住不回绕/连跳累加等价单步/空工程） |
 | 长按连续跳转 | 同一模块自己计时：按住 `FRAME_HOLD_DELAY_MS`（320ms）后按 `FRAME_REPEAT_INTERVAL_MS`（60ms）逐帧连发；keyup、窗口 blur、换方向、焦点进输入框四条路径都断开；不认系统按键重复率设置 | `useTransportKeys.test.tsx` 连跳 5 例（阈值前/后、松手、失焦、换方向不叠定时器） |
 | 与门禁弹窗/其他按键消费者共存 | 弹窗排队中整组快捷键不生效（不能拿空格绕过「必须确认」的阻断，规格 §6）；已被别处 `preventDefault` 的按键不接手（分隔线 `role=separator` 的方向键调布局时不会顺带推播放头） | `useTransportKeys.test.tsx` 2 例 |
-| 暂停逐帧时媒体画面真的跟着动 | `PreviewStage` 暂停吸附阈值由固定 0.04s 改为**半帧**（`frameIntervalSec(fps)/2`）：0.04s 在 25/30fps 下正好把「一帧」当噪声放过，于是只动字幕层不动参考视频 | 既有 `mediaClip*`/`mediaLayers` 单测未回归；`FOCUSNEWS_SHOT=spikes/artifacts/ui-transport.png` 可见五键 transport（⏮ \|◀ ▶/❚❚ ▶\| ⏭）与按钮上的快捷键提示 |
+| 暂停逐帧时媒体画面真的跟着动 | `PreviewStage` 暂停吸附阈值由固定 0.04s 改为**半帧**（`frameIntervalSec(fps)/2`）：0.04s 在 25/30fps 下正好把「一帧」当噪声放过，于是只动字幕层不动参考视频 | 既有 `mediaClip*`/`mediaLayers` 单测未回归；`SOCUT_SHOT=spikes/artifacts/ui-transport.png` 可见五键 transport（⏮ \|◀ ▶/❚❚ ▶\| ⏭）与按钮上的快捷键提示 |
 
 ## 重跑取证的最短路径
 
@@ -318,8 +318,8 @@ npm run verify            # check:env + lint + typecheck×3 + 164 个用例
 npm run dist:win          # 出 NSIS 安装包
 npm run verify:packaged   # 静默安装 → 断网等价冷启动 → 优雅退出 → 静默卸载
 # 应用内取证（详见 M0.md 的命令块）：
-#   FOCUSNEWS_SMOKE=1 [+ _CANCEL / _OVERLAY / _GATE=1 / _KIND / _DELIVERY]、FOCUSNEWS_PIXELCHECK、
-#   FOCUSNEWS_REVIEW_SHEET、FOCUSNEWS_SHOT_ERROR、FOCUSNEWS_SHOT_REFMISSING、FOCUSNEWS_SHOT
+#   SOCUT_SMOKE=1 [+ _CANCEL / _OVERLAY / _GATE=1 / _KIND / _DELIVERY]、SOCUT_PIXELCHECK、
+#   SOCUT_REVIEW_SHEET、SOCUT_SHOT_ERROR、SOCUT_SHOT_REFMISSING、SOCUT_SHOT
 ```
 
 ## 多版本交付 / 所见即所得 / 音频质量 / 素材管理 / 转场（v11）的机器化验收
@@ -361,8 +361,8 @@ npm run verify:packaged   # 静默安装 → 断网等价冷启动 → 优雅退
 |---|---|
 | `npm run verify` | **通过**：check:env + lint + typecheck×3 + vitest，**75 文件 / 1111 用例**（组合用例 1 条 + 非转场 concat 时长 2 条） |
 | `npm run verify:all -- --quick` | **PASS 8/8**：check:env 0.4s / lint 4.6s / typecheck×3 / vitest 75.4s / CLI 透明 MOV 4.3s / CLI 720p 叠加 2.2s → `spikes/verify-all.json` |
-| `npm run visual:check` | **失败（环境）**：180s 超时且未产出 `spikes/artifacts/visual-check/report.json`。本机探针显示 Electron 45.2.1 从仓库启动时 `app.isPackaged === true`（`defaultApp === true` 也成立），而 `FOCUSNEWS_VISUAL_CHECK` / `FOCUSNEWS_USER_DATA` / `FOCUSNEWS_SHOT` 都受 `app.isPackaged` 门控，应用停在启动页。2026-11-06 同一脚本曾出图，属当前 Electron 版本/启动方式的行为变化，不是本轮五个功能的回归 |
-| UI 截图 | 改用 `--user-data-dir=<隔离目录>` + CDP `Page.captureScreenshot` 绕过上述门控；隔离工程为 `spikes/tmp-integration/ui-v11-userdata/projects/autosave.focusnews.json`（640×360/3s 素材、两段相邻媒体段、第二段 `transitionIn: dissolve 0.5s` + 缩放/位移/调色、`mediaBins: 现场素材`、`tags: 台风/现场`） |
+| `npm run visual:check` | **失败（环境）**：180s 超时且未产出 `spikes/artifacts/visual-check/report.json`。本机探针显示 Electron 45.2.1 从仓库启动时 `app.isPackaged === true`（`defaultApp === true` 也成立），而 `SOCUT_VISUAL_CHECK` / `SOCUT_USER_DATA` / `SOCUT_SHOT` 都受 `app.isPackaged` 门控，应用停在启动页。2026-11-06 同一脚本曾出图，属当前 Electron 版本/启动方式的行为变化，不是本轮五个功能的回归 |
+| UI 截图 | 改用 `--user-data-dir=<隔离目录>` + CDP `Page.captureScreenshot` 绕过上述门控；隔离工程为 `spikes/tmp-integration/ui-v11-userdata/projects/autosave.socut.json`（640×360/3s 素材、两段相邻媒体段、第二段 `transitionIn: dissolve 0.5s` + 缩放/位移/调色、`mediaBins: 现场素材`、`tags: 台风/现场`） |
 
 截图产物（`.trae/specs/add-news-delivery-pipeline/artifacts/`）：
 
@@ -377,7 +377,7 @@ npm run verify:packaged   # 静默安装 → 断网等价冷启动 → 优雅退
 
 真机取证脚本：`spikes/tmp-integration/preview-perf-e2e.mjs`（临时、gitignore）。隔离 profile：`--user-data-dir=<临时目录>` + CDP `Runtime.evaluate` / `Input.dispatchMouseEvent` / `Page.captureScreenshot`。
 夹具：1080p30 工程，主轨 3 段无空隙媒体段（0–2 / 2–4 / 4–6s）+ 第二条媒体轨叠加段（1–3s）+ 2 条字幕条；素材为 `spikes/app-smoke/app-smoke-overlay-640x360.mp4`（640×360 / 25fps / 6s）。
-读数入口：`window.__focusnewsPreviewPerf()` / `__focusnewsPreviewPerfReset()`（`src/renderer/src/render/previewPerf.ts`）。
+读数入口：`window.__socutPreviewPerf()` / `__socutPreviewPerfReset()`（`src/renderer/src/render/previewPerf.ts`）。
 
 ### 同构建 A/B 对照（只切换「帧去重 + GPU 画布 + 低采样」，其余优化保留）
 
@@ -415,6 +415,6 @@ npm run verify:packaged   # 静默安装 → 断网等价冷启动 → 优雅退
 | `npm run lint` / `npm run typecheck` | **exit 0**（node / web / tests 三个工程） |
 | `npm test` | **exit 0**：**78 文件 / 1156 用例**（含真实 FFmpeg 36 例；`MediaPreviewLayer` 新增切点/兜底/回绕/seek 合并/URL TTL 用例） |
 | `npm run check:env` | **失败（与本次改动无关）**：`src/main/cliServer.ts` 使用 Node 网络内置模块，触发离线交付纪律。该文件是工作区里另一条在途 CLI 功能的改动，未由本次预览优化触碰 |
-| 应用内导出/像素回归/评审表冒烟 | **未重跑**：本机 Electron 从仓库启动时 `app.isPackaged === true`，`FOCUSNEWS_SMOKE` / `FOCUSNEWS_PIXELCHECK` / `FOCUSNEWS_REVIEW_SHEET` 均被忽略（与 2026-11-07 记录的 visual:check 环境问题同源）；导出链路的回归由 `tests/ffmpegPipeline.test.ts` 36 例真实 FFmpeg 用例覆盖 |
+| 应用内导出/像素回归/评审表冒烟 | **未重跑**：本机 Electron 从仓库启动时 `app.isPackaged === true`，`SOCUT_SMOKE` / `SOCUT_PIXELCHECK` / `SOCUT_REVIEW_SHEET` 均被忽略（与 2026-11-07 记录的 visual:check 环境问题同源）；导出链路的回归由 `tests/ffmpegPipeline.test.ts` 36 例真实 FFmpeg 用例覆盖 |
 
 仍需人工：4K/MXF 代理预览未在本轮复测；转场近似与成片逐帧观感对照（沿用 v11 的待人工项）。

@@ -26,13 +26,13 @@ import { log } from './log'
  * - **磁盘缓存**：`userData/strips/<mediaId>-<token>.jpg`，token = 素材 + 源区间 + 格数的哈希。
  *   同一 key 再请求直接命中缓存（不起子进程），命中与否在结果里回报给渲染层。
  * - **并发合并**：同一 token 的并发请求共享同一次生成（缩放时几十条卡片同时请求也只跑一次）。
- * - **协议最小暴露**：`focusnews-strip://<token>` 只读登记过的文件（与 thumb/media 同一口径），
+ * - **协议最小暴露**：`socut-strip://<token>` 只读登记过的文件（与 thumb/media 同一口径），
  *   渲染进程无法借协议读任意本地文件。
  * - **失败即占位**：源文件不在、FFmpeg 缺失、抽帧报错一律返回 `url: null`，
  *   卡片显示「无法预览」，不打断时间轴任何交互。
  */
 
-export const STRIP_SCHEME = 'focusnews-strip'
+export const STRIP_SCHEME = 'socut-strip'
 
 /** token → jpg 绝对路径。 */
 const registry = new Map<string, string>()

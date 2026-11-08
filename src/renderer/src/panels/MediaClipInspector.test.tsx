@@ -516,7 +516,7 @@ describe('防抖预览代理按钮（v8.1）', () => {
     const removeImpl = async (_clipId: string): Promise<void> => undefined
     const stabPreviewRemove = vi.fn(removeImpl)
     const cancel = vi.fn(async () => undefined)
-    ;(window as unknown as { focusnews: unknown }).focusnews = {
+    ;(window as unknown as { socut: unknown }).socut = {
       video: { stabPreview, stabPreviewRemove },
       export: { cancel }
     }

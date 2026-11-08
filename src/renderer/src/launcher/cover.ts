@@ -8,7 +8,7 @@ import type { CoverCaptureRect } from '@shared/api'
  */
 export async function captureCurrentCover(entryId: string | null): Promise<string | null> {
   if (!entryId) return null
-  const api = typeof window === 'undefined' ? undefined : window.focusnews?.project
+  const api = typeof window === 'undefined' ? undefined : window.socut?.project
   if (!api || typeof api.captureCover !== 'function') return null
 
   try {

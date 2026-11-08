@@ -252,7 +252,7 @@ export function App(): ReactElement {
   useEffect(() => {
     const boot = async (): Promise<void> => {
       try {
-        const info = await window.focusnews.app.info()
+        const info = await window.socut.app.info()
         setAppInfo(info)
         /**
          * 开发取证分支（冒烟 / 视觉检查 / 评审表 / 像素回归 / 错误与缺失取证）
@@ -271,10 +271,10 @@ export function App(): ReactElement {
           setBootError(`预设校验问题 ${info.presetIssues.length} 条：${info.presetIssues[0] ?? ''}`)
         }
         // 直接写字体库而不走 setFonts：后者会推 revision，冷启动会因此自动保存一份空工程
-        useProjectStore.setState({ fonts: await window.focusnews.fonts.list() })
+        useProjectStore.setState({ fonts: await window.socut.fonts.list() })
         if (info.visualCheck) {
           // 视觉检查：先用生产渲染路径出图 + 指标，再由主进程按报告 passed 退出
-          const fontIndex = await window.focusnews.fonts.list()
+          const fontIndex = await window.socut.fonts.list()
           for (const record of fontIndex) {
             try {
               await ensureFontRegistered(record)
@@ -283,7 +283,7 @@ export function App(): ReactElement {
             }
           }
           const report = await runVisualCheck({ reportPath: info.visualCheck, fontIndex })
-          await window.focusnews.app.writeLog(
+          await window.socut.app.writeLog(
             'info',
             `视觉检查：${report.cases.length} 例 / ${report.structures} 种结构 · ${report.passed ? '全部通过' : `${report.failures} 项未通过`}`
           )
@@ -291,17 +291,17 @@ export function App(): ReactElement {
           return
         }
         if (info.smoke) {
-          // 开发专用的端到端冒烟（FOCUSNEWS_SMOKE=1）：跑完由主进程校验并退出
+          // 开发专用的端到端冒烟（SOCUT_SMOKE=1）：跑完由主进程校验并退出
           void runAppSmoke(info.smoke).catch(async (error: unknown) => {
             // 必须落盘：否则冒烟卡住时看不到任何原因
-            await window.focusnews.app.writeLog('error', `冒烟异常：${String(error)}`)
+            await window.socut.app.writeLog('error', `冒烟异常：${String(error)}`)
             console.error('冒烟异常', error)
           })
           return
         }
         if (info.reviewSheet) {
           // 开发专用：逐帧动画评审表（M4-7）。字体必须先注册完，否则 Canvas 回落默认字形会让评审失真。
-          const fontIndex = await window.focusnews.fonts.list()
+          const fontIndex = await window.socut.fonts.list()
           for (const record of fontIndex) {
             try {
               await ensureFontRegistered(record)
@@ -311,7 +311,7 @@ export function App(): ReactElement {
           }
           let backdropBytes: ArrayBuffer | null = null
           if (info.reviewBackdrop) {
-            const bytes = await window.focusnews.app.readFileDev(info.reviewBackdrop)
+            const bytes = await window.socut.app.readFileDev(info.reviewBackdrop)
             backdropBytes = bytes ? (new Uint8Array(bytes).buffer as ArrayBuffer) : null
           }
           const summary = await renderReviewSheet({
@@ -319,7 +319,7 @@ export function App(): ReactElement {
             fontIndex,
             backdropBytes
           })
-          await window.focusnews.app.writeLog(
+          await window.socut.app.writeLog(
             'info',
             `逐帧动画评审表：${summary.presets} 预设 × ${summary.columns} 关键帧 · ${summary.sheetWidth}×${summary.sheetHeight} · ${summary.bytesWritten}B`
           )
@@ -329,7 +329,7 @@ export function App(): ReactElement {
         if (info.pixelCheck) {
           // 开发专用：M1-7 的逐像素比对（主进程把报告里的 passed 翻译成退出码）
           const report = await runPixelParityCheck({ outputPath: info.pixelCheck })
-          await window.focusnews.app.writeLog(
+          await window.socut.app.writeLog(
             report.passed ? 'info' : 'error',
             `像素一致性回归：${report.frames.length} 帧 · ${report.passed ? '全部一致' : report.failures.join('; ')}`
           )
@@ -339,7 +339,7 @@ export function App(): ReactElement {
         if (info.errorDemo) {
           // 错误呈现取证（M4-2）：发起一次必然失败的导出，然后断言失败面板的数据源里
           // 确实带上了完整命令行（规格 §9）。不走自动存档恢复弹窗，以免盖住面板。
-          const fontIndex = await window.focusnews.fonts.list()
+          const fontIndex = await window.socut.fonts.list()
           const demo = await runErrorDemo(fontIndex)
           const demoFailures: string[] = []
           if (demo.ok) demoFailures.push('导出本应失败，实际却成功了')
@@ -350,14 +350,14 @@ export function App(): ReactElement {
           const payload = new TextEncoder().encode(
             `${JSON.stringify({ generatedAt: new Date().toISOString(), ...demo, passed: demoFailures.length === 0, failures: demoFailures }, null, 2)}\n`
           )
-          await window.focusnews.app.writeFileDev(info.errorDemo, payload)
+          await window.socut.app.writeFileDev(info.errorDemo, payload)
           console.log(demoFailures.length === 0 ? '✓ 错误呈现取证通过' : '✗ 错误呈现取证失败', demoFailures)
           return
         }
         if (info.refMissingDemo) {
           // 取证（规格 §8）：借用真实夹具的元数据，但把路径指向不存在的文件，
-          // 让 useRefVideoIntegrity 弹出「重新定位」模态，再由 FOCUSNEWS_SHOT 截图。
-          const probe = await window.focusnews.video.probe(info.refMissingDemo)
+          // 让 useRefVideoIntegrity 弹出「重新定位」模态，再由 SOCUT_SHOT 截图。
+          const probe = await window.socut.video.probe(info.refMissingDemo)
           if (probe) {
             const demoProject = createDefaultProject('ref-missing-demo')
             const missingPath = `${info.refMissingDemo}.missing.mp4`
@@ -411,7 +411,7 @@ export function App(): ReactElement {
   const handleOpenRecent = useCallback(
     async (id: string): Promise<void> => {
       try {
-        const opened = await window.focusnews.project.openRecent(id)
+        const opened = await window.socut.project.openRecent(id)
         if (!opened) {
           setNotice('工程文件已丢失或无法读取')
           void useRecentProjectsStore.getState().refresh()
@@ -429,7 +429,7 @@ export function App(): ReactElement {
 
   const handleCreate = useCallback(async (): Promise<void> => {
     try {
-      const created = await window.focusnews.project.createNew()
+      const created = await window.socut.project.createNew()
       setProject(created.project, created.entry.filePath ?? undefined, created.entry.id)
       setView('editor')
       void useRecentProjectsStore.getState().refresh()
@@ -441,7 +441,7 @@ export function App(): ReactElement {
 
   const handleBrowse = useCallback(async (): Promise<void> => {
     try {
-      const opened = await window.focusnews.project.open()
+      const opened = await window.socut.project.open()
       if (!opened) return
       setProject(opened.project, opened.path, opened.entryId)
       setView('editor')
@@ -465,7 +465,7 @@ export function App(): ReactElement {
   /** 另存为：主进程返回新路径/entryId，当前工程从此按新身份自动保存与拍封面。 */
   const handleSaveAs = useCallback(async (): Promise<void> => {
     try {
-      const saved = await window.focusnews.project.saveAs(useProjectStore.getState().project)
+      const saved = await window.socut.project.saveAs(useProjectStore.getState().project)
       if (!saved) return
       useProjectStore.getState().adoptSavedEntry(saved.path, saved.entryId)
       setNotice(`${TEXT.project.saveAs}：${saved.path}`)
@@ -479,7 +479,7 @@ export function App(): ReactElement {
   /** 标题栏「打开」：打开成功同样接住 entryId，后续自动保存记到同一条最近记录。 */
   const handleOpenProject = useCallback(async (): Promise<void> => {
     try {
-      const opened = await window.focusnews.project.open()
+      const opened = await window.socut.project.open()
       if (!opened) return
       setProject(opened.project, opened.path, opened.entryId)
       void useRecentProjectsStore.getState().refresh()
@@ -508,7 +508,7 @@ export function App(): ReactElement {
             FN
           </span>
           <span className="titlebar__titles">
-            <span className="titlebar__app">FocusNews</span>
+            <span className="titlebar__app">Socut</span>
             <span className="titlebar__project" title={project.name}>
               {project.name || '未命名工程'}
             </span>
@@ -752,7 +752,7 @@ export function App(): ReactElement {
       </div>
 
       <div className="statusbar">
-        <span className="mono">FocusNews {appInfo?.version ?? ''}</span>
+        <span className="mono">Socut {appInfo?.version ?? ''}</span>
         <span className="muted mono">{appInfo ? appInfo.ffmpegSource : 'FFmpeg 检测中…'}</span>
         <span className="muted mono">
           {project.resolution.width}×{project.resolution.height} · {fpsToString(project.fps)}

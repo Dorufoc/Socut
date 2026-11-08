@@ -251,7 +251,7 @@ async function confirmHugeExport(
   outputDir: string,
   kind: ExportKind
 ): Promise<{ choice: DialogAnswer; estimateBytes: number; freeBytes?: number }> {
-  const estimate = await window.focusnews.export.estimate({ width, height, fps, frames, outputDir })
+  const estimate = await window.socut.export.estimate({ width, height, fps, frames, outputDir })
   if (kind === 'pngSequence') return { choice: 'ok', estimateBytes: estimate.bytes, freeBytes: estimate.freeBytes }
   if (estimate.sufficientDisk && !estimate.recommendPng) {
     return { choice: 'ok', estimateBytes: estimate.bytes, freeBytes: estimate.freeBytes }
@@ -277,7 +277,7 @@ async function autoConfirmHugeExport(
   fps: Fps,
   outputDir: string
 ): Promise<{ choice: DialogAnswer; estimateBytes: number; freeBytes?: number }> {
-  const estimate = await window.focusnews.export.estimate({ width, height, fps, frames, outputDir })
+  const estimate = await window.socut.export.estimate({ width, height, fps, frames, outputDir })
   if (!estimate.sufficientDisk) {
     throw new GateError(
       `目标磁盘空间不足：预计 ${formatBytes(estimate.bytes)}，可用 ${formatBytes(estimate.freeBytes ?? 0)}`
@@ -309,7 +309,7 @@ export async function runExport(
    */
   const watermark = project.watermark
   if (input.kind === 'overlayMp4' && watermark?.enabled) {
-    const alive = await window.focusnews.video.exists(watermark.path)
+    const alive = await window.socut.video.exists(watermark.path)
     if (!alive) throw new GateError(`水印图片已不可用：${watermark.name}（请在水印页重新导入，或先关掉开关）`)
   }
 
@@ -536,7 +536,7 @@ export async function runExport(
       : {})
   }
 
-  await window.focusnews.export.start(request)
+  await window.socut.export.start(request)
   return {
     jobId,
     frames,

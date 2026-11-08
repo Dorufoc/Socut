@@ -193,7 +193,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   // 保留产物便于人工核对；只清理由 CI 场景显式设置的环境变量控制
-  if (process.env.FOCUSNEWS_CLEAN_TMP) await fs.rm(WORK_DIR, { recursive: true, force: true })
+  if (process.env.SOCUT_CLEAN_TMP) await fs.rm(WORK_DIR, { recursive: true, force: true })
 })
 
 describe('透明 ProRes 4444 管线（规格 §5.1 / 计划 C1）', () => {
@@ -928,7 +928,7 @@ describe.skipIf(!HAS_BUNDLED_FFMPEG)('视频防抖 vidstab 全链（v8）', () =
     const parsed = JSON.parse(probe.stdout.toString('utf8')) as { streams?: { codec_type?: string }[] }
     expect((parsed.streams ?? []).some((s) => s.codec_type === 'audio')).toBe(true)
 
-    // faststart：moov 在前，focusnews-media:// 的 Range 流才能边下边播
+    // faststart：moov 在前，socut-media:// 的 Range 流才能边下边播
     const head = (await fs.readFile(proxyOut)).subarray(0, 64 * 1024).toString('latin1')
     expect(head).toContain('moov')
   }, 300_000)

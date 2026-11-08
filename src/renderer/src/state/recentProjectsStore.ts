@@ -11,7 +11,7 @@ import { useProjectStore } from './projectStore'
  * 排序方式跨会话记忆（localStorage），其余（查询、加载态）只在本会话内有效。
  */
 
-const SORT_KEY = 'focusnews.recent.sort'
+const SORT_KEY = 'socut.recent.sort'
 const READ_ERROR = '读取最近项目失败'
 const RENAME_ERROR = '重命名失败，请稍后重试'
 const REMOVE_ERROR = '移除失败，请稍后重试'
@@ -34,9 +34,9 @@ function persistSortMode(mode: RecentSortMode): void {
   }
 }
 
-function projectApi(): Window['focusnews']['project'] | undefined {
+function projectApi(): Window['socut']['project'] | undefined {
   if (typeof window === 'undefined') return undefined
-  return window.focusnews?.project
+  return window.socut?.project
 }
 
 export interface RecentProjectsState {

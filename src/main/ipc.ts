@@ -110,16 +110,16 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
       title: WINDOW_TITLE,
       appName: APP_NAME,
       smoke: smokeConfig(),
-      reviewSheet: app.isPackaged ? null : (process.env.FOCUSNEWS_REVIEW_SHEET ?? null),
-      reviewBackdrop: app.isPackaged ? null : (process.env.FOCUSNEWS_REVIEW_BACKDROP ?? null),
-      pixelCheck: app.isPackaged ? null : (process.env.FOCUSNEWS_PIXELCHECK ?? null),
+      reviewSheet: app.isPackaged ? null : (process.env.SOCUT_REVIEW_SHEET ?? null),
+      reviewBackdrop: app.isPackaged ? null : (process.env.SOCUT_REVIEW_BACKDROP ?? null),
+      pixelCheck: app.isPackaged ? null : (process.env.SOCUT_PIXELCHECK ?? null),
       errorDemo: app.isPackaged
         ? null
-        : (process.env.FOCUSNEWS_SHOT_ERROR === '1'
+        : (process.env.SOCUT_SHOT_ERROR === '1'
           ? path.join(app.getAppPath(), 'spikes', 'app-smoke', 'error-demo.json')
-          : (process.env.FOCUSNEWS_SHOT_ERROR ?? null)),
-      refMissingDemo: app.isPackaged ? null : (process.env.FOCUSNEWS_SHOT_REFMISSING ?? null),
-      visualCheck: app.isPackaged ? null : (process.env.FOCUSNEWS_VISUAL_CHECK ?? null)
+          : (process.env.SOCUT_SHOT_ERROR ?? null)),
+      refMissingDemo: app.isPackaged ? null : (process.env.SOCUT_SHOT_REFMISSING ?? null),
+      visualCheck: app.isPackaged ? null : (process.env.SOCUT_VISUAL_CHECK ?? null)
     }
   })
 
@@ -134,12 +134,12 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
     await fs.writeFile(target, buffer)
     await log('info', `取证图片已写入 ${target}（${(buffer.length / 1024).toFixed(0)}KB）`)
     console.log(`✓ 取证图片：${target}`)
-    const expected = process.env.FOCUSNEWS_REVIEW_SHEET
+    const expected = process.env.SOCUT_REVIEW_SHEET
     if (expected && target === path.resolve(expected)) {
       // 评审表就是本次运行的唯一目的：写完即退，给 stdout 留 flush 时间
       setTimeout(() => app.exit(0), 300)
     }
-    const pixelTarget = process.env.FOCUSNEWS_PIXELCHECK
+    const pixelTarget = process.env.SOCUT_PIXELCHECK
     if (pixelTarget && target === path.resolve(pixelTarget)) {
       // 像素一致性回归：把报告里的 passed 翻译成退出码，否则只能靠人读 JSON
       let passed = false
@@ -153,7 +153,7 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
       console.log(passed ? '✓ 预览/导出逐像素一致（M1-7）' : '✗ 预览/导出像素不一致（M1-7）')
       setTimeout(() => app.exit(passed ? 0 : 1), 300)
     }
-    const errorTarget = process.env.FOCUSNEWS_SHOT_ERROR
+    const errorTarget = process.env.SOCUT_SHOT_ERROR
     if (errorTarget && target === path.resolve(errorTarget === '1' ? path.join(app.getAppPath(), 'spikes', 'app-smoke', 'error-demo.json') : errorTarget)) {
       // 错误呈现取证：失败面板拿不到完整命令行就算失败（规格 §9）
       let passed = false
@@ -167,7 +167,7 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
       console.log(passed ? '✓ 失败面板可展示完整命令行（M4-2 / §9）' : '✗ 失败面板缺少命令行（M4-2 / §9）')
       setTimeout(() => app.exit(passed ? 0 : 1), 300)
     }
-    const visualTarget = process.env.FOCUSNEWS_VISUAL_CHECK
+    const visualTarget = process.env.SOCUT_VISUAL_CHECK
     if (visualTarget && target === path.resolve(visualTarget)) {
       // 视觉检查：把报告里的 passed 翻译成退出码，失败项逐条打到 stdout
       let passed = false
@@ -399,7 +399,7 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
     return generateThumbnail(mediaId, videoPath, typeof atSec === 'number' ? atSec : 1)
   })
 
-  /** v2：工程里持久化的 focusnews-thumb:// 地址在主进程重启后需重新登记才可读。 */
+  /** v2：工程里持久化的 socut-thumb:// 地址在主进程重启后需重新登记才可读。 */
   ipcMain.handle(CHANNELS.mediaThumbUrl, async (_event, mediaId: string, url: string): Promise<string | null> => {
     if (typeof mediaId !== 'string' || typeof url !== 'string') return null
     const reregistered = await ensureThumbRegistered(mediaId, url)

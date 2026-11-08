@@ -322,7 +322,7 @@ export class CliControlServer {
       typeof authorization === 'string' && authorization.startsWith('Bearer ')
         ? authorization.slice('Bearer '.length).trim()
         : ''
-    const header = request.headers['x-focusnews-token']
+    const header = request.headers['x-socut-token']
     const fallback = Array.isArray(header) ? header[0] ?? '' : typeof header === 'string' ? header : ''
     const candidate = bearer || fallback
     if (!candidate) return false

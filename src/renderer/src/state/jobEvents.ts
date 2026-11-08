@@ -11,10 +11,10 @@ import { useProxyStore } from './proxyStore'
 const waiters = new Map<string, (result: JobResult) => void>()
 
 export function bindJobEvents(): () => void {
-  const offProgress = window.focusnews.job.onProgress((progress: JobProgress) => {
+  const offProgress = window.socut.job.onProgress((progress: JobProgress) => {
     useExportStore.getState().upsertProgress(progress)
   })
-  const offResult = window.focusnews.job.onResult((result: JobResult) => {
+  const offResult = window.socut.job.onResult((result: JobResult) => {
     useExportStore.getState().setResult(result)
     // v8.1：防抖预览代理作业（stab- 前缀）完成后额外记账代理路径，PreviewStage 据此换源
     useStabPreviewStore.getState().handleJobResult(result)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * FocusNews 一键打包（Windows x64 NSIS 安装包）
+ * Socut 一键打包（Windows x64 NSIS 安装包）
  *
  * 与 dist-win.mjs 的区别：
  *  - 打包前做依赖/随包资源预检（缺 FFmpeg、字体、图标时给出可执行的修复命令）
@@ -35,7 +35,7 @@ const unknown = [...flags].filter(
 )
 
 const help = `
-FocusNews 一键打包
+Socut 一键打包
 
   npm run package:win                 构建并生成 NSIS 安装包
   npm run package:win -- --verify     打包后再做安装/启动/升级/卸载验收
@@ -43,7 +43,7 @@ FocusNews 一键打包
   npm run package:win -- --no-open    完成后不打开资源管理器
   npm run package:win -- --skip-check 跳过 check:env 预检
 
-产物：release/FocusNews-<version>-Setup-win-x64.exe
+产物：release/Socut-<version>-Setup-win-x64.exe
 `
 
 if (flags.has('--help') || flags.has('-h')) {
@@ -171,7 +171,7 @@ async function cleanUnpacked() {
     await fs.rm(unpacked, { recursive: true, force: true })
   } catch (error) {
     throw new Error(
-      `无法删除 ${unpacked}，请先关闭正在运行的 FocusNews。\n${error.message}`
+      `无法删除 ${unpacked}，请先关闭正在运行的 Socut。\n${error.message}`
     )
   }
 }
@@ -196,7 +196,7 @@ async function findInstaller(expectedName) {
   const entries = await fs.readdir(releaseDir).catch(() => [])
   const candidates = []
   for (const name of entries) {
-    if (!/^FocusNews-.*-Setup-win-x64\.exe$/i.test(name)) continue
+    if (!/^Socut-.*-Setup-win-x64\.exe$/i.test(name)) continue
     const stat = await fs.stat(path.join(releaseDir, name))
     candidates.push({ name, size: stat.size, mtime: stat.mtimeMs })
   }
@@ -206,7 +206,7 @@ async function findInstaller(expectedName) {
 
 async function main() {
   const startedAt = Date.now()
-  log('FocusNews 一键打包启动')
+  log('Socut 一键打包启动')
   log(`项目目录：${root}`)
   log(`Node ${process.version} / ${process.platform} ${process.arch}`)
   log(`模式：${mode.dirOnly ? '仅免安装目录（--dir）' : 'NSIS 安装包'}${mode.verify ? ' + 打包后验收' : ''}`)
@@ -231,13 +231,13 @@ async function main() {
 
   let summary = null
   if (!mode.dirOnly) {
-    const installer = await findInstaller(`FocusNews-${pkg.version}-Setup-win-x64.exe`)
+    const installer = await findInstaller(`Socut-${pkg.version}-Setup-win-x64.exe`)
     if (!installer) throw new Error('打包结束但未在 release/ 找到 Setup 安装包，请检查上方 electron-builder 输出。')
 
     const filePath = path.join(releaseDir, installer.name)
     const hash = await sha256(filePath)
     summary = {
-      product: 'FocusNews',
+      product: 'Socut',
       version: pkg.version,
       installer: filePath,
       sizeBytes: installer.size,

@@ -14,7 +14,7 @@ import { buildRenderJob } from '../render/jobBuilder'
 import { NativeStage } from '../render/stage'
 
 /**
- * 视觉检查（开发专用，FOCUSNEWS_VISUAL_CHECK=<report.json>）：
+ * 视觉检查（开发专用，SOCUT_VISUAL_CHECK=<report.json>）：
  * 用**生产同一套**渲染路径（buildRenderJob → computeClipBoxes → renderFrame）把
  * 8 套预设 × 短/常规/长三组模拟文案渲染成 PNG，并逐例计算可机器判定的视觉指标：
  * 文字占条宽比、右侧空白、条高/字号、副标题比例、上下内边距、安全区、文字对比度、行数。
@@ -347,7 +347,7 @@ export async function runVisualCheck(input: VisualCheckInput): Promise<VisualChe
         ctx.drawImage(stage.surface, 0, 0)
       }
       const imagePath = `${directory}/${preset.id}-${variant}.png`
-      await window.focusnews.app.writeFileDev(imagePath, await canvasToPngBytes(frame))
+      await window.socut.app.writeFileDev(imagePath, await canvasToPngBytes(frame))
       frames.push(frame)
 
       cases.push({
@@ -375,8 +375,8 @@ export async function runVisualCheck(input: VisualCheckInput): Promise<VisualChe
     structures: new Set(Object.values(STRUCTURE)).size,
     cases
   }
-  await window.focusnews.app.writeFileDev(`${directory}/sheet.png`, sheet.bytes)
-  await window.focusnews.app.writeFileDev(
+  await window.socut.app.writeFileDev(`${directory}/sheet.png`, sheet.bytes)
+  await window.socut.app.writeFileDev(
     input.reportPath,
     new TextEncoder().encode(`${JSON.stringify(report, null, 2)}\n`)
   )
@@ -407,7 +407,7 @@ function composeSheet(
   ctx.fillRect(0, 0, sheetW, sheetH)
   ctx.fillStyle = '#f2f5f9'
   ctx.font = '600 28px "Noto Sans SC", system-ui, sans-serif'
-  ctx.fillText('FocusNews 字幕条视觉检查 · 8 预设 × 短/常规/长文案', pad, pad + 30)
+  ctx.fillText('Socut 字幕条视觉检查 · 8 预设 × 短/常规/长文案', pad, pad + 30)
   ctx.fillStyle = '#9fb0c2'
   ctx.font = '400 18px "Noto Sans SC", system-ui, sans-serif'
   ctx.fillText(

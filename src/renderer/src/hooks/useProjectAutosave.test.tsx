@@ -22,7 +22,7 @@ beforeEach(() => {
   autosaveWrite.mockReset()
   writeLog.mockReset()
   useProjectStore.setState({ project: createDefaultProject('自动保存'), revision: 0 })
-  ;(window as unknown as { focusnews: unknown }).focusnews = {
+  ;(window as unknown as { socut: unknown }).socut = {
     project: { autosaveWrite },
     app: { writeLog }
   }

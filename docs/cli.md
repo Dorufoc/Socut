@@ -1,13 +1,13 @@
-# FocusNews CLI
+# Socut CLI
 
 面向 AI Agent 的本机控制面。它不依赖 Computer Use 或屏幕坐标，所有操作都走
-FocusNews 内部的 zustand action、导出 runner 与主进程文件/ffprobe 能力。
+Socut 内部的 zustand action、导出 runner 与主进程文件/ffprobe 能力。
 
 ```
 外部 Agent / 脚本
       │  HTTP + token（127.0.0.1 随机端口）
       ▼
-FocusNews 主进程 CliControlServer
+Socut 主进程 CliControlServer
       ├── app / project 文件 / media.probe / export.status 等直接处理
       └── 其余命令 ── IPC ──▶ 渲染进程 CLI 路由 ──▶ zustand / 导出 runner
 ```
@@ -19,7 +19,7 @@ FocusNews 主进程 CliControlServer
 ```bash
 npm run cli -- app health --pretty
 # 等价于
-node cli/focusnews-cli.mjs app health --pretty
+node cli/socut-cli.mjs app health --pretty
 ```
 
 ### 打包版
@@ -27,34 +27,34 @@ node cli/focusnews-cli.mjs app health --pretty
 安装目录下会包含：
 
 ```
-FocusNews.exe
-focusnews.cmd          ← 根目录快捷入口
+Socut.exe
+socut.cmd          ← 根目录快捷入口
 cli/
-  focusnews-cli.mjs
-  focusnews.cmd        ← 在 cli 目录内运行
+  socut-cli.mjs
+  socut.cmd        ← 在 cli 目录内运行
 ```
 
 ```bat
-focusnews.cmd app health --pretty
-cli\focusnews.cmd app commands --pretty
+socut.cmd app health --pretty
+cli\socut.cmd app commands --pretty
 ```
 
-`focusnews.cmd` 用 `ELECTRON_RUN_AS_NODE=1` 让 `FocusNews.exe` 以 Node 模式运行
+`socut.cmd` 用 `ELECTRON_RUN_AS_NODE=1` 让 `Socut.exe` 以 Node 模式运行
 CLI 脚本，因此不需要额外安装 Node。
 
 ### 自动拉起
 
-CLI 连接不上控制服务时会自动启动一个隐藏窗口的 FocusNews（`--cli-server`）：
+CLI 连接不上控制服务时会自动启动一个隐藏窗口的 Socut（`--cli-server`）：
 
-1. `FOCUSNEWS_EXE` 指定的可执行文件；
-2. 打包版同级 `FocusNews.exe`；
+1. `SOCUT_EXE` 指定的可执行文件；
+2. 打包版同级 `Socut.exe`；
 3. 开发环境 `node_modules/electron/dist/electron.exe`；
 4. 打包版 `.cmd` 自身的 `process.execPath`。
 
 关闭自动拉起：
 
 ```bash
-focusnews-cli app health --no-launch
+socut-cli app health --no-launch
 ```
 
 已有正常窗口运行时，CLI 会直接控制该实例，不会另开进程。若已有实例是
@@ -78,23 +78,23 @@ focusnews-cli app health --no-launch
   "pid": 12345,
   "appVersion": "0.1.0",
   "startedAt": "2026-11-08T...",
-  "userDataPath": "C:\\Users\\...\\AppData\\Roaming\\FocusNews"
+  "userDataPath": "C:\\Users\\...\\AppData\\Roaming\\Socut"
 }
 ```
 
 客户端会自动扫描以下位置：
 
-- `FOCUSNEWS_CLI_SERVER_FILE`
-- `FOCUSNEWS_USER_DATA/cli/server.json`
-- `%APPDATA%/FocusNews/cli/server.json`
-- `%APPDATA%/focusnews/cli/server.json`
+- `SOCUT_CLI_SERVER_FILE`
+- `SOCUT_USER_DATA/cli/server.json`
+- `%APPDATA%/Socut/cli/server.json`
+- `%APPDATA%/socut/cli/server.json`
 - `%APPDATA%/Electron/cli/server.json`（开发兜底）
 - macOS / Linux 对应的 `Application Support`、`XDG_CONFIG_HOME` 路径
 
 也可以显式指定：
 
 ```bash
-focusnews-cli app health --server D:\tmp\server.json
+socut-cli app health --server D:\tmp\server.json
 ```
 
 所有请求都必须带：
@@ -106,7 +106,7 @@ Authorization: Bearer <token>
 或：
 
 ```
-x-focusnews-token: <token>
+x-socut-token: <token>
 ```
 
 服务不提供 CORS，不接受远程连接。`POST /v1/shutdown` 与 `app.shutdown` 会退出应用。
@@ -154,7 +154,7 @@ x-focusnews-token: <token>
 复杂对象用 `--params`：
 
 ```bash
-focusnews-cli clip update \
+socut-cli clip update \
   --id clip-1 \
   --patch '{"content":{"main":"标题","secondary":"副标题"}}'
 ```
@@ -166,7 +166,7 @@ focusnews-cli clip update \
 完整清单：
 
 ```bash
-focusnews-cli app commands --pretty
+socut-cli app commands --pretty
 ```
 
 ### app
@@ -196,7 +196,7 @@ focusnews-cli app commands --pretty
 `project.apply` 接收完整工程 JSON，适合一次性完成离散命令覆盖不到的复杂编辑：
 
 ```bash
-focusnews-cli project apply --params "{\"project\": $(cat project.json)}"
+socut-cli project apply --params "{\"project\": $(cat project.json)}"
 ```
 
 ### media
@@ -215,7 +215,7 @@ focusnews-cli project apply --params "{\"project\": $(cat project.json)}"
 CLI 导入默认拒绝非 16:9、HDR、VFR。必须显式确认：
 
 ```bash
-focusnews-cli media import \
+socut-cli media import \
   --path D:\media\a.mp4 \
   --ack-non169 \
   --ack-hdr \
@@ -245,19 +245,19 @@ focusnews-cli media import \
 示例：
 
 ```bash
-focusnews-cli timeline media insert --media-id m1 --at 0
-focusnews-cli clip add --at 2.5 --duration 4
-focusnews-cli clip update --id clip-1 --params '{"content":{"main":"今日头条"}}'
-focusnews-cli audio role --id a1 --role bgm
+socut-cli timeline media insert --media-id m1 --at 0
+socut-cli clip add --at 2.5 --duration 4
+socut-cli clip update --id clip-1 --params '{"content":{"main":"今日头条"}}'
+socut-cli audio role --id a1 --role bgm
 ```
 
 ### watermark / ui
 
 ```bash
-focusnews-cli watermark set --path D:\logo.png --enabled
-focusnews-cli watermark enable --enabled false
-focusnews-cli watermark remove
-focusnews-cli ui set --view editor --left-tab media
+socut-cli watermark set --path D:\logo.png --enabled
+socut-cli watermark enable --enabled false
+socut-cli watermark remove
+socut-cli ui set --view editor --left-tab media
 ```
 
 ### export
@@ -273,7 +273,7 @@ focusnews-cli ui set --view editor --left-tab media
 | `export.cover` | 导出当前帧封面 PNG |
 
 ```bash
-focusnews-cli export run \
+socut-cli export run \
   --kind overlayMp4 \
   --output-dir D:\out \
   --file-name demo \
@@ -294,8 +294,8 @@ CLI 的 `export.run` 已自动确认体积提示；磁盘不足仍会直接失�
 查询任务：
 
 ```bash
-focusnews-cli jobs --pretty
-focusnews-cli job --job-id <id> --pretty
+socut-cli jobs --pretty
+socut-cli job --job-id <id> --pretty
 ```
 
 ### 长任务
@@ -303,30 +303,30 @@ focusnews-cli job --job-id <id> --pretty
 `export.cover`、`export.start` 等渲染侧命令默认等待 30 分钟。可用 `--timeout` 调整：
 
 ```bash
-focusnews-cli export cover --output-dir D:\out --timeout 600000
+socut-cli export cover --output-dir D:\out --timeout 600000
 ```
 
 ## 6. Agent 推荐流程
 
 ```bash
 # 1. 确认应用和服务
-focusnews-cli app health --pretty
+socut-cli app health --pretty
 
 # 2. 新建或打开工程
-focusnews-cli project new --name "每日新闻" --path D:\work\daily.focusnews
+socut-cli project new --name "每日新闻" --path D:\work\daily.socut
 
 # 3. 导入素材
-focusnews-cli media import --path D:\media\a.mp4 --ack-non169
+socut-cli media import --path D:\media\a.mp4 --ack-non169
 
 # 4. 组装时间轴
-focusnews-cli timeline media insert --media-id <mediaId> --at 0
-focusnews-cli clip add --at 1 --duration 5
+socut-cli timeline media insert --media-id <mediaId> --at 0
+socut-cli clip add --at 1 --duration 5
 
 # 5. 保存
-focusnews-cli project save
+socut-cli project save
 
 # 6. 导出并等待结果
-focusnews-cli export run --kind overlayMp4 --output-dir D:\out --file-name daily
+socut-cli export run --kind overlayMp4 --output-dir D:\out --file-name daily
 ```
 
 Agent 应始终检查 JSON 的 `ok` 字段，并在失败时读取 `error.code`：
@@ -343,11 +343,11 @@ Agent 应始终检查 JSON 的 `ok` 字段，并在失败时读取 `error.code`�
 
 | 变量 | 用途 |
 |---|---|
-| `FOCUSNEWS_EXE` | 自动拉起时使用的 `FocusNews.exe` |
-| `FOCUSNEWS_ELECTRON` | 开发环境 Electron 可执行文件 |
-| `FOCUSNEWS_CLI_SERVER_FILE` | 指定 `server.json` |
-| `FOCUSNEWS_USER_DATA` | 开发环境隔离 userData |
-| `FOCUSNEWS_SERVER_FILE` | 兼容别名（客户端会读取） |
+| `SOCUT_EXE` | 自动拉起时使用的 `Socut.exe` |
+| `SOCUT_ELECTRON` | 开发环境 Electron 可执行文件 |
+| `SOCUT_CLI_SERVER_FILE` | 指定 `server.json` |
+| `SOCUT_USER_DATA` | 开发环境隔离 userData |
+| `SOCUT_SERVER_FILE` | 兼容别名（客户端会读取） |
 
 ## 8. 限制与排错
 
@@ -355,10 +355,10 @@ Agent 应始终检查 JSON 的 `ok` 字段，并在失败时读取 `error.code`�
 - 请求体上限 64 MB；`project.apply` 传超大工程时注意。
 - 渲染侧命令硬超时 30 分钟；导出任务本身通过 `export.status` 轮询，不受该超时限制。
 - 找不到控制服务时：
-  1. 确认 FocusNews 已启动；
-  2. 检查 `%APPDATA%/FocusNews/cli/server.json` 是否存在；
+  1. 确认 Socut 已启动；
+  2. 检查 `%APPDATA%/Socut/cli/server.json` 是否存在；
   3. 用 `--server` 指定实际文件；
-  4. 设置 `FOCUSNEWS_EXE` 后重试；
+  4. 设置 `SOCUT_EXE` 后重试；
   5. 用 `--no-launch` 排除自动拉起干扰。
 - token 每次启动都会变化；不要缓存旧 `server.json` 的 token。
 - `--cli-server` 隐藏窗口仍会渲染，用于逐帧导出；导出期间不要手动关闭应用。

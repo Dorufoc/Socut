@@ -25,7 +25,7 @@ import { InfoBar } from '../components/ui/InfoBar'
 
 /** 导出面板（规格 §2.3 / §3.1 / v10 多画布）。叠加 MP4 支持画布多选与批量。 */
 
-const LAST_DIR_KEY = 'focusnews.lastOutputDir'
+const LAST_DIR_KEY = 'socut.lastOutputDir'
 const CANVAS_ORDER: ExportCanvasKind[] = ['landscape', 'portrait', 'square']
 const CANVAS_LABELS: Record<ExportCanvasKind, string> = {
   landscape: '横屏 16:9',
@@ -160,7 +160,7 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
       return
     }
     const frames = Math.max(0, spec.endFrame - spec.startFrame)
-    void window.focusnews.export
+    void window.socut.export
       .estimate({ width: spec.width, height: spec.height, fps: spec.fps, frames, outputDir })
       .then((result) => {
         if (!cancelled) setEstimate(result)
@@ -183,7 +183,7 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
   const gate = gateBlocked(project.media)
 
   const run = async (kind: ExportKind): Promise<void> => {
-    const base = `${project.name || 'focusnews'}-${kind}-${spec?.width ?? 0}x${spec?.height ?? 0}-${fpsToString(
+    const base = `${project.name || 'socut'}-${kind}-${spec?.width ?? 0}x${spec?.height ?? 0}-${fpsToString(
       spec?.fps ?? DEFAULT_FPS
     )}`
     try {
@@ -238,7 +238,7 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
           setNotice('叠加导出需要先把素材放入媒体轨')
           continue
         }
-        const baseName = `${project.name || 'focusnews'}-overlayMp4-${target.canvas.suffix}-${target.canvas.width}x${target.canvas.height}-${fpsToString(target.fps)}`
+        const baseName = `${project.name || 'socut'}-overlayMp4-${target.canvas.suffix}-${target.canvas.width}x${target.canvas.height}-${fpsToString(target.fps)}`
         try {
           const jobId = await start({
             kind: 'overlayMp4',
@@ -325,7 +325,7 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
           type="button"
           className="btn btn--sm"
           onClick={async () => {
-            const dir = await window.focusnews.app.chooseDirectory()
+            const dir = await window.socut.app.chooseDirectory()
             if (dir) setOutputDir(dir)
           }}
         >

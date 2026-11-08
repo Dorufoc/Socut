@@ -21,7 +21,7 @@ export async function ensureFontRegistered(record: FontRecord): Promise<void> {
     beginFontLoad()
     const startedAt = performance.now()
     try {
-      const buffer = await window.focusnews.fonts.readBytes(record.fontId)
+      const buffer = await window.socut.fonts.readBytes(record.fontId)
       const family = cssFamilyFor(record.fontId)
       const face = new FontFace(family, buffer, {
         weight: String(record.weight),
@@ -33,7 +33,7 @@ export async function ensureFontRegistered(record: FontRecord): Promise<void> {
       const elapsed = performance.now() - startedAt
       if (elapsed > 300) {
         // 大字体加载已明显耗时：加载期间导出按钮已被禁用（见 FontLoadingOverlay）
-        await window.focusnews.app.writeLog('info', `字体加载 ${record.displayName} 用时 ${Math.round(elapsed)}ms`)
+        await window.socut.app.writeLog('info', `字体加载 ${record.displayName} 用时 ${Math.round(elapsed)}ms`)
       }
     } catch (error) {
       failed.add(record.fontId)

@@ -14,7 +14,7 @@ const alias = {
  */
 function relaxCspInDev(): Plugin {
   return {
-    name: 'focusnews-relax-csp-in-dev',
+    name: 'socut-relax-csp-in-dev',
     apply: 'serve',
     transformIndexHtml(html: string): string {
       return html.replace(/<meta\s+http-equiv="Content-Security-Policy"[^>]*>/, '')
@@ -29,7 +29,7 @@ function relaxCspInDev(): Plugin {
  */
 function tightenCspInProd(): Plugin {
   return {
-    name: 'focusnews-tighten-csp-in-prod',
+    name: 'socut-tighten-csp-in-prod',
     apply: 'build',
     transformIndexHtml(html: string): string {
       // 按 token 过滤而不是整段替换：源码里 connect-src 还带着 wasm 需要的 `data:`

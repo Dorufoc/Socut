@@ -787,7 +787,7 @@ export function proxyScaleFilter(fps: number = MEDIA_PROXY.fps): string {
 
 /**
  * v10：4K / MXF 预览代理的单进程转码（整片 1:1 时间轴，预览坐标不需要偏移）。
- * 速度优先（veryfast + CRF 23），faststart 保证 `focusnews-media://` 的 Range 流边下边播。
+ * 速度优先（veryfast + CRF 23），faststart 保证 `socut-media://` 的 Range 流边下边播。
  */
 export function buildProxyArgs(input: ProxyArgsInput): string[] {
   const args: string[] = [
@@ -2140,5 +2140,5 @@ export function formatSec(sec: number): string {
 /** 输出文件名去扩展名（PNG 序列需要目录 + 前缀）。 */
 export function baseName(target: ExportTarget): string {
   const raw = target.fileName.replace(/\.[^.]+$/i, '')
-  return raw.length > 0 ? raw : 'focusnews'
+  return raw.length > 0 ? raw : 'socut'
 }

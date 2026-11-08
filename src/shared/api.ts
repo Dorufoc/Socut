@@ -50,20 +50,20 @@ export interface AppInfo {
   presetIssues: string[]
   title: string
   appName: string
-  /** 应用内端到端冒烟模式（FOCUSNEWS_SMOKE=1，仅开发） */
+  /** 应用内端到端冒烟模式（SOCUT_SMOKE=1，仅开发） */
   smoke: SmokeConfig | null
-  /** 逐帧动画评审表输出路径（FOCUSNEWS_REVIEW_SHEET，仅开发；null 表示不生成） */
+  /** 逐帧动画评审表输出路径（SOCUT_REVIEW_SHEET，仅开发；null 表示不生成） */
   reviewSheet: string | null
-  /** 评审表背景帧 PNG（FOCUSNEWS_REVIEW_BACKDROP，仅开发） */
+  /** 评审表背景帧 PNG（SOCUT_REVIEW_BACKDROP，仅开发） */
   reviewBackdrop: string | null
-  /** 预览/导出逐像素一致性回归报告输出路径（FOCUSNEWS_PIXELCHECK，仅开发，M1-7） */
+  /** 预览/导出逐像素一致性回归报告输出路径（SOCUT_PIXELCHECK，仅开发，M1-7） */
   pixelCheck: string | null
-  /** 错误呈现取证报告输出路径（FOCUSNEWS_SHOT_ERROR，仅开发，M4-2）：发起一次必然失败的导出 */
+  /** 错误呈现取证报告输出路径（SOCUT_SHOT_ERROR，仅开发，M4-2）：发起一次必然失败的导出 */
   errorDemo: string | null
-  /** 参考视频缺失取证（FOCUSNEWS_SHOT_REFMISSING=<可探到的参考视频路径>，仅开发）：
+  /** 参考视频缺失取证（SOCUT_SHOT_REFMISSING=<可探到的参考视频路径>，仅开发）：
    * 借用它的元数据但把路径指向不存在的文件，让完整性检查弹出重新定位模态 */
   refMissingDemo: string | null
-  /** 视觉检查报告路径（FOCUSNEWS_VISUAL_CHECK，仅开发；null 表示不运行） */
+  /** 视觉检查报告路径（SOCUT_VISUAL_CHECK，仅开发；null 表示不运行） */
   visualCheck: string | null
 }
 
@@ -87,13 +87,13 @@ export interface SmokeConfig {
   /** gate 场景的夹具目录（make-probe-fixtures 的中间视频所在处） */
   fixtureDir: string | null
   /**
-   * export/cancel 场景的出口类型（FOCUSNEWS_SMOKE_KIND）。
+   * export/cancel 场景的出口类型（SOCUT_SMOKE_KIND）。
    * pngSequence 是计划里的第三个出口，也是取消时唯一按**目录**清理半成品的分支，
    * 两者都必须能跑与能回收，不能只证透明 MOV。
    */
   exportKind: 'transparentMov' | 'pngSequence'
   /**
-   * export 场景的帧交付方式（FOCUSNEWS_SMOKE_DELIVERY）。
+   * export 场景的帧交付方式（SOCUT_SMOKE_DELIVERY）。
    * 'pngSequence' 是透明 MOV 的回退路径（帧先落盘再由 FFmpeg 编 ProRes），
    * 与管道主路径走完全不同的代码，必须单独跑过。
    */
@@ -215,7 +215,7 @@ export interface Unsubscribe {
   (): void
 }
 
-export interface FocusNewsApi {
+export interface SocutApi {
   app: {
     info(): Promise<AppInfo>
     chooseDirectory(title?: string): Promise<string | null>
@@ -254,7 +254,7 @@ export interface FocusNewsApi {
     renameRecent(id: string, name: string): Promise<RecentProjectCard | null>
     /** 只移出最近列表（不删除工程文件；'autosave' 会连同草稿一起丢弃） */
     removeRecent(id: string): Promise<void>
-    /** 把预览画面截成封面；成功返回 focusnews-cover:// 地址 */
+    /** 把预览画面截成封面；成功返回 socut-cover:// 地址 */
     captureCover(id: string, rect: CoverCaptureRect): Promise<string | null>
   }
   fonts: {
@@ -271,7 +271,7 @@ export interface FocusNewsApi {
     /** 参考视频是否仍在原路径（规格 §8） */
     exists(path: string): Promise<boolean>
     /**
-     * 参考视频 / 水印图片预览地址（focusnews-media://，带 Range 流）：
+     * 参考视频 / 水印图片预览地址（socut-media://，带 Range 流）：
      * 主进程校验文件存在且是受支持的扩展名后登记；不可用或不支持时返回 null。
      */
     previewUrl(path: string): Promise<string | null>
@@ -304,7 +304,7 @@ export interface FocusNewsApi {
     setEncoder(mode: VideoEncoderMode): Promise<RenderSettings>
   }
   media: {
-    /** v2：主进程 ffmpeg 抽帧生成素材卡片缩略图，返回 focusnews-thumb://<mediaId>（失败 null） */
+    /** v2：主进程 ffmpeg 抽帧生成素材卡片缩略图，返回 socut-thumb://<mediaId>（失败 null） */
     generateThumb(mediaId: string, videoPath: string, atSec?: number): Promise<string | null>
     /** v2：把工程里持久化的 thumb 地址重新登记回协议（主进程重启后 registry 为空） */
     thumbUrl(mediaId: string, url: string): Promise<string | null>
@@ -357,6 +357,6 @@ export interface FocusNewsApi {
 
 declare global {
   interface Window {
-    focusnews: FocusNewsApi
+    socut: SocutApi
   }
 }

@@ -91,7 +91,7 @@ const api = {
       ipcRenderer.invoke(CHANNELS.projectRecentRename, id, name) as Promise<RecentProjectCard | null>,
     /** 只移出最近列表（不删除工程文件；'autosave' 会连同草稿一起丢弃） */
     removeRecent: (id: string) => ipcRenderer.invoke(CHANNELS.projectRecentRemove, id),
-    /** 把预览画面截成封面；成功返回 focusnews-cover:// 地址 */
+    /** 把预览画面截成封面；成功返回 socut-cover:// 地址 */
     captureCover: (id: string, rect: CoverCaptureRect) =>
       ipcRenderer.invoke(CHANNELS.projectRecentCaptureCover, id, rect) as Promise<string | null>
   },
@@ -139,7 +139,7 @@ const api = {
     setEncoder: (mode: VideoEncoderMode) => ipcRenderer.invoke(CHANNELS.gpuSetEncoder, mode)
   },
   media: {
-    /** v2：主进程 ffmpeg 抽帧缩略图，返回 focusnews-thumb://<mediaId>（失败 null） */
+    /** v2：主进程 ffmpeg 抽帧缩略图，返回 socut-thumb://<mediaId>（失败 null） */
     generateThumb: (mediaId: string, videoPath: string, atSec?: number) =>
       ipcRenderer.invoke(CHANNELS.mediaGenerateThumb, mediaId, videoPath, atSec) as Promise<string | null>,
     /** v2：工程里持久化的 thumb 地址重新登记（主进程重启后 registry 为空） */
@@ -216,6 +216,6 @@ const api = {
   }
 }
 
-contextBridge.exposeInMainWorld('focusnews', api)
+contextBridge.exposeInMainWorld('socut', api)
 
 export type ExposedApi = typeof api

@@ -15,7 +15,7 @@ import { log } from './log'
 
 /**
  * 应用内端到端冒烟（计划 M0-8 / M1 判据的可自动化部分）。
- * 只在开发环境且 FOCUSNEWS_SMOKE=1 时启用：渲染侧用**真实管线**跑一次透明 MOV 导出，
+ * 只在开发环境且 SOCUT_SMOKE=1 时启用：渲染侧用**真实管线**跑一次透明 MOV 导出，
  * 主进程再用 ffprobe + 与生产相同的校验函数交叉断言，结果写入 spikes/app-smoke/report.json。
  */
 
@@ -30,7 +30,7 @@ function parseNumber(raw: string | undefined, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? Math.round(value) : fallback
 }
 
-/** FOCUSNEWS_SMOKE_FPS：支持 "60" 与 "60000/1001" 两种写法（计列帧率必须用分数）。 */
+/** SOCUT_SMOKE_FPS：支持 "60" 与 "60000/1001" 两种写法（计列帧率必须用分数）。 */
 function parseFps(raw: string | undefined): { num: number; den: number } {
   if (!raw) return FPS_30
   const [numText, denText] = raw.split('/')
@@ -50,31 +50,31 @@ async function exists(file: string): Promise<boolean> {
 }
 
 export function initSmoke(): void {
-  if (process.env.FOCUSNEWS_SMOKE !== '1') return
+  if (process.env.SOCUT_SMOKE !== '1') return
   if (app.isPackaged) {
-    void log('warn', 'FOCUSNEWS_SMOKE 在打包版本中被忽略')
+    void log('warn', 'SOCUT_SMOKE 在打包版本中被忽略')
     return
   }
   const outputDir = path.join(app.getAppPath(), 'spikes', 'app-smoke')
-  const cancelScenario = process.env.FOCUSNEWS_SMOKE_CANCEL === '1'
-  const overlayScenario = process.env.FOCUSNEWS_SMOKE_OVERLAY === '1'
-  const gateScenario = process.env.FOCUSNEWS_SMOKE_GATE === '1'
+  const cancelScenario = process.env.SOCUT_SMOKE_CANCEL === '1'
+  const overlayScenario = process.env.SOCUT_SMOKE_OVERLAY === '1'
+  const gateScenario = process.env.SOCUT_SMOKE_GATE === '1'
   config = {
     outputDir,
-    width: parseNumber(process.env.FOCUSNEWS_SMOKE_W, DEFAULT_WIDTH),
-    height: parseNumber(process.env.FOCUSNEWS_SMOKE_H, DEFAULT_HEIGHT),
-    fps: parseFps(process.env.FOCUSNEWS_SMOKE_FPS),
+    width: parseNumber(process.env.SOCUT_SMOKE_W, DEFAULT_WIDTH),
+    height: parseNumber(process.env.SOCUT_SMOKE_H, DEFAULT_HEIGHT),
+    fps: parseFps(process.env.SOCUT_SMOKE_FPS),
     // 取消场景故意用更长的时间轴，确保取消发生在中途而非跑完
     durationSec: cancelScenario
-      ? parseNumber(process.env.FOCUSNEWS_SMOKE_SEC, 20)
-      : parseNumber(process.env.FOCUSNEWS_SMOKE_SEC, DEFAULT_DURATION_SEC),
+      ? parseNumber(process.env.SOCUT_SMOKE_SEC, 20)
+      : parseNumber(process.env.SOCUT_SMOKE_SEC, DEFAULT_DURATION_SEC),
     scenario: gateScenario ? 'gate' : overlayScenario ? 'overlay' : cancelScenario ? 'cancel' : 'export',
-    refVideoPath: process.env.FOCUSNEWS_SMOKE_REF ?? null,
+    refVideoPath: process.env.SOCUT_SMOKE_REF ?? null,
     // 门禁取证需要真实夹具视频（make-probe-fixtures 的中间产物）
-    fixtureDir: process.env.FOCUSNEWS_SMOKE_FIXTURES ?? path.join(app.getAppPath(), 'spikes', 'fixtures-tmp'),
-    exportKind: process.env.FOCUSNEWS_SMOKE_KIND === 'pngSequence' ? 'pngSequence' : 'transparentMov',
-    frameDelivery: process.env.FOCUSNEWS_SMOKE_DELIVERY === 'pngSequence' ? 'pngSequence' : 'pipe',
-    forceCopyAudio: process.env.FOCUSNEWS_SMOKE_AUDIO === 'force-copy'
+    fixtureDir: process.env.SOCUT_SMOKE_FIXTURES ?? path.join(app.getAppPath(), 'spikes', 'fixtures-tmp'),
+    exportKind: process.env.SOCUT_SMOKE_KIND === 'pngSequence' ? 'pngSequence' : 'transparentMov',
+    frameDelivery: process.env.SOCUT_SMOKE_DELIVERY === 'pngSequence' ? 'pngSequence' : 'pipe',
+    forceCopyAudio: process.env.SOCUT_SMOKE_AUDIO === 'force-copy'
   }
   void log(
     'info',
@@ -182,7 +182,7 @@ async function verifyOverlayReport(report: SmokeReport): Promise<SmokeVerificati
 
   const refPath = config?.refVideoPath
   if (!refPath) {
-    failures.push('overlay 场景未提供 FOCUSNEWS_SMOKE_REF')
+    failures.push('overlay 场景未提供 SOCUT_SMOKE_REF')
     return { passed: false, failures, checks }
   }
   try {
@@ -661,7 +661,7 @@ export async function writeSmokeReport(
   report: SmokeReport,
   verification: SmokeVerification
 ): Promise<string> {
-  const dir = config?.outputDir ?? path.join(app.getPath('temp'), 'focusnews-smoke')
+  const dir = config?.outputDir ?? path.join(app.getPath('temp'), 'socut-smoke')
   await fs.mkdir(dir, { recursive: true })
   const file = path.join(dir, 'report.json')
   const payload = {

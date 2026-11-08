@@ -61,7 +61,7 @@ export interface CliCommandSpec {
   host: CliCommandHost
   group: string
   summary: string
-  /** 参数说明（供 `focusnews-cli app commands` / 文档使用，服务端不做严格 schema 校验）。 */
+  /** 参数说明（供 `socut-cli app commands` / 文档使用，服务端不做严格 schema 校验）。 */
   params: string
   /** 需要用户显式确认的危险/长任务（CLI 帮助里标注）。 */
   longRunning?: boolean
