@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { LeftTabValue, MediaItem } from '@shared/types'
+import type { ExportCanvasKind, ExportFit, LeftTabValue, MediaItem } from '@shared/types'
 import { detectCompat } from '@shared/probe'
 import { TIMELINE_MAX_ZOOM, TIMELINE_MIN_ZOOM } from '@shared/constants'
 
@@ -52,7 +52,10 @@ export interface UiState {
   /** 界面模式：基础模式只留常用入口，高级模式展开全部样式与编码选项 */
   uiMode: UiMode
   showSafeArea: boolean
-  previewFit: 'fit' | 'actual'
+  /** v10：目标画布临时覆盖（null = 工程画布）；只影响预览，不写进工程 */
+  previewCanvasKind: ExportCanvasKind | null
+  /** v10：目标画布预览的媒体适配方式 */
+  previewFit: ExportFit
   exportScope: 'timeline' | 'selected'
   dialogQueue: DialogPrompt[]
   fontLoadingCount: number
@@ -70,7 +73,8 @@ export interface UiState {
   setDisplayTime: (sec: number) => void
   setUiMode: (mode: UiMode) => void
   toggleSafeArea: () => void
-  setPreviewFit: (mode: 'fit' | 'actual') => void
+  setPreviewCanvas: (kind: ExportCanvasKind | null) => void
+  setPreviewFit: (fit: ExportFit) => void
   setExportScope: (scope: 'timeline' | 'selected') => void
   /** v2：素材池中文件已不可用的 mediaId 集合（被移动/删除）：非空即禁用叠加导出（规格 §8） */
   missingMediaIds: string[]
@@ -121,7 +125,8 @@ export const useUiStore = create<UiState>((set) => ({
   // 规格：程序启动总是进入基础模式（不跨会话记住高级模式）
   uiMode: 'basic',
   showSafeArea: false,
-  previewFit: 'fit',
+  previewCanvasKind: null,
+  previewFit: 'contain',
   exportScope: 'timeline',
   refVideoMissing: false,
   missingMediaIds: [],
@@ -136,7 +141,9 @@ export const useUiStore = create<UiState>((set) => ({
   setDisplayTime: (sec) => set({ displayTimeSec: sec }),
   setUiMode: (mode) => set({ uiMode: mode }),
   toggleSafeArea: () => set((state) => ({ showSafeArea: !state.showSafeArea })),
-  setPreviewFit: (mode) => set({ previewFit: mode }),
+  setPreviewCanvas: (kind) =>
+    set((state) => (state.previewCanvasKind === kind ? state : { previewCanvasKind: kind })),
+  setPreviewFit: (fit) => set((state) => (state.previewFit === fit ? state : { previewFit: fit })),
   setExportScope: (scope) => set({ exportScope: scope }),
   setMissingMediaIds: (ids) => set({ missingMediaIds: ids, refVideoMissing: ids.length > 0 }),
   setRefVideoMissing: (missing) => set({ refVideoMissing: missing }),

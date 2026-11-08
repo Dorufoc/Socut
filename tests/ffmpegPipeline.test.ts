@@ -12,6 +12,7 @@ import {
   buildOverlayMp4DirectPipe,
   buildOverlayMp4MultiInput,
   buildProbeArgs,
+  buildProxyArgs,
   buildStabDetectArgs,
   buildStabPreviewArgs,
   buildTransparentMovFromPipe,
@@ -21,9 +22,11 @@ import {
   formatSec
 } from '@shared/ffmpegArgs'
 import type { AudioMixClip, ConcatSegment } from '@shared/ffmpegArgs'
+import { buildMediaClipVideoFx } from '@shared/mediaClipVideoFfmpeg'
 import { defaultMediaStab } from '@shared/mediaStab'
+import { defaultMediaVideo, curveLookup, defaultCurves } from '@shared/mediaClipVideo'
 import { spectrumPeaksFromPcm } from '@shared/audioPeaks'
-import type { MediaClipStab } from '@shared/types'
+import type { MediaClipStab, MediaClipVideo } from '@shared/types'
 import {
   analyzeVfrSample,
   detectCompat,
@@ -1009,6 +1012,243 @@ describe.skipIf(!HAS_BUNDLED_FFMPEG)('视频防抖 vidstab 全链（v8）', () =
  * 3. volume=0.5 与 afade 在输出文件的音频上留下可测痕迹（峰值电平下降、首尾柱低于中段）；
  * 4. 音高连动的 asetrate 链与音频轨混音的 atempo+volume 链都真实可解。
  */
+/**
+ * v10 音频质量（Task 8 · 实机 FFmpeg）：降噪 / BGM ducking / 响度标准化。
+ *
+ * 全部走生产同一套 argv（`buildOverlayMp4` / `buildOverlayMp4MultiInput`）：
+ * 1. loudnorm social/broadcast 用 ebur128 量整片积分响度（±1 LU）；
+ * 2. ducking 用低通隔离 BGM 频段，比较「口播前 / 口播中 / 口播后」的 RMS（中段 ≥6dB 下降，后段恢复）；
+ * 3. afftdn 链可解且输出底噪均值下降（噪声夹具 + 单音）。
+ */
+describe.skipIf(!HAS_BUNDLED_FFMPEG)('音频质量全链（v10 · 实机 FFmpeg）', () => {
+  const OUT_W = 320
+  const OUT_H = 240
+  const SEC = 6
+  const REF_WITH_AUDIO = path.join(WORK_DIR, 'aq-ref-audio.mp4')
+  const REF_SILENT = path.join(WORK_DIR, 'aq-ref-silent.mp4')
+  const LAYER = path.join(WORK_DIR, 'aq-layer.mov')
+
+  const makeRef = async (target: string, withAudio: boolean): Promise<void> => {
+    const args = [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `testsrc=size=${OUT_W}x${OUT_H}:rate=30:duration=${SEC}`
+    ]
+    if (withAudio) args.push('-f', 'lavfi', '-i', `sine=frequency=440:duration=${SEC}`)
+    args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p')
+    if (withAudio) args.push('-c:a', 'aac', '-shortest')
+    else args.push('-an')
+    args.push(target)
+    const result = await run(ffmpeg, args)
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+  }
+
+  const makeLayer = async (): Promise<void> => {
+    const layer = await runWithFrames(
+      buildTransparentMovFromPipe(FPS_30, LAYER, 'png', { width: OUT_W, height: OUT_H }),
+      Array.from({ length: SEC * 30 }, () =>
+        encodeRgbaPng(OUT_W, OUT_H, rgbaFrame(OUT_W, OUT_H, () => null))
+      )
+    )
+    expect(layer.code, layer.stderr.slice(-600)).toBe(0)
+  }
+
+  beforeAll(async () => {
+    await makeRef(REF_WITH_AUDIO, true)
+    await makeRef(REF_SILENT, false)
+    await makeLayer()
+  }, 240_000)
+
+  const integratedLufs = async (target: string): Promise<number> => {
+    const result = await run(ffmpeg, [
+      '-hide_banner', '-i', target, '-af', 'ebur128', '-f', 'null', '-'
+    ])
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    // 只认最终 Summary 的整片积分响度：逐帧行里的 I: 会先出现 -70（起始静音）
+    const match = /Integrated loudness:[\s\S]*?I:\s*(-?[0-9.]+)\s*LUFS/.exec(result.stderr)
+    expect(match, result.stderr.slice(-600)).not.toBeNull()
+    return Number.parseFloat(match?.[1] ?? 'NaN')
+  }
+
+  /**
+   * 某一时间窗的电平：**必须从 0 解码到区间末尾**再用 atrim 截窗。
+   * 若用 `-ss` 直接跳进窗口，侧链压缩器的增益状态会在窗口起点重置，
+   * 量到的下降会被严重低估（实测 -2dB vs 真实 -9dB）。
+   */
+  const meanVolume = async (target: string, from: number, to: number, af: string): Promise<number> => {
+    const result = await run(ffmpeg, [
+      '-hide_banner', '-loglevel', 'info',
+      '-i', target,
+      '-af',
+      `${af},atrim=start=${formatSec(from)}:end=${formatSec(to)},asetpts=PTS-STARTPTS,volumedetect`,
+      '-f', 'null', '-'
+    ])
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const match = /mean_volume:\s*(-?[0-9.]+)\s*dB/.exec(result.stderr)
+    expect(match, result.stderr.slice(-600)).not.toBeNull()
+    return Number.parseFloat(match?.[1] ?? 'NaN')
+  }
+
+  it('loudnorm social：输出整片响度 -14 ±1 LUFS', async () => {
+    const out = path.join(WORK_DIR, 'aq-loudnorm-social.mp4')
+    const result = await run(ffmpeg, buildOverlayMp4({
+      refVideoPath: REF_WITH_AUDIO,
+      overlayPath: LAYER,
+      outputPath: out,
+      fps: FPS_30,
+      frameSize: { width: OUT_W, height: OUT_H },
+      spanStartSec: 0,
+      spanEndSec: SEC,
+      audioMode: 'copy',
+      fpsMode: 'cfr',
+      mastering: 'social'
+    }))
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const lufs = await integratedLufs(out)
+    expect(Math.abs(lufs - -14), `实测 ${lufs} LUFS`).toBeLessThanOrEqual(1)
+  }, 300_000)
+
+  it('loudnorm broadcast：输出整片响度 -23 ±1 LUFS', async () => {
+    const out = path.join(WORK_DIR, 'aq-loudnorm-broadcast.mp4')
+    const result = await run(ffmpeg, buildOverlayMp4({
+      refVideoPath: REF_WITH_AUDIO,
+      overlayPath: LAYER,
+      outputPath: out,
+      fps: FPS_30,
+      frameSize: { width: OUT_W, height: OUT_H },
+      spanStartSec: 0,
+      spanEndSec: SEC,
+      audioMode: 'copy',
+      fpsMode: 'cfr',
+      mastering: 'broadcast'
+    }))
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const lufs = await integratedLufs(out)
+    expect(Math.abs(lufs - -23), `实测 ${lufs} LUFS`).toBeLessThanOrEqual(1)
+  }, 300_000)
+
+  it('ducking：口播区间 BGM 频段下降 ≥6dB，口播结束后恢复', async () => {
+    const bgmPath = path.join(WORK_DIR, 'aq-bgm.wav')
+    const voicePath = path.join(WORK_DIR, 'aq-voice.wav')
+    const bgm = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `sine=frequency=200:duration=${SEC}`,
+      '-c:a', 'pcm_s16le', bgmPath
+    ])
+    expect(bgm.code).toBe(0)
+    const voice = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', 'sine=frequency=3000:duration=2',
+      '-c:a', 'pcm_s16le', voicePath
+    ])
+    expect(voice.code).toBe(0)
+
+    const out = path.join(WORK_DIR, 'aq-ducking.mp4')
+    const result = await run(ffmpeg, buildOverlayMp4MultiInput({
+      segments: [
+        {
+          refVideoPath: REF_SILENT,
+          timelineStartSec: 0,
+          timelineEndSec: SEC,
+          sourceInSec: 0,
+          sourceOutSec: SEC,
+          hasAudio: false
+        }
+      ],
+      spanStartSec: 0,
+      spanEndSec: SEC,
+      overlayLabel: '1',
+      overlayPath: LAYER,
+      outputPath: out,
+      fps: FPS_30,
+      frameSize: { width: OUT_W, height: OUT_H },
+      audioMode: 'aac',
+      fpsMode: 'cfr',
+      audioClips: [
+        {
+          path: bgmPath,
+          timelineStartSec: 0,
+          timelineEndSec: SEC,
+          sourceInSec: 0,
+          sourceOutSec: SEC,
+          role: 'bgm',
+          ducking: 'standard'
+        },
+        {
+          path: voicePath,
+          timelineStartSec: 2,
+          timelineEndSec: 4,
+          sourceInSec: 0,
+          sourceOutSec: 2,
+          role: 'voice',
+          // 接近真实口播电平（lavfi sine 默认约 -18dBFS，抬到 -12dBFS）
+          audio: { volumePercent: 200, fadeInSec: 0, fadeOutSec: 0 }
+        }
+      ]
+    }))
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+
+    // 低通只留 200Hz BGM：500Hz 截止对 3kHz 口播衰减足够，比较各段 BGM 电平
+    const before = await meanVolume(out, 0.5, 1.9, 'lowpass=frequency=500')
+    const during = await meanVolume(out, 2.5, 3.9, 'lowpass=frequency=500')
+    const after = await meanVolume(out, 4.3, 5.7, 'lowpass=frequency=500')
+    expect(during - before, `before=${before} during=${during}`).toBeLessThanOrEqual(-6)
+    expect(Math.abs(after - before), `before=${before} after=${after}`).toBeLessThanOrEqual(2)
+  }, 300_000)
+
+  it('降噪：afftdn 链可解，噪声夹具的底噪均值下降', async () => {
+    const noisyPath = path.join(WORK_DIR, 'aq-noisy.mp4')
+    // 单音 + 白噪声：降噪应压掉噪声，同时保留 1kHz 内容
+    const gen = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `testsrc=size=${OUT_W}x${OUT_H}:rate=30:duration=2`,
+      '-f', 'lavfi', '-i', 'sine=frequency=1000:duration=2',
+      '-f', 'lavfi', '-i', 'anoisesrc=color=white:duration=2:amplitude=0.35',
+      '-filter_complex', '[1:a][2:a]amix=inputs=2:duration=first:normalize=0[a]',
+      '-map', '0:v', '-map', '[a]',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', noisyPath
+    ])
+    expect(gen.code, gen.stderr.slice(-600)).toBe(0)
+
+    const composite = (denoise: 'strong' | undefined, output: string): string[] =>
+      buildOverlayMp4MultiInput({
+        segments: [
+          {
+            refVideoPath: noisyPath,
+            timelineStartSec: 0,
+            timelineEndSec: 2,
+            sourceInSec: 0,
+            sourceOutSec: 2,
+            hasAudio: true,
+            ...(denoise
+              ? { audio: { volumePercent: 100, fadeInSec: 0, fadeOutSec: 0, denoise } }
+              : {})
+          }
+        ],
+        spanStartSec: 0,
+        spanEndSec: 2,
+        overlayLabel: '1',
+        overlayPath: LAYER,
+        outputPath: output,
+        fps: FPS_30,
+        frameSize: { width: OUT_W, height: OUT_H },
+        audioMode: 'aac',
+        fpsMode: 'cfr'
+      })
+
+    const plainOut = path.join(WORK_DIR, 'aq-denoise-plain.mp4')
+    const denoisedOut = path.join(WORK_DIR, 'aq-denoise-strong.mp4')
+    const plain = await run(ffmpeg, composite(undefined, plainOut))
+    expect(plain.code, plain.stderr.slice(-600)).toBe(0)
+    const denoised = await run(ffmpeg, composite('strong', denoisedOut))
+    expect(denoised.code, denoised.stderr.slice(-600)).toBe(0)
+    expect(composite('strong', denoisedOut).join(' ')).toContain('afftdn=nr=20:nf=-20')
+
+    const plainMean = await meanVolume(plainOut, 0.3, 1.7, 'anull')
+    const denoisedMean = await meanVolume(denoisedOut, 0.3, 1.7, 'anull')
+    expect(denoisedMean, `plain=${plainMean} denoised=${denoisedMean}`).toBeLessThan(plainMean - 1)
+  }, 300_000)
+})
+
 describe.skipIf(!HAS_BUNDLED_FFMPEG)('音频与变速滤镜链（v9 · 实机 FFmpeg）', () => {
   const OUT_W = 320
   const OUT_H = 240
@@ -1183,5 +1423,744 @@ describe.skipIf(!HAS_BUNDLED_FFMPEG)('音频与变速滤镜链（v9 · 实机 FF
     const probe = parseProbeJson(await probeJson(out), out)
     expect(probe?.audioCodec).toBeTruthy()
     expect(probe?.durationSec).toBeGreaterThan(5.5)
+  }, 300_000)
+})
+
+/**
+ * v10 片段画面变换与调色烧录（Task 3 · 实机 FFmpeg）。
+ *
+ * 走生产同一套 argv（`buildOverlayMp4MultiInput` → 单轨基座 → fx 链），
+ * 断言两件事：
+ * 1. 调色：亮度按乘性增益、对比度/饱和度按 eq 公式落在 YUV 通道上（±3/255），
+ *    曲线中点按同一张采样表（±3/255）；
+ * 2. 几何：150% + 20% 位移 + hflip 后，两色块的可见分界与包围盒一致（±2px）。
+ */
+describe.skipIf(!HAS_BUNDLED_FFMPEG)('片段几何/调色烧录（v10 · 实机 FFmpeg）', () => {
+  const OUT_W = 320
+  const OUT_H = 240
+  const SOLID = path.join(WORK_DIR, 'fx-color-solid.mp4')
+  const QUAD = path.join(WORK_DIR, 'fx-color-quad.mp4')
+  const GRAY = path.join(WORK_DIR, 'fx-color-gray.mp4')
+  const LAYER = path.join(WORK_DIR, 'fx-color-layer.mov')
+
+  const videoOf = (over: Partial<MediaClipVideo> = {}): MediaClipVideo => ({
+    ...defaultMediaVideo(),
+    ...over
+  })
+
+  const composite = (video: MediaClipVideo | undefined, output: string): string[] =>
+    buildOverlayMp4MultiInput({
+      segments: [
+        {
+          refVideoPath: SOLID,
+          timelineStartSec: 0,
+          timelineEndSec: 1,
+          sourceInSec: 0,
+          sourceOutSec: 1,
+          hasAudio: false,
+          ...(video ? { video } : {})
+        }
+      ],
+      spanStartSec: 0,
+      spanEndSec: 1,
+      overlayLabel: '1',
+      overlayPath: LAYER,
+      outputPath: output,
+      fps: FPS_30,
+      frameSize: { width: OUT_W, height: OUT_H },
+      audioMode: 'aac',
+      fpsMode: 'cfr'
+    })
+
+  const compositeFrom = (sourcePath: string, video: MediaClipVideo | undefined, output: string): string[] => {
+    const argv = composite(video, output)
+    // 夹具路径是检查函数的可变输入：替换 segments 里的第一路文件
+    const index = argv.indexOf(SOLID)
+    if (index >= 0) argv[index] = sourcePath
+    return argv
+  }
+
+  async function frameRgb(target: string): Promise<Buffer> {
+    const result = await run(ffmpeg, [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      target,
+      '-ss',
+      '0.500000',
+      '-frames:v',
+      '1',
+      '-f',
+      'rawvideo',
+      '-pix_fmt',
+      'rgb24',
+      'pipe:1'
+    ])
+    expect(result.code, result.stderr.slice(-400)).toBe(0)
+    expect(result.stdout.length).toBeGreaterThanOrEqual(OUT_W * OUT_H * 3)
+    return result.stdout
+  }
+
+  async function frameYuv(target: string): Promise<[number, number, number]> {
+    const result = await run(ffmpeg, [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      target,
+      '-ss',
+      '0.500000',
+      '-frames:v',
+      '1',
+      '-f',
+      'rawvideo',
+      '-pix_fmt',
+      'yuv420p',
+      'pipe:1'
+    ])
+    expect(result.code, result.stderr.slice(-400)).toBe(0)
+    const y = OUT_W * OUT_H
+    const uv = Math.ceil(OUT_W / 2) * Math.ceil(OUT_H / 2)
+    return [result.stdout[0] ?? 0, result.stdout[y] ?? 0, result.stdout[y + uv] ?? 0]
+  }
+
+  const pixelAt = (frame: Buffer, x: number, y: number): [number, number, number] => {
+    const offset = (y * OUT_W + x) * 3
+    return [frame[offset] ?? 0, frame[offset + 1] ?? 0, frame[offset + 2] ?? 0]
+  }
+
+  const isRed = (p: [number, number, number]): boolean => p[0] > 150 && p[1] < 80 && p[2] < 80
+  const isBlue = (p: [number, number, number]): boolean => p[2] > 150 && p[0] < 80 && p[1] < 80
+
+  beforeAll(async () => {
+    // 纯色源 / 灰源 / 双色分块源（左红右蓝）
+    const solid = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `color=c=0x336699:s=${OUT_W}x${OUT_H}:r=30:d=1`,
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', SOLID
+    ])
+    expect(solid.code, solid.stderr.slice(-400)).toBe(0)
+    const gray = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `color=c=0x808080:s=${OUT_W}x${OUT_H}:r=30:d=1`,
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', GRAY
+    ])
+    expect(gray.code, gray.stderr.slice(-400)).toBe(0)
+    const quad = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `color=c=0x0000ff:s=${OUT_W}x${OUT_H}:r=30:d=1`,
+      '-vf', `drawbox=x=0:y=0:w=${OUT_W / 2}:h=${OUT_H}:color=red:t=fill`,
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', QUAD
+    ])
+    expect(quad.code, quad.stderr.slice(-400)).toBe(0)
+    const layer = await runWithFrames(
+      buildTransparentMovFromPipe(FPS_30, LAYER, 'png', { width: OUT_W, height: OUT_H }),
+      Array.from({ length: 30 }, () => encodeRgbaPng(OUT_W, OUT_H, rgbaFrame(OUT_W, OUT_H, () => null)))
+    )
+    expect(layer.code, layer.stderr.slice(-600)).toBe(0)
+  }, 240_000)
+
+  it('亮度/对比度/饱和度：按公式落在通道值上（亮度 RGB 乘性、对比度/饱和度 YUV 公式）', async () => {
+    const baseOut = path.join(WORK_DIR, 'fx-grade-base.mp4')
+    const brightOut = path.join(WORK_DIR, 'fx-grade-bright.mp4')
+    const fullOut = path.join(WORK_DIR, 'fx-grade-full.mp4')
+    const base = await run(ffmpeg, composite(undefined, baseOut))
+    expect(base.code, base.stderr.slice(-600)).toBe(0)
+    const bright = await run(ffmpeg, composite(videoOf({ brightness: 20 }), brightOut))
+    expect(bright.code, bright.stderr.slice(-600)).toBe(0)
+    const full = await run(
+      ffmpeg,
+      composite(videoOf({ brightness: 20, contrast: 15, saturation: 30 }), fullOut)
+    )
+    expect(full.code, full.stderr.slice(-600)).toBe(0)
+
+    // 亮度：CSS brightness 同口径 = RGB × 1.2
+    const baseRgb = pixelAt(await frameRgb(baseOut), 160, 120)
+    const brightRgb = pixelAt(await frameRgb(brightOut), 160, 120)
+    for (let c = 0; c < 3; c += 1) {
+      expect(Math.abs((brightRgb[c] ?? 0) - (baseRgb[c] ?? 0) * 1.2)).toBeLessThanOrEqual(3)
+    }
+
+    // 对比度作用在 Y 上：(Y-128)×1.15+128；饱和度作用在 U/V 上：(C-128)×1.30+128
+    const [brightY, brightU, brightV] = await frameYuv(brightOut)
+    const [fullY, fullU, fullV] = await frameYuv(fullOut)
+    const expectedY = (brightY - 128) * 1.15 + 128
+    const expectedU = (brightU - 128) * 1.3 + 128
+    const expectedV = (brightV - 128) * 1.3 + 128
+    expect(Math.abs(fullY - expectedY)).toBeLessThanOrEqual(3)
+    expect(Math.abs(fullU - expectedU)).toBeLessThanOrEqual(3)
+    expect(Math.abs(fullV - expectedV)).toBeLessThanOrEqual(3)
+  }, 300_000)
+
+  it('主曲线：中点按 curveLookup 输出（灰源 ±3/255）', async () => {
+    const master = [
+      { x: 0, y: 0 },
+      { x: 0.5, y: 0.6 },
+      { x: 1, y: 1 }
+    ]
+    // 直接执行 fx 语句（与导出注入的是同一份滤镜串）；导出整链的 yuv/overlay 往返会额外引入 2-3 级误差
+    const plan = buildMediaClipVideoFx({
+      baseLabel: '0:v',
+      outputLabel: 'out',
+      video: videoOf({ curves: { ...defaultCurves(), master } }),
+      frame: { width: OUT_W, height: OUT_H },
+      fps: FPS_30,
+      durationSec: 1,
+      transparentBackground: false
+    })
+    const result = await run(ffmpeg, [
+      '-hide_banner',
+      '-y',
+      '-loglevel',
+      'error',
+      '-i',
+      GRAY,
+      '-filter_complex',
+      plan.statements.join(';'),
+      '-map',
+      '[out]',
+      '-frames:v',
+      '1',
+      '-f',
+      'rawvideo',
+      '-pix_fmt',
+      'rgb24',
+      'pipe:1'
+    ])
+    expect(result.code, result.stderr.slice(-400)).toBe(0)
+    const pixel = [result.stdout[0] ?? 0, result.stdout[1] ?? 0, result.stdout[2] ?? 0]
+    const inputLevel = 128 / 255
+    const expected = Math.round(curveLookup(master, inputLevel) * 255)
+    for (const value of pixel) {
+      expect(Math.abs(value - expected), `曲线中点 ${value} vs ${expected}`).toBeLessThanOrEqual(3)
+    }
+  }, 300_000)
+
+  it('几何：150% 缩放 + 20% 水平位移 + hflip，两色块分界与包围盒 ±2px', async () => {
+    const out = path.join(WORK_DIR, 'fx-geometry.mp4')
+    const result = await run(
+      ffmpeg,
+      compositeFrom(QUAD, videoOf({ scalePercent: 150, offsetXPercent: 20, flipH: true }), out)
+    )
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+
+    const probe = parseProbeJson(await probeJson(out), out)
+    expect(probe ? `${probe.width}x${probe.height}` : null).toBe(`${OUT_W}x${OUT_H}`)
+
+    const frame = await frameRgb(out)
+    // hflip 后红色在右：分界 = 480/2 (局部位) − 16 (overlay x) = 224
+    let boundary = -1
+    for (let x = 0; x < OUT_W; x += 1) {
+      if (isRed(pixelAt(frame, x, 120))) {
+        boundary = x
+        break
+      }
+    }
+    expect(boundary, '未找到红色色块').toBeGreaterThan(0)
+    expect(Math.abs(boundary - 224)).toBeLessThanOrEqual(2)
+    expect(isBlue(pixelAt(frame, boundary - 4, 120))).toBe(true)
+    expect(isRed(pixelAt(frame, boundary + 4, 120))).toBe(true)
+    // 缩放 150% 覆盖全高：上下边缘仍是画面内容（没有黑边）
+    expect(isBlue(pixelAt(frame, 10, 10))).toBe(true)
+    expect(isBlue(pixelAt(frame, 10, OUT_H - 10))).toBe(true)
+  }, 300_000)
+})
+
+/**
+ * v10 转场导出（Task 7 · 实机 FFmpeg）：
+ * 两段 1s 纯色夹具 + 0.5s 溶解，走生产同一套 argv（`buildOverlayMp4MultiInput` → 单轨转场基座）。
+ * 断言：
+ * 1. 总帧数/总时长仍 = 两段核心长度之和（xfade 手柄不改变成片长度）；
+ * 2. 切点中点确实是两色混合（不是纯色）；
+ * 3. 音频仍是硬切 concat（时长 = 2s，音轨存在）；
+ * 4. 方向性转场图可解；fadeblack 中点接近黑。
+ */
+describe.skipIf(!HAS_BUNDLED_FFMPEG)('转场导出 xfade（v10 · 实机 FFmpeg）', () => {
+  const OUT_W = 320
+  const OUT_H = 240
+  const RED = path.join(WORK_DIR, 'tr-red.mp4')
+  const BLUE = path.join(WORK_DIR, 'tr-blue.mp4')
+  const LAYER = path.join(WORK_DIR, 'tr-layer.mov')
+
+  const makeSolid = async (color: string, target: string): Promise<void> => {
+    const result = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `color=c=${color}:s=${OUT_W}x${OUT_H}:r=30:d=2`,
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', target
+    ])
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+  }
+
+  const segments = (type: 'dissolve' | 'pushLeft' | 'windLeft' | 'fadeBlack'): ConcatSegment[] => [
+    {
+      refVideoPath: RED,
+      timelineStartSec: 0,
+      timelineEndSec: 1,
+      sourceInSec: 0,
+      sourceOutSec: 1,
+      sourceDurationSec: 2,
+      hasAudio: true
+    },
+    {
+      refVideoPath: BLUE,
+      timelineStartSec: 1,
+      timelineEndSec: 2,
+      sourceInSec: 0.5,
+      sourceOutSec: 1.5,
+      sourceDurationSec: 2,
+      hasAudio: true,
+      transitionIn: { type, durationSec: 0.5 }
+    }
+  ]
+
+  const compositeArgs = (type: 'dissolve' | 'pushLeft' | 'windLeft' | 'fadeBlack', output: string): string[] =>
+    buildOverlayMp4MultiInput({
+      segments: segments(type),
+      spanStartSec: 0,
+      spanEndSec: 2,
+      overlayLabel: '2',
+      overlayPath: LAYER,
+      outputPath: output,
+      fps: FPS_30,
+      frameSize: { width: OUT_W, height: OUT_H },
+      audioMode: 'aac',
+      fpsMode: 'cfr'
+    })
+
+  const rgbAt = async (target: string, atSec: number): Promise<Buffer> => {
+    const result = await run(ffmpeg, [
+      '-hide_banner', '-loglevel', 'error',
+      '-i', target,
+      '-ss', atSec.toFixed(6),
+      '-frames:v', '1',
+      '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'
+    ])
+    expect(result.code, result.stderr.slice(-400)).toBe(0)
+    return result.stdout
+  }
+
+  const center = (frame: Buffer): [number, number, number] => {
+    const offset = (Math.floor(OUT_H / 2) * OUT_W + Math.floor(OUT_W / 2)) * 3
+    return [frame[offset] ?? 0, frame[offset + 1] ?? 0, frame[offset + 2] ?? 0]
+  }
+
+  beforeAll(async () => {
+    await makeSolid('red', RED)
+    await makeSolid('blue', BLUE)
+    const layer = await runWithFrames(
+      buildTransparentMovFromPipe(FPS_30, LAYER, 'png', { width: OUT_W, height: OUT_H }),
+      Array.from({ length: 60 }, () => encodeRgbaPng(OUT_W, OUT_H, rgbaFrame(OUT_W, OUT_H, () => null)))
+    )
+    expect(layer.code, layer.stderr.slice(-600)).toBe(0)
+  }, 240_000)
+
+  it('0.5s 溶解：总 60 帧 / 2s，切点中点是混合色，音频仍 2s 硬切', async () => {
+    const out = path.join(WORK_DIR, 'tr-dissolve.mp4')
+    const result = await run(ffmpeg, compositeArgs('dissolve', out))
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+
+    const verified = await verifyJson(out)
+    expect(verified).not.toBeNull()
+    if (verified) expect(Number(verified.nbFrames)).toBe(60)
+    const probe = parseProbeJson(await probeJson(out), out)
+    expect(probe?.durationSec).toBeGreaterThan(1.9)
+    expect(probe?.durationSec).toBeLessThan(2.1)
+    expect(probe?.audioCodec).toBeTruthy()
+
+    const before = center(await rgbAt(out, 0.5))
+    const mid = center(await rgbAt(out, 1.0))
+    const after = center(await rgbAt(out, 1.5))
+    // 前/后是硬切端点色
+    expect(before[0]).toBeGreaterThan(150)
+    expect(before[2]).toBeLessThan(90)
+    expect(after[2]).toBeGreaterThan(150)
+    expect(after[0]).toBeLessThan(90)
+    // 切点中点是混合：红蓝都明显存在，且都不是纯色
+    expect(mid[0]).toBeGreaterThan(35)
+    expect(mid[2]).toBeGreaterThan(35)
+    expect(Math.min(mid[0], mid[2])).toBeGreaterThan(20)
+  }, 300_000)
+
+  it('方向性转场（推入/风感）图可解，总帧数仍正确', async () => {
+    for (const type of ['pushLeft', 'windLeft'] as const) {
+      const out = path.join(WORK_DIR, `tr-${type}.mp4`)
+      const result = await run(ffmpeg, compositeArgs(type, out))
+      expect(result.code, `${type}: ${result.stderr.slice(-600)}`).toBe(0)
+      const verified = await verifyJson(out)
+      expect(Number(verified?.nbFrames), type).toBe(60)
+    }
+  }, 300_000)
+
+  it('fadeblack 切点中点接近黑（颜色峰值符合所选效果）', async () => {
+    const out = path.join(WORK_DIR, 'tr-fadeblack.mp4')
+    const result = await run(ffmpeg, compositeArgs('fadeBlack', out))
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const mid = center(await rgbAt(out, 1.0))
+    expect(Math.max(...mid)).toBeLessThan(60)
+  }, 300_000)
+})
+
+/**
+ * v10 预览代理（Task 10 · 实机 FFmpeg）：
+ * 用生产同一套 `buildProxyArgs` 把一条 1920×1080 / 25fps 的 MXF 转成代理，
+ * 断言「短边 ≤720、长边 ≤1280、30fps、H.264、AAC 128k、时长保持、faststart」。
+ */
+describe.skipIf(!HAS_BUNDLED_FFMPEG)('4K / MXF 预览代理（v10 · 实机 FFmpeg）', () => {
+  const SRC_W = 1920
+  const SRC_H = 1080
+  const SEC = 1.5
+  const MXF = path.join(WORK_DIR, 'proxy-source.mxf')
+  const PROXY = path.join(WORK_DIR, 'proxy-output.mp4')
+
+  beforeAll(async () => {
+    // 广播容器夹具：mpeg2video + PCM（ffmpeg 原生可读，Chromium 不可）
+    const gen = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `testsrc=size=${SRC_W}x${SRC_H}:rate=25:duration=${SEC}`,
+      '-f', 'lavfi', '-i', `sine=frequency=440:duration=${SEC}`,
+      '-c:v', 'mpeg2video', '-pix_fmt', 'yuv422p', '-q:v', '5',
+      '-c:a', 'pcm_s16le', '-ar', '48000',
+      '-f', 'mxf', MXF
+    ])
+    expect(gen.code, gen.stderr.slice(-600)).toBe(0)
+  }, 240_000)
+
+  it('MXF → 720p H.264/AAC 代理：尺寸上限、30fps、时长保持、faststart', async () => {
+    await fs.rm(PROXY, { force: true }).catch(() => undefined)
+    const args = buildProxyArgs({ inputPath: MXF, outputPath: PROXY, hasAudio: true })
+    expect(args[args.indexOf('-i') + 1]).toBe(MXF)
+
+    const result = await run(ffmpeg, args)
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    const stat = await fs.stat(PROXY)
+    expect(stat.size).toBeGreaterThan(0)
+
+    const meta = parseProbeJson(await probeJson(PROXY), PROXY)
+    expect(meta).not.toBeNull()
+    if (!meta) return
+    const longSide = Math.max(meta.width, meta.height)
+    const shortSide = Math.min(meta.width, meta.height)
+    expect(longSide).toBeLessThanOrEqual(1280)
+    expect(shortSide).toBeLessThanOrEqual(720)
+    // 16:9 源应正好落到 1280×720（不被拉伸）
+    expect(`${meta.width}x${meta.height}`).toBe('1280x720')
+    expect(meta.avgFrameRate.num / meta.avgFrameRate.den).toBeCloseTo(30, 1)
+    expect(meta.videoCodec).toBe('h264')
+    expect(meta.audioCodec).toBe('aac')
+    // 整片转码：时长与源 1:1（25→30 帧率只补帧，不改变时长）
+    expect(meta.durationSec).toBeGreaterThan(SEC - 0.2)
+    expect(meta.durationSec).toBeLessThan(SEC + 0.2)
+
+    // faststart：moov 在 mdat 之前，预览协议的 Range 流才能边下边播
+    const head = (await fs.readFile(PROXY)).subarray(0, 64 * 1024).toString('latin1')
+    const moov = head.indexOf('moov')
+    const mdat = head.indexOf('mdat')
+    expect(moov, 'faststart 未生效：前 64KB 里没有 moov').toBeGreaterThanOrEqual(0)
+    if (mdat >= 0) expect(moov).toBeLessThan(mdat)
+  }, 300_000)
+})
+
+/**
+ * v11 组合交付（Task 11.3 · 实机 FFmpeg）：一次导出同时开启
+ * 9:16 cover 画布 + 片段几何/调色 + 0.5s 溶解转场 + BGM ducking + social 响度。
+ *
+ * 全部走生产同一套 `buildOverlayMp4MultiInput`（内部再由 `buildMediaBasisFilterComplex` /
+ * `buildAudioMixPlan` 装配），因此这里通过即等于组合场景的导出链可解且读数正确：
+ * 1. ffprobe：竖屏尺寸、30fps、时长 = 两段核心时长之和、音轨存在；
+ * 2. ebur128：整片积分响度 -14 ±1 LUFS（social）；
+ * 3. 逐帧抽样：溶解中点是两色混合，前后仍是各段主色（几何/调色没有把画面吃掉）。
+ */
+describe.skipIf(!HAS_BUNDLED_FFMPEG)('组合交付：9:16 + 转场 + 几何/调色 + ducking + 响度（v11 · 实机 FFmpeg）', () => {
+  const OUT_W = 360
+  const OUT_H = 640
+  const SEG_SEC = 3
+  const TOTAL_SEC = SEG_SEC * 2
+  const RED = path.join(WORK_DIR, 'cd-red.mp4')
+  const BLUE = path.join(WORK_DIR, 'cd-blue.mp4')
+  const LAYER = path.join(WORK_DIR, 'cd-layer.mov')
+  const BGM = path.join(WORK_DIR, 'cd-bgm.wav')
+  const VOICE = path.join(WORK_DIR, 'cd-voice.wav')
+
+  const makeSolid = async (color: string, target: string): Promise<void> => {
+    const result = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `color=c=${color}:s=${OUT_W}x${OUT_H}:r=30:d=${SEG_SEC + 2}`,
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', target
+    ])
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+  }
+
+  const segments = (): ConcatSegment[] => [
+    {
+      refVideoPath: RED,
+      timelineStartSec: 0,
+      timelineEndSec: SEG_SEC,
+      sourceInSec: 0,
+      sourceOutSec: SEG_SEC,
+      sourceDurationSec: SEG_SEC + 2,
+      hasAudio: false,
+      // 片段一：调色（亮度 +20），验证色彩参数真的烧进组合导出
+      video: { ...defaultMediaVideo(), brightness: 20 }
+    },
+    {
+      refVideoPath: BLUE,
+      timelineStartSec: SEG_SEC,
+      timelineEndSec: TOTAL_SEC,
+      sourceInSec: 1,
+      sourceOutSec: 4,
+      sourceDurationSec: SEG_SEC + 2,
+      hasAudio: false,
+      // 片段二：几何（放大 120% + 左移 10%），与转场/画布同时生效
+      video: { ...defaultMediaVideo(), scalePercent: 120, offsetXPercent: -10 },
+      transitionIn: { type: 'dissolve', durationSec: 0.5 }
+    }
+  ]
+
+  const compositeArgs = (output: string): string[] =>
+    buildOverlayMp4MultiInput({
+      segments: segments(),
+      spanStartSec: 0,
+      spanEndSec: TOTAL_SEC,
+      overlayLabel: '2',
+      overlayPath: LAYER,
+      outputPath: output,
+      fps: FPS_30,
+      frameSize: { width: OUT_W, height: OUT_H },
+      audioMode: 'aac',
+      fpsMode: 'cfr',
+      canvas: { width: OUT_W, height: OUT_H, fit: 'cover' },
+      quality: 'standard',
+      audioClips: [
+        {
+          path: BGM,
+          timelineStartSec: 0,
+          timelineEndSec: TOTAL_SEC,
+          sourceInSec: 0,
+          sourceOutSec: TOTAL_SEC,
+          role: 'bgm',
+          ducking: 'standard'
+        },
+        {
+          path: VOICE,
+          timelineStartSec: 2,
+          timelineEndSec: 4,
+          sourceInSec: 0,
+          sourceOutSec: 2,
+          role: 'voice',
+          audio: { volumePercent: 200, fadeInSec: 0, fadeOutSec: 0 }
+        }
+      ],
+      mastering: 'social'
+    })
+
+  beforeAll(async () => {
+    await makeSolid('red', RED)
+    await makeSolid('blue', BLUE)
+    const layer = await runWithFrames(
+      buildTransparentMovFromPipe(FPS_30, LAYER, 'png', { width: OUT_W, height: OUT_H }),
+      Array.from({ length: TOTAL_SEC * 30 }, () =>
+        encodeRgbaPng(OUT_W, OUT_H, rgbaFrame(OUT_W, OUT_H, () => null))
+      )
+    )
+    expect(layer.code, layer.stderr.slice(-600)).toBe(0)
+    const bgm = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `sine=frequency=200:duration=${TOTAL_SEC}`,
+      '-c:a', 'pcm_s16le', BGM
+    ])
+    expect(bgm.code, bgm.stderr.slice(-600)).toBe(0)
+    const voice = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', 'sine=frequency=3000:duration=2',
+      '-c:a', 'pcm_s16le', VOICE
+    ])
+    expect(voice.code, voice.stderr.slice(-600)).toBe(0)
+  }, 300_000)
+
+  const rgbAt = async (target: string, atSec: number): Promise<Buffer> => {
+    const result = await run(ffmpeg, [
+      '-hide_banner', '-loglevel', 'error',
+      '-i', target,
+      '-ss', atSec.toFixed(6),
+      '-frames:v', '1',
+      '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'
+    ])
+    expect(result.code, result.stderr.slice(-400)).toBe(0)
+    return result.stdout
+  }
+
+  const center = (frame: Buffer): [number, number, number] => {
+    const offset = (Math.floor(OUT_H / 2) * OUT_W + Math.floor(OUT_W / 2)) * 3
+    return [frame[offset] ?? 0, frame[offset + 1] ?? 0, frame[offset + 2] ?? 0]
+  }
+
+  it('一次导出：竖屏尺寸/帧率/时长/音轨 + 转场中点混合 + social 响度达标', async () => {
+    const out = path.join(WORK_DIR, 'cd-combined.mp4')
+    const argv = compositeArgs(out)
+    // 组合图里各项能力都必须真的在链上（不是「参数写了但没生效」）
+    const joined = argv.join(' ')
+    expect(joined).toContain('scale=360:640:force_original_aspect_ratio=increase,crop=360:640')
+    expect(joined).toContain('xfade=transition=fade:duration=0.500000')
+    expect(joined).toContain('sidechaincompress')
+    expect(joined).toContain('loudnorm=I=-14')
+    // 亮度按 RGB 乘性增益（与预览 CSS brightness 同口径），不是 eq
+    expect(joined).toContain('colorchannelmixer=rr=1.2:gg=1.2:bb=1.2')
+
+    const result = await run(ffmpeg, argv)
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+
+    const meta = parseProbeJson(await probeJson(out), out)
+    expect(meta).not.toBeNull()
+    if (!meta) return
+    // 9:16 竖屏（cover 归一后目标画布）
+    expect(`${meta.width}x${meta.height}`).toBe(`${OUT_W}x${OUT_H}`)
+    expect(meta.avgFrameRate.num / meta.avgFrameRate.den).toBeCloseTo(30, 1)
+    // 成片时长仍等于两段核心时长之和（xfade 手柄不改变长度）；
+    // 30fps 下 0.5s 转场的半手柄是 7.5 帧，扩展源区间必然落在半帧边界，允许 1 帧量化误差
+    expect(meta.durationSec).toBeGreaterThan(TOTAL_SEC - 0.1)
+    expect(meta.durationSec).toBeLessThan(TOTAL_SEC + 0.1)
+    // 音轨存在（BGM + 口播混音后编码）
+    expect(meta.audioCodec).toBeTruthy()
+
+    // 音频必须覆盖整片：转场路径的音频 concat 不能在 concat 前再按时间轴平移，
+    // 否则第二段起会被推到 2× 偏移处，成片后半段静音（本用例曾实测只有前 3s 有声）
+    const audioProbe = await run(ffprobe, [
+      '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=duration', '-of', 'json', out
+    ])
+    const audioStreams = (JSON.parse(audioProbe.stdout.toString('utf8')) as {
+      streams?: { duration?: string }[]
+    }).streams
+    const audioDurationSec = Number.parseFloat(audioStreams?.[0]?.duration ?? 'NaN')
+    expect(audioDurationSec, `音轨时长 ${audioDurationSec}s`).toBeGreaterThan(TOTAL_SEC - 0.2)
+    const tail = await run(ffmpeg, [
+      '-hide_banner', '-loglevel', 'info', '-i', out,
+      '-af', 'atrim=start=5:end=6,volumedetect', '-f', 'null', '-'
+    ])
+    const meanTail = /mean_volume:\s*(-?[0-9.]+)\s*dB/.exec(tail.stderr)
+    expect(meanTail, `末段无音频样本：${tail.stderr.slice(-400)}`).not.toBeNull()
+    // 口播结束后 BGM 恢复（200Hz 底乐仍在），不能是一片静音
+    expect(Number.parseFloat(meanTail?.[1] ?? 'NaN')).toBeGreaterThan(-60)
+
+    const verified = await verifyJson(out)
+    expect(verified).not.toBeNull()
+    if (verified) {
+      expect(Math.abs(Number(verified.nbFrames) - TOTAL_SEC * 30)).toBeLessThanOrEqual(1)
+      expect(isDeliveryYuv420p(verified)).toBe(true)
+    }
+
+    // 切点中点（3.0s）是两色混合：红与蓝都明显存在，且不是任一端的纯色
+    const before = center(await rgbAt(out, 1))
+    const mid = center(await rgbAt(out, SEG_SEC))
+    const after = center(await rgbAt(out, TOTAL_SEC - 1))
+    expect(before[0]).toBeGreaterThan(150)
+    expect(before[2]).toBeLessThan(90)
+    expect(after[2]).toBeGreaterThan(150)
+    expect(after[0]).toBeLessThan(90)
+    expect(Math.min(mid[0], mid[2]), `中点像素 ${mid.join(',')}`).toBeGreaterThan(20)
+
+    // 响度：social 目标 -14 LUFS，单遍 loudnorm 后整片积分响度 ±1 LU
+    const lufsRun = await run(ffmpeg, ['-hide_banner', '-i', out, '-af', 'ebur128', '-f', 'null', '-'])
+    expect(lufsRun.code, lufsRun.stderr.slice(-600)).toBe(0)
+    const match = /Integrated loudness:[\s\S]*?I:\s*(-?[0-9.]+)\s*LUFS/.exec(lufsRun.stderr)
+    expect(match, lufsRun.stderr.slice(-600)).not.toBeNull()
+    const lufs = Number.parseFloat(match?.[1] ?? 'NaN')
+    expect(Math.abs(lufs - -14), `实测 ${lufs} LUFS`).toBeLessThanOrEqual(1)
+  }, 300_000)
+})
+
+/**
+ * v11 验收追加：非转场单轨 concat 的 PTS 二次偏移护栏（实机 FFmpeg）。
+ *
+ * 历史缺陷：`buildSingleTrackBasis` 在送进 `concat` 之前又给每段加了
+ * `setpts/asetpts=PTS+<时间轴偏移>`；`concat` 本身会累加前序段时长，于是偏移被算两次。
+ * 实测「两段各 0.5s 相邻」的成片是 1.5s（应为 1.0s）。
+ * 本用例直接跑生产构造函数 `buildOverlayMp4MultiInput`，只量成片时长/帧数：
+ * 相邻 0.5+0.5 → 1.0s；中间留 0.5s 空隙（pushGap 补黑+静音）→ 1.5s。
+ */
+describe.skipIf(!HAS_BUNDLED_FFMPEG)('非转场单轨 concat 时长（v11 验收追加 · 实机 FFmpeg）', () => {
+  const OUT_W = 320
+  const OUT_H = 240
+  const SRC_SEC = 2
+  const SRC = path.join(WORK_DIR, 'nt-src.mp4')
+  const LAYER = path.join(WORK_DIR, 'nt-layer.mov')
+
+  /** 一段 0.5s 的媒体段（带音轨，音频链同样不能再平移 PTS） */
+  const seg = (timelineStartSec: number, sourceInSec: number): ConcatSegment => ({
+    refVideoPath: SRC,
+    timelineStartSec,
+    timelineEndSec: timelineStartSec + 0.5,
+    sourceInSec,
+    sourceOutSec: sourceInSec + 0.5,
+    hasAudio: true
+  })
+
+  const compositeArgs = (segments: ConcatSegment[], spanEndSec: number, output: string): string[] =>
+    buildOverlayMp4MultiInput({
+      segments,
+      spanStartSec: 0,
+      spanEndSec,
+      overlayLabel: '2',
+      overlayPath: LAYER,
+      outputPath: output,
+      fps: FPS_30,
+      frameSize: { width: OUT_W, height: OUT_H },
+      audioMode: 'aac',
+      fpsMode: 'cfr'
+    })
+
+  beforeAll(async () => {
+    const gen = await run(ffmpeg, [
+      '-hide_banner', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `color=c=red:s=${OUT_W}x${OUT_H}:r=30:d=${SRC_SEC}`,
+      '-f', 'lavfi', '-i', `sine=frequency=440:duration=${SRC_SEC}`,
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', SRC
+    ])
+    expect(gen.code, gen.stderr.slice(-600)).toBe(0)
+    const layer = await runWithFrames(
+      buildTransparentMovFromPipe(FPS_30, LAYER, 'png', { width: OUT_W, height: OUT_H }),
+      Array.from({ length: SRC_SEC * 30 }, () =>
+        encodeRgbaPng(OUT_W, OUT_H, rgbaFrame(OUT_W, OUT_H, () => null))
+      )
+    )
+    expect(layer.code, layer.stderr.slice(-600)).toBe(0)
+  }, 240_000)
+
+  const assertSpan = async (out: string, expectedSec: number): Promise<void> => {
+    const probe = parseProbeJson(await probeJson(out), out)
+    expect(probe, 'ffprobe 解析失败').not.toBeNull()
+    if (!probe) return
+    // 缺陷版本会给第二段叠加一次偏移：相邻两段会得到 1.5s
+    expect(probe.durationSec, `成片时长 ${probe.durationSec}s ≠ ${expectedSec}s`).toBeGreaterThan(expectedSec - 0.08)
+    expect(probe.durationSec, `成片时长 ${probe.durationSec}s ≠ ${expectedSec}s`).toBeLessThan(expectedSec + 0.08)
+    const verified = await verifyJson(out)
+    expect(verified).not.toBeNull()
+    if (verified) {
+      expect(Math.abs(Number(verified.nbFrames) - Math.round(expectedSec * 30))).toBeLessThanOrEqual(1)
+    }
+    // 音轨同样必须覆盖整条 span（缺陷版本会把第二段推到 2× 偏移处）
+    const audioProbe = await run(ffprobe, [
+      '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=duration', '-of', 'json', out
+    ])
+    const audioDuration = Number.parseFloat(
+      ((JSON.parse(audioProbe.stdout.toString('utf8')) as { streams?: { duration?: string }[] }).streams ??
+        [])[0]?.duration ?? 'NaN'
+    )
+    expect(audioDuration, `音轨时长 ${audioDuration}s`).toBeGreaterThan(expectedSec - 0.15)
+  }
+
+  it('两段 0.5s 相邻：成片 = 1.0s / 30 帧（不再被二次偏移成 1.5s）', async () => {
+    const out = path.join(WORK_DIR, 'nt-contiguous.mp4')
+    const result = await run(ffmpeg, compositeArgs([seg(0, 0), seg(0.5, 0.5)], 1, out))
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    await assertSpan(out, 1)
+  }, 300_000)
+
+  it('两段 0.5s + 中段 0.5s 空隙：成片 = 1.5s / 45 帧', async () => {
+    const out = path.join(WORK_DIR, 'nt-gap.mp4')
+    const result = await run(ffmpeg, compositeArgs([seg(0, 0), seg(1, 0.5)], 1.5, out))
+    expect(result.code, result.stderr.slice(-600)).toBe(0)
+    await assertSpan(out, 1.5)
   }, 300_000)
 })

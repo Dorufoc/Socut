@@ -331,6 +331,12 @@ export interface RefVideo {
   importedAt: string
 }
 
+/** v10：素材分组（轻量组织，不改变时间轴引用语义）。 */
+export interface MediaBin {
+  id: string
+  name: string
+}
+
 /**
  * 素材池里的一枚参考视频（v2）。兼容门禁确认位下放到枚级，
  * 时间轴上同一个 MediaItem 可被多个 MediaClip 以不同源入出点引用。
@@ -353,6 +359,10 @@ export interface MediaItem {
   /** 主进程抽帧缩略图的自定义协议地址（focusnews-thumb://<mediaId>）；无图时为空字符串 */
   thumbnailUrl: string
   importedAt: string
+  /** v10：所属分组 id（缺省 = 未分组；必须指向存在的 `Project.mediaBins`） */
+  binId?: string
+  /** v10：标签（去空白、去重、限长后保存；缺省 = 无标签） */
+  tags?: string[]
 }
 
 /** v7：素材类型（缺省 = 视频，旧工程与旧测试无需补字段） */
@@ -398,6 +408,39 @@ export interface SubtitleTrack extends TrackBase {
 
 export type Track = MediaTrack | AudioTrack | SubtitleTrack
 
+// ---------------------------------------------------------------------------
+// 转场（v10：落在切点右侧片段上）
+// ---------------------------------------------------------------------------
+
+export type TransitionFamily = 'basic' | 'blur' | 'wind' | 'push' | 'pull' | 'camera'
+export type TransitionDirection = 'left' | 'right' | 'up' | 'down' | 'none'
+export type TransitionType =
+  | 'dissolve'
+  | 'fadeBlack'
+  | 'fadeWhite'
+  | 'lightFlash'
+  | 'blurH'
+  | 'blurV'
+  | 'windLeft'
+  | 'windRight'
+  | 'windUp'
+  | 'windDown'
+  | 'pushLeft'
+  | 'pushRight'
+  | 'pushUp'
+  | 'pushDown'
+  | 'pullLeft'
+  | 'pullRight'
+  | 'pullUp'
+  | 'pullDown'
+  | 'zoomIn'
+
+/** 转场参数：时长以秒存储，写入前吸附到帧边界并夹到合法区间。 */
+export interface MediaClipTransition {
+  type: TransitionType
+  durationSec: number
+}
+
 /**
  * 时间轴媒体轨：一枚媒体片段（视频/图像）。时间轴坐标与源坐标分别以 `timeline*Sec`
  * 与 `source*Sec` 命名，写入前已 `snapTimeToFrame`，时长以秒为准。
@@ -428,7 +471,12 @@ export interface MediaClip {
   audio?: ClipAudio
   /** v9：变速（缺省 = 1.0x 保持音高） */
   speed?: ClipSpeed
+  /** v10：入场转场（缺省 = 硬切；必须落在同轨紧邻的切点上，见 Task 5 的适用性判定） */
+  transitionIn?: MediaClipTransition
 }
+
+/** v10：导出侧降噪档位（预览不生效）。 */
+export type AudioDenoiseLevel = 'light' | 'standard' | 'strong'
 
 /**
  * v9：片段的音频参数（媒体段与音频段共用同一套语义）。
@@ -444,6 +492,8 @@ export interface ClipAudio {
   fadeInSec: number
   /** 渐出时长（秒，0..5）：从正常音量降到静音 */
   fadeOutSec: number
+  /** v10：降噪档位（缺省 = 关闭；仅导出时生效） */
+  denoise?: AudioDenoiseLevel
 }
 
 /**
@@ -459,6 +509,13 @@ export interface ClipSpeed {
   /** 变速保持音高（默认 true：走 `atempo`；false：走 `asetrate` 连动音高） */
   maintainPitch: boolean
 }
+
+/** v10：音频角色（缺省 = voice，不落盘）。 */
+export type AudioRole = 'voice' | 'bgm'
+/** v10：BGM 自动压低档位。 */
+export type AudioDuckingLevel = 'light' | 'standard' | 'strong'
+/** v10：成片响度标准化（缺省 = off，不落盘）。 */
+export type AudioMastering = 'off' | 'social' | 'broadcast'
 
 /**
  * v7：音频轨片段。与媒体段同构（同一条时间轴刻度、同样的拖拽/剪辑手感），
@@ -477,6 +534,10 @@ export interface AudioClip {
   audio?: ClipAudio
   /** v9：变速（缺省 = 1.0x 保持音高） */
   speed?: ClipSpeed
+  /** v10：角色（缺省 = voice，不落盘）；bgm 段可参与自动化压低 */
+  role?: AudioRole
+  /** v10：BGM 自动压低档位（缺省 = 关闭；仅 role=bgm 时有意义） */
+  ducking?: AudioDuckingLevel
 }
 
 /** v8：防抖档位（UI 只暴露三档，滤镜参数映射见 shared/mediaStab） */
@@ -654,6 +715,10 @@ export interface Project {
   audioClips?: AudioClip[]
   /** 水印设置；缺省 = 未导入水印（合成链与旧工程逐字节一致） */
   watermark?: WatermarkSettings
+  /** v10：成片响度标准化（缺省 = off，不落盘） */
+  audioMastering?: AudioMastering
+  /** v10：素材分组（缺省 = 未分组功能未启用，不落盘） */
+  mediaBins?: MediaBin[]
   /** UI 状态（不参与渲染）；leftTab 记住上次离开左侧栏的位置，随工程走 */
   ui?: { leftTab?: LeftTabValue } & Record<string, unknown>
   /**
@@ -809,6 +874,23 @@ export type AspectMode = 'standard' | 'compact' | 'ultrawide'
 
 export type ExportKind = 'transparentMov' | 'overlayMp4' | 'pngSequence'
 
+// ---------------------------------------------------------------------------
+// 交付画布与画质（v10：叠加 MP4 / 封面帧的目标画布）
+// ---------------------------------------------------------------------------
+
+export type ExportCanvasKind = 'landscape' | 'portrait' | 'square'
+export type ExportFit = 'cover' | 'contain'
+export type ExportQuality = 'high' | 'standard' | 'small'
+export type ExportResolutionTier = '1080' | '720'
+
+/** 目标画布选择：landscape 跟随首个可见底层素材（现有行为）。 */
+export interface ExportCanvasSelection {
+  kind: ExportCanvasKind
+  /** portrait/square only; landscape follows the base media */
+  tier?: ExportResolutionTier
+  fit?: ExportFit
+}
+
 export interface ExportTarget {
   kind: ExportKind
   /** 输出目录（由用户选择） */
@@ -862,6 +944,10 @@ export interface OverlaySegment {
   audio?: ClipAudio
   /** v9：该段的变速（视频 `setpts` + 音频 `atempo`/`asetrate`） */
   speed?: ClipSpeed
+  /** v10：入场转场（缺省 = 硬切；主进程按扩展手柄走 xfade） */
+  transitionIn?: MediaClipTransition
+  /** v10：源素材总时长（转场手柄夹取用；图像视为无限手柄） */
+  sourceDurationSec?: number
 }
 
 /**
@@ -878,6 +964,34 @@ export interface StabPreviewRequest {
   stab: MediaClipStab
   /** 代理是否携带该区间的原声（预览音频跟着代理播） */
   hasAudio: boolean
+}
+
+/** v10：媒体预览代理请求（渲染 → 主进程）。代理只服务预览，导出永远读原片。 */
+export interface MediaProxyRequest {
+  mediaId: string
+  path: string
+  /** 源是否带音轨（代理据此决定 AAC / -an；缺省 true） */
+  hasAudio?: boolean
+  /** 源总时长（秒，进度口径；缺省 0 = 只按帧比例显示） */
+  durationSec?: number
+}
+
+/** v10：媒体预览代理受理结果（与防抖预览同一套 queued/cached 语义）。 */
+export interface MediaProxyResult {
+  status: 'queued' | 'cached'
+  jobId: string
+  path: string | null
+  signature: string
+}
+
+/** v10：代理新鲜度查询结果（渲染侧据此在源文件被替换后回落原片）。 */
+export interface MediaProxyStatusResult {
+  /** 当前签名对应的代理文件存在且非空 */
+  fresh: boolean
+  /** fresh 时的代理绝对路径，否则 null */
+  path: string | null
+  /** 按当前源指纹重算的签名；源不可读时为空串 */
+  signature: string
 }
 
 /** v8.1：防抖预览受理结果。queued = 后台作业已入队（进度走 job 事件流）；cached = 直接命中磁盘缓存。 */
@@ -902,6 +1016,10 @@ export interface AudioMixClipRequest {
   audio?: ClipAudio
   /** v9：变速 */
   speed?: ClipSpeed
+  /** v10：角色（缺省 = voice）；bgm 段参与自动压低 */
+  role?: AudioRole
+  /** v10：BGM 自动压低档位（仅 role=bgm 时有意义） */
+  ducking?: AudioDuckingLevel
 }
 
 export interface ExportRequest {
@@ -917,6 +1035,8 @@ export interface ExportRequest {
    * - transparent：单独混出音轨（没有音频段时保持 `-an`，argv 与旧版一致）。
    */
   audioClips?: AudioMixClipRequest[]
+  /** v10：成片响度标准化（off/缺省 = 不注入 loudnorm，argv 与旧版逐字节一致） */
+  audioMastering?: AudioMastering
   /** 管道内的帧形式（默认 raw：实测 PNG 编码是 1080p 吞吐率瓶颈） */
   pipeTransport?: 'raw' | 'png'
   /** 透明出口编码（默认 ProRes 4444；qtrle 为兼容模式回退） */
@@ -945,7 +1065,40 @@ export interface ExportRequest {
      * 缺省即不追加输入与滤镜链，argv 与无水印路径逐字节一致。
      */
     watermark?: { path: string; sourceWidth: number; sourceHeight: number }
+    /**
+     * v10：目标画布归一（缺省 = 不做归一，argv 与旧版逐字节一致）。
+     * 有值时主进程强制走多输入路径，逐段按 fit 归一。
+     */
+    canvas?: { width: number; height: number; fit: ExportFit }
+    /** v10：画质档（缺省 = high；high = CRF 18，与现有默认一致） */
+    quality?: ExportQuality
   }
+}
+
+/** 封面导出的一层可见媒体（按轨道顺序从底到顶）。 */
+export interface CoverMediaLayer {
+  path: string
+  kind: 'video' | 'image'
+  sourceTimeSec: number
+  imageDurationSec?: number
+  video?: MediaClipVideo
+}
+
+/** 封面帧导出请求（渲染侧已合入透明字幕 PNG；主进程再叠媒体与黑底）。 */
+export interface CoverExportRequest {
+  outputPath: string
+  width: number
+  height: number
+  fit: ExportFit
+  overlayPng: Uint8Array
+  layers: CoverMediaLayer[]
+  watermark?: { path: string; sourceWidth: number; sourceHeight: number }
+}
+
+export interface CoverExportResult {
+  ok: boolean
+  path: string
+  error?: string
 }
 
 export type JobPhase =

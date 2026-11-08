@@ -10,7 +10,15 @@ import {
   validateClips
 } from '@shared/projectSchema'
 import { projectDurationSec, projectSpanSec } from '@shared/presetResolver'
-import { MIN_CLIP_DURATION_SEC, PROJECT_VERSION, DEFAULT_FONT_ID, AUTOSAVE_FILE, DEFAULT_ANIMATION_IN_SEC, DEFAULT_ANIMATION_OUT_SEC } from '@shared/constants'
+import {
+  MIN_CLIP_DURATION_SEC,
+  PROJECT_VERSION,
+  DEFAULT_FONT_ID,
+  AUTOSAVE_FILE,
+  DEFAULT_ANIMATION_IN_SEC,
+  DEFAULT_ANIMATION_OUT_SEC,
+  TRANSITION_DURATION
+} from '@shared/constants'
 import { durationSecToFrames, framesToDurationSec, snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
 import { DEFAULT_PRESET_ID } from '@shared/presets'
 import { PRESETS } from '@shared/presets'
@@ -418,5 +426,238 @@ describe('leftTab 归一化与旧值迁移（P6）', () => {
   it('ui 里没有 leftTab 时不凭空补一个（冷启动默认由 uiStore 决定）', () => {
     const parsed = normalizeProject({ version: PROJECT_VERSION, name: '只有别的 UI 键', ui: { paneRatio: 0.4 } })!
     expect('leftTab' in (parsed.ui ?? {})).toBe(false)
+  })
+})
+
+/**
+ * v10：转场、音频质量、素材分组与响度标准化的 schema 口径。
+ * 共同纪律：默认值不落盘（旧工程 JSON 不变）、脏值丢弃、跨帧率吸附。
+ */
+describe('v10 转场归一', () => {
+  const docWithTransition = (transitionIn: unknown, fps = FPS): Record<string, unknown> => {
+    const doc = projectWithMediaClip()
+    doc['fps'] = fps
+    const clips = doc['mediaClips'] as Record<string, unknown>[]
+    clips[0] = { ...clips[0], transitionIn }
+    return doc
+  }
+
+  it('合法类型与时长：吸附到帧边界且至少 2 帧', () => {
+    const transition = normalizeProject(docWithTransition({ type: 'dissolve', durationSec: 0.55 }))!
+      .mediaClips[0]!.transitionIn!
+    expect(transition.type).toBe('dissolve')
+    expect(transition.durationSec).toBeCloseTo(snapTimeToFrame(0.55, FPS), 9)
+    expect(durationSecToFrames(transition.durationSec, FPS)).toBe(17)
+  })
+
+  it('多族类型都能落盘（抽查基础/风感/运镜）', () => {
+    for (const type of ['fadeBlack', 'windUp', 'zoomIn']) {
+      const transition = normalizeProject(docWithTransition({ type, durationSec: 0.5 }))!
+        .mediaClips[0]!.transitionIn
+      expect(transition?.type).toBe(type)
+    }
+  })
+
+  it('非法类型整键丢弃（不写入无效数据）', () => {
+    const clip = normalizeProject(docWithTransition({ type: 'wipe', durationSec: 0.5 }))!
+      .mediaClips[0] as unknown as Record<string, unknown>
+    expect('transitionIn' in clip).toBe(false)
+  })
+
+  it('时长夹到 0.2–1.5s 并吸附帧', () => {
+    const tooLong = normalizeProject(docWithTransition({ type: 'dissolve', durationSec: 3 }))!.mediaClips[0]!.transitionIn!
+    expect(tooLong.durationSec).toBeCloseTo(TRANSITION_DURATION.max, 9)
+    const tooShort = normalizeProject(docWithTransition({ type: 'dissolve', durationSec: 0.01 }))!.mediaClips[0]!
+      .transitionIn!
+    expect(tooShort.durationSec).toBeCloseTo(TRANSITION_DURATION.min, 9)
+  })
+
+  it('吸附后不足 2 帧（低帧率）丢弃', () => {
+    const clip = normalizeProject(docWithTransition({ type: 'dissolve', durationSec: 0.2 }, { num: 5, den: 1 }))!
+      .mediaClips[0] as unknown as Record<string, unknown>
+    expect('transitionIn' in clip).toBe(false)
+  })
+
+  it('缺省不落盘；旧片段 JSON 不受影响', () => {
+    const clip = normalizeProject(projectWithMediaClip())!.mediaClips[0] as unknown as Record<string, unknown>
+    expect('transitionIn' in clip).toBe(false)
+    expect(JSON.stringify(clip)).not.toContain('transitionIn')
+  })
+
+  it('round-trip 保真', () => {
+    const parsed = normalizeProject(docWithTransition({ type: 'pushLeft', durationSec: 0.5 }))!
+    expect(normalizeProject(JSON.parse(JSON.stringify(parsed)))!.mediaClips[0]!.transitionIn).toEqual(
+      parsed.mediaClips[0]!.transitionIn
+    )
+  })
+})
+
+describe('v10 片段音频降噪', () => {
+  const docWithAudio = (audio: unknown): Record<string, unknown> => {
+    const doc = projectWithMediaClip()
+    const clips = doc['mediaClips'] as Record<string, unknown>[]
+    clips[0] = { ...clips[0], audio }
+    return doc
+  }
+
+  it('合法档位落盘（即使音量/淡变全默认）', () => {
+    for (const denoise of ['light', 'standard', 'strong'] as const) {
+      expect(normalizeProject(docWithAudio({ denoise }))!.mediaClips[0]!.audio).toEqual({
+        volumePercent: 100,
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        denoise
+      })
+    }
+  })
+
+  it('非法档位丢弃；三者全默认时 audio 整键不存在', () => {
+    const clip = normalizeProject(docWithAudio({ denoise: 'ultra', volumePercent: 100 }))!
+      .mediaClips[0] as unknown as Record<string, unknown>
+    expect('audio' in clip).toBe(false)
+  })
+
+  it('round-trip 保真', () => {
+    const parsed = normalizeProject(docWithAudio({ denoise: 'strong' }))!
+    expect(normalizeProject(JSON.parse(JSON.stringify(parsed)))!.mediaClips[0]!.audio).toEqual(
+      parsed.mediaClips[0]!.audio
+    )
+  })
+})
+
+describe('v10 音频段角色与 ducking', () => {
+  const docWithAudioClip = (extra: Record<string, unknown>): Record<string, unknown> => {
+    const doc = projectWithMediaClip()
+    doc['audioClips'] = [
+      { id: 'a1', mediaId: 'm1', timelineStartSec: 1, timelineEndSec: 3, sourceInSec: 0.5, ...extra }
+    ]
+    return doc
+  }
+
+  it('role: bgm 单独落盘；voice 是默认不落盘', () => {
+    expect(normalizeProject(docWithAudioClip({ role: 'bgm' }))!.audioClips![0]!.role).toBe('bgm')
+    const voice = normalizeProject(docWithAudioClip({ role: 'voice' }))!.audioClips![0] as unknown as Record<
+      string,
+      unknown
+    >
+    expect('role' in voice).toBe(false)
+  })
+
+  it('ducking 三档落盘，非法档位丢弃', () => {
+    for (const ducking of ['light', 'standard', 'strong'] as const) {
+      expect(normalizeProject(docWithAudioClip({ role: 'bgm', ducking }))!.audioClips![0]!.ducking).toBe(ducking)
+    }
+    const bogus = normalizeProject(docWithAudioClip({ role: 'bgm', ducking: 'max' }))!
+      .audioClips![0] as unknown as Record<string, unknown>
+    expect('ducking' in bogus).toBe(false)
+  })
+
+  it('非法 role 不落盘', () => {
+    const clip = normalizeProject(docWithAudioClip({ role: 'music' }))!.audioClips![0] as unknown as Record<
+      string,
+      unknown
+    >
+    expect('role' in clip).toBe(false)
+  })
+})
+
+describe('v10 成片响度标准化', () => {
+  const doc = (audioMastering: unknown): Record<string, unknown> => ({
+    version: PROJECT_VERSION,
+    name: '响度',
+    fps: FPS,
+    clips: [],
+    fonts: [],
+    audioMastering
+  })
+
+  it('social / broadcast 落盘', () => {
+    expect(normalizeProject(doc('social'))!.audioMastering).toBe('social')
+    expect(normalizeProject(doc('broadcast'))!.audioMastering).toBe('broadcast')
+  })
+
+  it('off 与未知值不落盘', () => {
+    expect('audioMastering' in normalizeProject(doc('off'))!).toBe(false)
+    expect('audioMastering' in normalizeProject(doc('cinema'))!).toBe(false)
+  })
+})
+
+describe('v10 素材分组与标签', () => {
+  const docWithMedia = (mediaBins: unknown, mediaExtra: Record<string, unknown>): Record<string, unknown> => {
+    const doc = projectWithMediaClip()
+    doc['mediaBins'] = mediaBins
+    const media = doc['media'] as Record<string, unknown>[]
+    media[0] = { ...media[0], ...mediaExtra }
+    return doc
+  }
+
+  it('分组归一：trim、去重、空名丢弃', () => {
+    const parsed = normalizeProject(
+      docWithMedia(
+        [
+          { id: ' b1 ', name: ' 现场 ' },
+          { id: 'b1', name: '重复 id' },
+          { id: 'b2', name: '素材' },
+          { id: '', name: '空 id' },
+          { id: 'b3', name: '   ' }
+        ],
+        {}
+      )
+    )!
+    expect(parsed.mediaBins).toEqual([
+      { id: 'b1', name: '现场' },
+      { id: 'b2', name: '素材' }
+    ])
+  })
+
+  it('binId 必须指向存在的分组，否则删除该键', () => {
+    const item = normalizeProject(docWithMedia([{ id: 'b1', name: '现场' }], { binId: 'missing' }))!
+      .media[0] as unknown as Record<string, unknown>
+    expect('binId' in item).toBe(false)
+  })
+
+  it('有效 binId 落盘', () => {
+    expect(normalizeProject(docWithMedia([{ id: 'b1', name: '现场' }], { binId: 'b1' }))!.media[0]!.binId).toBe('b1')
+  })
+
+  it('没有 mediaBins 时所有 binId 都退回未分组', () => {
+    const item = normalizeProject(docWithMedia(undefined, { binId: 'b1' }))!.media[0] as unknown as Record<
+      string,
+      unknown
+    >
+    expect('binId' in item).toBe(false)
+  })
+
+  it('tags：trim、去空、去重、单条限长、最多 12 个', () => {
+    const raw = [' 台风 ', '台风', '', '   ', 'a', 'a', 'b'.repeat(40), ...Array.from({ length: 10 }, (_, i) => `t${i}`)]
+    const tags = normalizeProject(docWithMedia(undefined, { tags: raw }))!.media[0]!.tags!
+    expect(tags[0]).toBe('台风')
+    expect(tags.filter((tag) => tag === '台风')).toHaveLength(1)
+    expect(tags.filter((tag) => tag === 'a')).toHaveLength(1)
+    expect(tags.find((tag) => tag.startsWith('b'))?.length).toBe(24)
+    expect(tags).toHaveLength(12)
+  })
+
+  it('空标签数组不落盘', () => {
+    const item = normalizeProject(docWithMedia(undefined, { tags: ['  ', '', ''] }))!.media[0] as unknown as Record<
+      string,
+      unknown
+    >
+    expect('tags' in item).toBe(false)
+  })
+})
+
+describe('v10 版本与旧工程兼容', () => {
+  it('新增可选字段不改变 PROJECT_VERSION', () => {
+    expect(PROJECT_VERSION).toBe(3)
+    const parsed = normalizeProject({
+      version: PROJECT_VERSION,
+      name: 'v10 兼容',
+      fps: FPS,
+      clips: [],
+      fonts: [],
+      audioMastering: 'social'
+    })!
+    expect(parsed.version).toBe(PROJECT_VERSION)
   })
 })

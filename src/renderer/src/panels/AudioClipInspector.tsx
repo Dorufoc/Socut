@@ -2,7 +2,7 @@ import type { ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
 import { secondsToTimecode } from '@shared/timecode'
 import { clipAudioEdited, clipTimelineDurationSec } from '@shared/mediaClipAudio'
-import type { AudioClip, ClipAudio, ClipSpeed, Fps } from '@shared/types'
+import type { AudioClip, AudioDuckingLevel, ClipAudio, ClipSpeed, Fps } from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 import { ClipAudioSection, ClipSpeedSection } from './ClipFxSections'
@@ -27,10 +27,14 @@ export interface AudioClipInspectorProps {
 export function AudioClipInspector({ clip, mediaName, index, total, fps }: AudioClipInspectorProps): ReactElement {
   const updateAudio = useProjectStore((state) => state.updateAudioClipAudio)
   const updateSpeed = useProjectStore((state) => state.updateAudioClipSpeed)
+  const updateRole = useProjectStore((state) => state.updateAudioClipRole)
+  const updateDucking = useProjectStore((state) => state.updateAudioClipDucking)
   const resetFx = useProjectStore((state) => state.resetAudioClipFx)
   const compactTimeline = useProjectStore((state) => state.compactTimeline)
   const snapTogether = useUiStore((state) => state.timelineTools.snapTogether)
-  const edited = clipAudioEdited(clip.audio, clip.speed)
+  // v10：角色与 ducking 也属于「这一条动过」，驱动「已编辑」与「恢复默认」
+  const role = clip.role === 'bgm' ? 'bgm' : 'voice'
+  const edited = clipAudioEdited(clip.audio, clip.speed) || role === 'bgm' || clip.ducking !== undefined
 
   const setAudio = (patch: Partial<ClipAudio>): void => updateAudio(clip.id, patch)
   const setSpeed = (patch: Partial<ClipSpeed>): void => {
@@ -69,6 +73,55 @@ export function AudioClipInspector({ clip, mediaName, index, total, fps }: Audio
 
       <ClipAudioSection audio={clip.audio} durationSec={clipTimelineDurationSec(clip)} onChange={setAudio} />
       <ClipSpeedSection speed={clip.speed} onChange={setSpeed} />
+
+      {/* v10：角色 + BGM 自动压低（仅导出时生效） */}
+      <section className="group">
+        <div className="group__head">
+          <span className="group__title">{TEXT.audioRole.title}</span>
+        </div>
+        <div className="segmented" role="group" aria-label={TEXT.audioRole.title}>
+          <button
+            type="button"
+            className={`segmented__item${role === 'voice' ? ' segmented__item--active' : ''}`}
+            aria-pressed={role === 'voice'}
+            title={TEXT.audioRole.hint}
+            onClick={() => updateRole(clip.id, 'voice')}
+          >
+            {TEXT.audioRole.voice}
+          </button>
+          <button
+            type="button"
+            className={`segmented__item${role === 'bgm' ? ' segmented__item--active' : ''}`}
+            aria-pressed={role === 'bgm'}
+            title={TEXT.audioRole.hint}
+            onClick={() => updateRole(clip.id, 'bgm')}
+          >
+            {TEXT.audioRole.bgm}
+          </button>
+        </div>
+        {role === 'bgm' ? (
+          <label className="field">
+            <span className="field__label">{TEXT.audioRole.ducking}</span>
+            <select
+              className="select"
+              aria-label={TEXT.audioRole.ducking}
+              title={TEXT.audioRole.duckingHint}
+              value={clip.ducking ?? 'off'}
+              onChange={(event) => {
+                const value = event.target.value
+                updateDucking(clip.id, value === 'off' ? undefined : (value as AudioDuckingLevel))
+              }}
+            >
+              <option value="off">{TEXT.audioRole.duckingOff}</option>
+              <option value="light">{TEXT.audioRole.duckingLight}</option>
+              <option value="standard">{TEXT.audioRole.duckingStandard}</option>
+              <option value="strong">{TEXT.audioRole.duckingStrong}</option>
+            </select>
+          </label>
+        ) : (
+          <p className="hint">{TEXT.audioRole.hint}</p>
+        )}
+      </section>
     </div>
   )
 }

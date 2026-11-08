@@ -78,7 +78,13 @@ export const TEXT = {
     verifying: '校验产物',
     done: '完成',
     failed: '失败',
-    cancelled: '已取消'
+    cancelled: '已取消',
+    /** v10：成片响度标准化 */
+    mastering: '响度标准化',
+    masteringOff: '关闭',
+    masteringSocial: '社交 -14 LUFS',
+    masteringBroadcast: '广播 -23 LUFS',
+    masteringHint: '单遍 loudnorm，导出生效'
   },
 
   // 时间轴与片段
@@ -183,6 +189,24 @@ export const TEXT = {
     resetHint: '本条片段的画面、音频与变速参数全部回到默认值'
   },
 
+  /** v10：媒体片段入场转场（落在切点右侧片段上） */
+  transition: {
+    title: '转场（入场）',
+    /** 首段 / 间隙 / 手柄不足的禁用原因 */
+    first: '本段是同轨第一段，没有入场转场',
+    gap: '与前段之间有空隙，先紧贴再设置转场',
+    noType: '先选一个转场类型',
+    noTail: '前段尾部没有足够素材，可缩短转场或把前段出点提前',
+    noHead: '本段头部没有足够素材，可缩短转场或把本段入点提前',
+    tooShort: '可用时长不足 2 帧，无法设置转场',
+    insufficient: (sec: string) => `可用转场约 ${sec} 秒，不足最短 0.2 秒`,
+    duration: '时长（秒）',
+    frames: (count: number) => `${count} 帧`,
+    remove: '移除转场',
+    hint: '转场只在叠加 MP4 与封面中生效；音频仍按切点硬切',
+    marker: (label: string, sec: string) => `转场：${label} ${sec} 秒`
+  },
+
   /** v9：片段音频（媒体段原声与音频段共用一套控件） */
   clipAudio: {
     title: '音频',
@@ -191,7 +215,14 @@ export const TEXT = {
     fadeOut: '渐出',
     volumeHint: '0%~200%，100% 为原始音量（导出侧 volume 滤镜同一增益）',
     fadeInHint: '从静音升到正常音量所需时间（导出侧 afade=t=in）',
-    fadeOutHint: '从正常音量降到静音所需时间（导出侧 afade=t=out）'
+    fadeOutHint: '从正常音量降到静音所需时间（导出侧 afade=t=out）',
+    /** v10：导出侧节点降噪（预览不生效） */
+    denoise: '降噪',
+    denoiseOff: '关闭',
+    denoiseLight: '轻度',
+    denoiseStandard: '标准',
+    denoiseStrong: '强',
+    denoiseHint: '导出生效：afftdn 频域降噪，作用于变速/音量/淡变之前'
   },
 
   /** v9：片段变速 */
@@ -212,7 +243,21 @@ export const TEXT = {
     noneSelected: '未选择音频片段',
     missingMedia: '素材已移出',
     reset: '恢复默认',
-    resetHint: '本条音频的音量、渐变与变速全部回到默认值'
+    resetHint: '本条音频的音量、渐变、变速、角色与 ducking 全部回到默认值'
+  },
+
+  /** v10：音频片段角色（BGM 自动压低） */
+  audioRole: {
+    title: 'BGM 与人声',
+    voice: '人声',
+    bgm: 'BGM',
+    ducking: '自动压低',
+    duckingOff: '关闭',
+    duckingLight: '轻度',
+    duckingStandard: '标准',
+    duckingStrong: '强',
+    hint: '角色决定谁压谁：标记为 BGM 的段在有口播时被自动压低',
+    duckingHint: '导出生效：有口播时自动压低'
   },
 
   /** v8：时间轴片段级视频防抖（ffmpeg vidstab 两段式；导出逐段生效，预览经「应用防抖预览」代理） */

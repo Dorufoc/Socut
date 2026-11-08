@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_FONT_ID, FPS_29_97, FPS_30, MIN_CLIP_DURATION_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
+import { DEFAULT_FONT_ID, FPS_29_97, FPS_30, MEDIA_BIN_MAX_COUNT, MEDIA_BIN_NAME_MAX_LENGTH, MEDIA_TAG_MAX_COUNT, MEDIA_TAG_MAX_LENGTH, MIN_CLIP_DURATION_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import { getPreset } from '@shared/presets'
 import { snapTimeToFrame } from '@shared/fps'
 import { MEDIA_TRACK_ID_PREFIX, makeMediaTrack } from '@shared/tracks'
-import type { MediaItem, Project, VideoMeta } from '@shared/types'
+import type { MediaBin, MediaItem, Project, VideoMeta } from '@shared/types'
 import { useProjectStore, timelineDurationSec } from './projectStore'
+import { attachProjectHistory, useHistoryStore } from './projectHistory'
 
 /**
  * v2 素材池与媒体轨动作（阶段 3 单测）：
@@ -932,5 +933,256 @@ describe('v3 轨道管理', () => {
     useProjectStore.getState().removeAudioTrack(last)
     expect(useProjectStore.getState().project.audioTracks).toHaveLength(1)
     expect(clip.trackId).toBe(second)
+  })
+})
+
+/** v10：转场写入、失效清理与撤销（一次动作一次 revision）。 */
+describe('v10 转场动作', () => {
+  const mediaClipOf = (id: string) => useProjectStore.getState().project.mediaClips.find((clip) => clip.id === id)!
+
+  /** 同一素材相邻两段：A[0,2]（源 0→2）+ B[2,4]（源 2→4，有头部手柄）。 */
+  function seedAdjacent(): { aId: string; bId: string; mediaId: string } {
+    freshProject()
+    const mediaId = useProjectStore.getState().addMedia(seedItem({ meta: baseMeta({ durationSec: 10 }) }))
+    const a = useProjectStore.getState().insertMediaClip({
+      mediaId,
+      timelineStartSec: 0,
+      durationSec: 2,
+      sourceInSec: 0
+    })!
+    const b = useProjectStore.getState().insertMediaClip({
+      mediaId,
+      timelineStartSec: 2,
+      durationSec: 2,
+      sourceInSec: 2
+    })!
+    return { aId: a.id, bId: b.id, mediaId }
+  }
+
+  it('设置 / 移除：写进右侧片段、一次 revision；首段不写入无效数据', () => {
+    const { aId, bId } = seedAdjacent()
+    const revisionBefore = useProjectStore.getState().revision
+
+    useProjectStore.getState().setMediaClipTransition(bId, { type: 'dissolve', durationSec: 0.5 })
+    expect(mediaClipOf(bId).transitionIn).toEqual({ type: 'dissolve', durationSec: 0.5 })
+    expect(useProjectStore.getState().revision).toBe(revisionBefore + 1)
+    // 非法类型被 schema 丢弃，不产生第二次写入
+    useProjectStore.getState().setMediaClipTransition(bId, { type: 'wipe' as never, durationSec: 0.5 })
+    expect(mediaClipOf(bId).transitionIn).toEqual({ type: 'dissolve', durationSec: 0.5 })
+    expect(useProjectStore.getState().revision).toBe(revisionBefore + 1)
+
+    useProjectStore.getState().setMediaClipTransition(bId, null)
+    expect('transitionIn' in mediaClipOf(bId)).toBe(false)
+    expect(useProjectStore.getState().revision).toBe(revisionBefore + 2)
+
+    useProjectStore.getState().setMediaClipTransition(aId, { type: 'dissolve', durationSec: 0.5 })
+    expect('transitionIn' in mediaClipOf(aId)).toBe(false)
+    expect(useProjectStore.getState().revision).toBe(revisionBefore + 2)
+  })
+
+  it('move：拉开空隙后自动清掉不再紧邻的转场', () => {
+    const { bId } = seedAdjacent()
+    useProjectStore.getState().setMediaClipTransition(bId, { type: 'fadeBlack', durationSec: 0.5 })
+    useProjectStore.getState().moveMediaClip(bId, 5)
+
+    expect(mediaClipOf(bId).timelineStartSec).toBe(5)
+    expect('transitionIn' in mediaClipOf(bId)).toBe(false)
+  })
+
+  it('trim：拉出入点产生空隙 → 清掉；缩短片段 → 时长被夹到可用值', () => {
+    const { bId } = seedAdjacent()
+    useProjectStore.getState().setMediaClipTransition(bId, { type: 'dissolve', durationSec: 0.5 })
+    useProjectStore.getState().trimMediaClip(bId, { timelineStartSec: 3 })
+    expect('transitionIn' in mediaClipOf(bId)).toBe(false)
+
+    // 重新贴回并设置，再把片段缩到 0.2s：时长夹到 0.2s 而不是整条丢弃
+    useProjectStore.getState().trimMediaClip(bId, { timelineStartSec: 2 })
+    useProjectStore.getState().setMediaClipTransition(bId, { type: 'dissolve', durationSec: 0.5 })
+    useProjectStore.getState().trimMediaClip(bId, { timelineEndSec: 2.2 })
+    expect(mediaClipOf(bId).transitionIn?.durationSec).toBeCloseTo(0.2, 9)
+  })
+
+  it('split：左半保留原入场转场，右半是新切点，不继承', () => {
+    const { bId } = seedAdjacent()
+    useProjectStore.getState().setMediaClipTransition(bId, { type: 'dissolve', durationSec: 0.5 })
+    useProjectStore.getState().selectMediaClip(bId)
+    const rightId = useProjectStore.getState().splitTargetAt(3)!
+
+    expect(rightId).not.toBeNull()
+    expect(mediaClipOf(bId).transitionIn).toEqual({ type: 'dissolve', durationSec: 0.5 })
+    expect('transitionIn' in mediaClipOf(rightId)).toBe(false)
+    expect(useProjectStore.getState().project.mediaClips).toHaveLength(3)
+  })
+
+  it('remove：删掉前段后，后段成为首段，转场随之清掉', () => {
+    const { aId, bId } = seedAdjacent()
+    useProjectStore.getState().setMediaClipTransition(bId, { type: 'dissolve', durationSec: 0.5 })
+    useProjectStore.getState().removeMediaClip(aId)
+
+    expect(mediaClipOf(bId).timelineStartSec).toBe(2)
+    expect('transitionIn' in mediaClipOf(bId)).toBe(false)
+  })
+
+  it('compactTimeline：重新贴紧后原本因空隙失效的转场恢复有效', () => {
+    const { aId, bId, mediaId } = seedAdjacent()
+    // 直接摆成 3s 空隙（不经过 move，避免 move 当场清理）
+    const project = useProjectStore.getState().project
+    useProjectStore.setState({
+      project: {
+        ...project,
+        mediaClips: [
+          { ...mediaClipOf(aId), timelineStartSec: 0, timelineEndSec: 2 },
+          {
+            ...mediaClipOf(bId),
+            timelineStartSec: 5,
+            timelineEndSec: 7,
+            sourceInSec: 2,
+            sourceOutSec: 4,
+            transitionIn: { type: 'dissolve', durationSec: 0.5 }
+          }
+        ]
+      }
+    })
+    expect(mediaClipOf(bId).timelineStartSec).toBe(5)
+    expect(mediaClipOf(bId).mediaId).toBe(mediaId)
+
+    useProjectStore.getState().compactTimeline()
+
+    expect(mediaClipOf(bId).timelineStartSec).toBe(2)
+    expect(mediaClipOf(bId).transitionIn).toEqual({ type: 'dissolve', durationSec: 0.5 })
+  })
+
+  it('可撤销：一次设置动作进入历史，undo 回到没有转场的状态', () => {
+    const { bId } = seedAdjacent()
+    const detach = attachProjectHistory()
+    try {
+      useProjectStore.getState().setMediaClipTransition(bId, { type: 'dissolve', durationSec: 0.5 })
+      expect(mediaClipOf(bId).transitionIn).toBeDefined()
+
+      useHistoryStore.getState().undo()
+
+      expect('transitionIn' in mediaClipOf(bId)).toBe(false)
+      expect(useHistoryStore.getState().future.length).toBe(1)
+    } finally {
+      detach()
+    }
+  })
+})
+
+/** v10（Task 9）：素材分组与标签动作（单次写入、可撤销、不动时间轴引用）。 */
+describe('v10 素材分组与标签动作', () => {
+  const binsOf = (): MediaBin[] => useProjectStore.getState().project.mediaBins ?? []
+  const mediaOf = (id: string): MediaItem => useProjectStore.getState().project.media.find((m) => m.id === id)!
+
+  it('addMediaBin：trim 与限长、空名/上限拒收、返回 id 并创建数组', () => {
+    freshProject()
+    const revisionBefore = useProjectStore.getState().revision
+
+    const id = useProjectStore.getState().addMediaBin('  培训  ')
+    expect(id).not.toBeNull()
+    expect(id!.startsWith('bin-')).toBe(true)
+    expect(binsOf()).toEqual([{ id, name: '培训' }])
+    expect(useProjectStore.getState().revision).toBe(revisionBefore + 1)
+
+    expect(useProjectStore.getState().addMediaBin('   ')).toBeNull()
+
+    const longId = useProjectStore.getState().addMediaBin('x'.repeat(MEDIA_BIN_NAME_MAX_LENGTH + 8))!
+    expect(binsOf().find((bin) => bin.id === longId)!.name).toHaveLength(MEDIA_BIN_NAME_MAX_LENGTH)
+
+    // 上限：达到 64 组后不再新建
+    const full = Array.from({ length: MEDIA_BIN_MAX_COUNT }, (_, index) => ({
+      id: `bin-${index}`,
+      name: `组${index}`
+    }))
+    useProjectStore.setState({ project: { ...useProjectStore.getState().project, mediaBins: full } })
+    expect(useProjectStore.getState().addMediaBin('第 65 组')).toBeNull()
+  })
+
+  it('renameMediaBin：trim 后写回；空名或分组不存在时忽略', () => {
+    freshProject()
+    const id = useProjectStore.getState().addMediaBin('培训')!
+    const revisionBefore = useProjectStore.getState().revision
+
+    useProjectStore.getState().renameMediaBin(id, '  重点报道  ')
+    expect(binsOf()[0]!.name).toBe('重点报道')
+    expect(useProjectStore.getState().revision).toBe(revisionBefore + 1)
+
+    useProjectStore.getState().renameMediaBin(id, '   ')
+    expect(binsOf()[0]!.name).toBe('重点报道')
+    useProjectStore.getState().renameMediaBin('nope', '不该出现')
+    expect(binsOf().map((bin) => bin.name)).toEqual(['重点报道'])
+    expect(useProjectStore.getState().revision).toBe(revisionBefore + 1)
+  })
+
+  it('removeMediaBin：分组消失、素材回到未分组，素材与时间轴引用一条都不少', () => {
+    freshProject()
+    const mediaId = useProjectStore.getState().addMedia(seedItem())
+    const clip = useProjectStore.getState().insertMediaClip({ mediaId, timelineStartSec: 0 })!
+    const binId = useProjectStore.getState().addMediaBin('培训')!
+    useProjectStore.getState().assignMediaBin(mediaId, binId)
+    expect(mediaOf(mediaId).binId).toBe(binId)
+
+    useProjectStore.getState().removeMediaBin(binId)
+
+    expect('mediaBins' in useProjectStore.getState().project).toBe(false)
+    expect(useProjectStore.getState().project.media).toHaveLength(1)
+    expect('binId' in mediaOf(mediaId)).toBe(false)
+    expect(useProjectStore.getState().project.mediaClips).toHaveLength(1)
+    expect(useProjectStore.getState().project.mediaClips[0]).toMatchObject({ id: clip.id, mediaId })
+  })
+
+  it('assignMediaBin：合法分组写入；不存在的分组/缺失素材忽略；null 删除键', () => {
+    freshProject()
+    const mediaId = useProjectStore.getState().addMedia(seedItem())
+    const binId = useProjectStore.getState().addMediaBin('培训')!
+
+    useProjectStore.getState().assignMediaBin(mediaId, binId)
+    expect(mediaOf(mediaId).binId).toBe(binId)
+
+    const revisionBefore = useProjectStore.getState().revision
+    useProjectStore.getState().assignMediaBin(mediaId, 'bin-missing')
+    useProjectStore.getState().assignMediaBin('media-missing', binId)
+    expect(mediaOf(mediaId).binId).toBe(binId)
+    expect(useProjectStore.getState().revision).toBe(revisionBefore)
+
+    useProjectStore.getState().assignMediaBin(mediaId, null)
+    expect('binId' in mediaOf(mediaId)).toBe(false)
+  })
+
+  it('setMediaTags：trim/丢空/精确去重/限长限量；空数组删除 tags 键', () => {
+    freshProject()
+    const mediaId = useProjectStore.getState().addMedia(seedItem())
+
+    useProjectStore.getState().setMediaTags(mediaId, [' 新闻 ', '新闻', '', ' Policy ', 'x'.repeat(40)])
+    expect(mediaOf(mediaId).tags).toEqual(['新闻', 'Policy', 'x'.repeat(MEDIA_TAG_MAX_LENGTH)])
+
+    useProjectStore.getState().setMediaTags(mediaId, Array.from({ length: 14 }, (_, index) => `t${index}`))
+    expect(mediaOf(mediaId).tags).toHaveLength(MEDIA_TAG_MAX_COUNT)
+
+    const revisionBefore = useProjectStore.getState().revision
+    useProjectStore.getState().setMediaTags(mediaId, ['新闻'])
+    // 与本条已存标签不一致 → 一次写入
+    expect(mediaOf(mediaId).tags).toEqual(['新闻'])
+    expect(useProjectStore.getState().revision).toBe(revisionBefore + 1)
+
+    useProjectStore.getState().setMediaTags(mediaId, [])
+    expect('tags' in mediaOf(mediaId)).toBe(false)
+  })
+
+  it('可撤销：新建分组进入历史，undo 后 mediaBins 键消失', () => {
+    freshProject()
+    const detach = attachProjectHistory()
+    try {
+      useProjectStore.getState().addMediaBin('培训')
+      expect(binsOf()).toHaveLength(1)
+
+      useHistoryStore.getState().undo()
+
+      expect(binsOf()).toHaveLength(0)
+      expect('mediaBins' in useProjectStore.getState().project).toBe(false)
+      expect(useHistoryStore.getState().future.length).toBe(1)
+    } finally {
+      detach()
+    }
   })
 })

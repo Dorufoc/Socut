@@ -54,6 +54,12 @@ export const CHANNELS = {
   mediaGenerateStrip: 'media:generateStrip',
   /** v9：主进程把片段源区间解成单声道 PCM，折成频谱条的等分桶峰值 */
   mediaAudioPeaks: 'media:audioPeaks',
+  /** v10：4K / MXF 预览代理（整片 720p H.264；进度经 job 事件流，jobId 前缀 proxy-） */
+  mediaProxy: 'media:proxy',
+  /** v10：代理新鲜度查询（源 size/mtime 变化即失效） */
+  mediaProxyStatus: 'media:proxyStatus',
+  /** v10：素材移出池时回收它的全部代理版本 */
+  mediaProxyRemove: 'media:proxyRemove',
   videoCfrConvert: 'video:cfrConvert',
   /** v8.1：防抖预览预处理：主进程后台生成稳定化代理文件（进度经 job 事件流，jobId 前缀 stab-） */
   videoStabPreview: 'video:stabPreview',
@@ -63,6 +69,8 @@ export const CHANNELS = {
   exportEstimate: 'export:estimate',
   exportStart: 'export:start',
   exportCancel: 'export:cancel',
+  /** v10：当前帧封面 PNG（媒体 + 字幕 + 水印） */
+  exportCover: 'export:cover',
 
   /** 主进程 → 渲染侧：请求第 N 帧（pull 背压） */
   frameRequest: 'export:frameRequest',

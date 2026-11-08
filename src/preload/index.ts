@@ -3,6 +3,8 @@ import { CHANNELS } from '../shared/ipcChannels'
 import type {
   AudioPeaksRequest,
   AudioPeaksResult,
+  CoverExportRequest,
+  CoverExportResult,
   ExportRequest,
   FontRecord,
   FrameEnd,
@@ -11,6 +13,9 @@ import type {
   Fps,
   JobProgress,
   JobResult,
+  MediaProxyRequest,
+  MediaProxyResult,
+  MediaProxyStatusResult,
   MediaStripRequest,
   MediaStripResult,
   Project,
@@ -134,12 +139,26 @@ const api = {
      * 不可用时 peaks=[]，卡片不画频谱条而不是抛错。
      */
     peaks: (request: AudioPeaksRequest) =>
-      ipcRenderer.invoke(CHANNELS.mediaAudioPeaks, request) as Promise<AudioPeaksResult>
+      ipcRenderer.invoke(CHANNELS.mediaAudioPeaks, request) as Promise<AudioPeaksResult>,
+    /**
+     * v10：4K / MXF 预览代理：后台整片转码 720p H.264（进度/结果经 job 事件流，
+     * jobId 前缀 proxy-）；命中磁盘缓存时 status='cached' 直接给路径、不起子进程。
+     */
+    proxy: (request: MediaProxyRequest) =>
+      ipcRenderer.invoke(CHANNELS.mediaProxy, request) as Promise<MediaProxyResult>,
+    /** v10：代理新鲜度查询（源 size/mtime 变化即失效） */
+    proxyStatus: (request: MediaProxyRequest) =>
+      ipcRenderer.invoke(CHANNELS.mediaProxyStatus, request) as Promise<MediaProxyStatusResult>,
+    /** v10：素材移出池时回收它的全部代理版本 */
+    removeProxy: (mediaId: string) =>
+      ipcRenderer.invoke(CHANNELS.mediaProxyRemove, mediaId) as Promise<void>
   },
   export: {
     estimate: (input: EstimateInput) => ipcRenderer.invoke(CHANNELS.exportEstimate, input),
     start: (request: ExportRequest) => ipcRenderer.invoke(CHANNELS.exportStart, request),
     cancel: (jobId: string) => ipcRenderer.invoke(CHANNELS.exportCancel, jobId),
+    cover: (request: CoverExportRequest) =>
+      ipcRenderer.invoke(CHANNELS.exportCover, request) as Promise<CoverExportResult>,
     onFrameRequest: (handler: (message: FrameRequest | FrameEnd) => void): (() => void) => {
       const listener = (_event: IpcRendererEvent, message: FrameRequest | FrameEnd): void => handler(message)
       ipcRenderer.on(CHANNELS.frameRequest, listener)

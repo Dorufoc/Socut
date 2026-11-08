@@ -176,7 +176,7 @@ describe('音量与渐变滤镜', () => {
     expect(fadeFilters({ volumePercent: 100, fadeInSec: 0, fadeOutSec: 0 }, 4)).toEqual([])
   })
 
-  it('整条链顺序固定：变速 → 音量 → 淡入 → 淡出；全默认时是空串', () => {
+  it('整条链顺序固定：降噪 → 变速 → 音量 → 淡入 → 淡出；全默认时是空串', () => {
     expect(clipAudioFilterChain({ outputDurationSec: 4 })).toBe('')
     expect(
       clipAudioFilterChain({
@@ -185,6 +185,36 @@ describe('音量与渐变滤镜', () => {
         outputDurationSec: 4
       })
     ).toBe('atempo=2,volume=1.5,afade=t=in:st=0:d=1,afade=t=out:st=3:d=1')
+    expect(
+      clipAudioFilterChain({
+        audio: { volumePercent: 100, fadeInSec: 0, fadeOutSec: 0, denoise: 'standard' },
+        speed: { speed: 2, maintainPitch: true },
+        outputDurationSec: 4
+      })
+    ).toBe('afftdn=nr=12:nf=-25,atempo=2')
+  })
+})
+
+describe('v10 降噪的默认值口径', () => {
+  it('clipAudioOf 保留合法档位；非默认降噪算「已编辑」', () => {
+    expect(clipAudioOf({ volumePercent: 100, fadeInSec: 0, fadeOutSec: 0, denoise: 'light' })).toEqual({
+      volumePercent: 100,
+      fadeInSec: 0,
+      fadeOutSec: 0,
+      denoise: 'light'
+    })
+    expect(isDefaultClipAudio({ volumePercent: 100, fadeInSec: 0, fadeOutSec: 0, denoise: 'strong' })).toBe(false)
+    expect(isDefaultClipAudio({ volumePercent: 100, fadeInSec: 0, fadeOutSec: 0 })).toBe(true)
+  })
+
+  it('归一：合法档位落盘；脏档位丢弃；只有降噪时整键保留', () => {
+    expect(normalizeClipAudio({ denoise: 'strong' })).toEqual({
+      volumePercent: 100,
+      fadeInSec: 0,
+      fadeOutSec: 0,
+      denoise: 'strong'
+    })
+    expect(normalizeClipAudio({ volumePercent: 100, fadeInSec: 0, fadeOutSec: 0, denoise: 'nope' })).toBeUndefined()
   })
 })
 

@@ -459,6 +459,25 @@ textarea {
   pointer-events: none;
 }
 
+/* 目标画布预览的 cover 适配：与导出归一链的 cover 语义一致（放大后居中裁切） */
+.stage__frame--cover .stage__ref-video {
+  object-fit: cover;
+}
+
+/*
+ * 转场色块（黑场 / 白场 / 光效闪灰）：媒体层之上、字幕 Canvas 之下。
+ * Canvas 在 DOM 中排在本层之后且同 z-index，因此字幕条永远压在色块上面；
+ * opacity / background 由 MediaPreviewLayer.tick 命令式写入，不加过渡。
+ */
+.stage__transition-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: #000;
+  opacity: 0;
+}
+
 /*
  * 水印合成层（预览）：left/top/width/height 由 JS 按「等比装入矩形 × 原生像素」给定，
  * 与导出共用同一套换算（shared/ffmpegArgs 的 computeWatermarkGeometry）。
@@ -1557,6 +1576,35 @@ input[type='color']:disabled {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-tertiary);
+}
+
+/* v10：转场类型分组网格（按基础 / 模糊 / 运动模糊平移 / 推入 / 拉出 / 运镜分组） */
+.transition-family {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.transition-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.transition-duration-row {
+  align-items: center;
+  gap: 8px;
+}
+
+.transition-duration {
+  width: 72px;
+  padding: 3px 6px;
+  border: 1px solid var(--stroke-control);
+  border-radius: var(--radius-control);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 /* 检查器 */
@@ -2798,6 +2846,97 @@ input[type='color']:disabled {
   width: 100%;
 }
 
+/* v10：分组筛选 / 搜索 / 归类与标签（Task 9） */
+.media-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: none;
+}
+
+.media-bins {
+  gap: 4px;
+}
+
+.media-bin-chip {
+  cursor: pointer;
+}
+
+/* 激活态必须比 .chip 更晚出现：同特异度按源码顺序生效 */
+.media-bin-chip--active,
+.media-bin-chip--active:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.media-bins__create {
+  gap: 6px;
+}
+
+.media-bins__create .input,
+.media-bins__actions .input {
+  flex: 1 1 auto;
+  min-height: 26px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.media-bins__actions {
+  gap: 6px;
+}
+
+/* 选中素材：与门禁/缺失角标同一套边框语言，只多一圈强调环 */
+.media-tile--selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-ring);
+}
+
+.media-tile--selected:hover {
+  border-color: var(--accent);
+}
+
+.media-tile__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: 2px;
+  min-width: 0;
+}
+
+.media-tile__tag {
+  max-width: 100%;
+  padding: 0 clamp(2px, calc(var(--media-tile-size, 120px) * 0.033), 4px);
+  font-size: clamp(8px, calc(var(--media-tile-size, 120px) * 0.079), 9.5px);
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.media-tile__tag--bin {
+  border-color: var(--accent-ring);
+  color: var(--accent);
+}
+
+.media-assign {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--stroke-card);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+
+.media-assign__name {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 水印卡片：缩略图用 contain（要看清整张台标与其透明边界），与媒体卡片的 cover 取向不同 */
 .watermark-card {
   display: flex;
@@ -3220,6 +3359,41 @@ input[type='color']:disabled {
   .media-clip-card__spectrum {
     transition: none;
   }
+}
+
+/*
+ * v10：切点转场标记。
+ * 挂在车道坐标上（left = secToPx(切点)），translateX(-50%) 让标记中心落在切点；
+ * z-index 高于卡片（卡片没有层级），保证标记不被两侧卡片盖住。
+ */
+.timeline__transition-marker {
+  position: absolute;
+  top: 50%;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 18px;
+  padding: 0 6px;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: rgba(16, 18, 20, 0.92);
+  color: var(--accent);
+  font-size: 9.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.timeline__transition-marker:hover {
+  background: rgba(76, 194, 255, 0.2);
+}
+
+.timeline__transition-marker--selected {
+  background: rgba(76, 194, 255, 0.3);
+  box-shadow: 0 0 0 1px var(--accent-ring);
 }
 
 .timeline__divider {

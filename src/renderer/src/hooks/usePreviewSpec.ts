@@ -1,10 +1,26 @@
 import { useEffect, useState } from 'react'
 import { DEFAULT_FONT_ID } from '@shared/constants'
 import { getPreset } from '@shared/presets'
-import type { FontRecord, RenderJobSpec } from '@shared/types'
+import { resolveExportCanvas } from '@shared/exportPresets'
+import type { AspectMode, ExportCanvasKind, ExportFit, FontRecord, Project, RenderJobSpec } from '@shared/types'
 import { buildRenderJob } from '../render/jobBuilder'
 import { ensureFontRegistered } from './useFontLoader'
 import { useProjectStore } from '../state/projectStore'
+import { useUiStore } from '../state/uiStore'
+
+/** 预览覆盖画布（v10）：null = 工程画布；横屏跟随工程分辨率，竖屏/方图按 1080 档固定。 */
+export function previewTargetCanvas(
+  project: Project,
+  kind: ExportCanvasKind | null,
+  fit: ExportFit
+): { width: number; height: number; mode: AspectMode } | null {
+  if (kind === null) return null
+  const canvas = resolveExportCanvas({
+    selection: { kind, tier: '1080', fit },
+    projectResolution: project.resolution
+  })
+  return { width: canvas.width, height: canvas.height, mode: canvas.mode }
+}
 
 /**
  * 预览规格：工程/字体/分辨率/帧率变化后重建一次。
@@ -35,6 +51,8 @@ export function usePreviewSpec(): { spec: RenderJobSpec | null; ready: boolean; 
   const project = useProjectStore((state) => state.project)
   const revision = useProjectStore((state) => state.revision)
   const fonts = useProjectStore((state) => state.fonts)
+  const previewCanvasKind = useUiStore((state) => state.previewCanvasKind)
+  const previewFit = useUiStore((state) => state.previewFit)
   const [spec, setSpec] = useState<RenderJobSpec | null>(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -52,10 +70,17 @@ export function usePreviewSpec(): { spec: RenderJobSpec | null; ready: boolean; 
         }
       }
       // 字体必须先注册完成，否则 Canvas 会回落默认字形（预览与导出就会不一致）
+      const target = previewTargetCanvas(project, previewCanvasKind, previewFit)
       const built = await buildRenderJob({
         project,
         fontIndex: fonts,
-        scope: { kind: 'timeline' }
+        scope: { kind: 'timeline' },
+        ...(target
+          ? {
+              resolution: { width: target.width, height: target.height },
+              mode: target.mode
+            }
+          : {})
       })
       if (localGeneration !== specGeneration) return
       setSpec(built)
@@ -63,7 +88,7 @@ export function usePreviewSpec(): { spec: RenderJobSpec | null; ready: boolean; 
       setReady(true)
     }
     void run()
-  }, [project, revision, fonts])
+  }, [project, revision, fonts, previewCanvasKind, previewFit])
 
   return { spec, ready, error }
 }

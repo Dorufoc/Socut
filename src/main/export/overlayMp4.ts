@@ -6,11 +6,13 @@ import {
   buildOverlayMp4MultiInputDirectPipe,
   buildStabDetectArgs,
   segmentsNeedMultiInput,
-  stabSegmentKey
+  stabSegmentKey,
+  transitionSegmentPlansByTrack
 } from '../../shared/ffmpegArgs'
 import type { ConcatSegment, AudioMixClip, WatermarkInput } from '../../shared/ffmpegArgs'
+import type { TransitionExportSegmentPlan } from '../../shared/transitions'
 import { TEXT } from '../../shared/i18n'
-import type { MediaClipStab, OverlaySegment, TransparentCodec, VideoMeta } from '../../shared/types'
+import type { AudioMastering, ExportFit, ExportQuality, MediaClipStab, OverlaySegment, TransparentCodec, VideoMeta } from '../../shared/types'
 import { spawnJob, terminateJob } from '../procRegistry'
 import type { FfmpegBinaries } from '../paths'
 import { ProgressParser } from '../progressParser'
@@ -54,6 +56,17 @@ export interface OverlayRunCtx {
   watermark?: WatermarkInput
   /** v7：音频轨；非空时即使单段也走多输入路径（单输入 builder 没有混音入口） */
   audioClips?: AudioMixClip[]
+  /**
+   * v10：显式目标画布；有值时强制走多输入路径（单输入 builder 没有画布归一入口），
+   * 逐段按 fit 归一。缺省 = 旧行为，argv 逐字节不变。
+   */
+  canvas?: { width: number; height: number; fit?: ExportFit }
+  /** v10：画布适配方式（canvas.fit 缺省时的回退） */
+  fit?: ExportFit
+  /** v10：画质档；缺省 = high（CRF 18，与现有默认一致） */
+  quality?: ExportQuality
+  /** v10：成片响度标准化（off/缺省 = 不注入 loudnorm） */
+  audioMastering?: AudioMastering
   /** v8：任务临时目录；防抖段的 .trf 落在这里，detect 与合成 ffmpeg 进程以它为 cwd */
   workspaceDir: string
   isCancelled: () => boolean
@@ -66,8 +79,14 @@ interface CompositeRun {
   argv: string[]
 }
 
-/** 拼接路径的音频一律重编码（concat 后不能 -c:a copy）；只有旧单输入保持 copy 语义。 */
-function effectiveAudioMode(requested: 'copy' | 'aac', multi: boolean): 'copy' | 'aac' {
+/** 拼接路径的音频一律重编码（concat 后不能 -c:a copy）；只有旧单输入保持 copy 语义。
+ *  v10：开启响度标准化时也必须重编码（loudnorm 不能作用在复制流上）。 */
+function effectiveAudioMode(
+  requested: 'copy' | 'aac',
+  multi: boolean,
+  mastering: AudioMastering | undefined
+): 'copy' | 'aac' {
+  if (mastering === 'social' || mastering === 'broadcast') return 'aac'
   return multi ? 'aac' : requested
 }
 
@@ -82,21 +101,42 @@ interface StabWorkItem {
   stab: MediaClipStab
 }
 
+/**
+ * v10：转场导出计划（主进程 stab 检测与合成共用同一份扩展手柄区间）。
+ * 无任何 `transitionIn` 时返回 null，不改变旧行为。
+ */
+function transitionPlansOf(ctx: OverlayRunCtx): Map<number, TransitionExportSegmentPlan> | null {
+  const segments = ctx.segments ?? []
+  if (!segments.some((seg) => seg.transitionIn !== undefined)) return null
+  return transitionSegmentPlansByTrack({
+    segments,
+    fps: ctx.transparentCtx.fps,
+    spanStartSec: ctx.spanStartSec,
+    spanEndSec: ctx.spanEndSec
+  })
+}
+
 /** v8：从本次导出的段列表里收集需分析的防抖工作项（无防抖段返回空数组，不改变任何行为）。 */
 function planStabWork(ctx: OverlayRunCtx): StabWorkItem[] {
   const items: StabWorkItem[] = []
   const seen = new Set<string>()
-  for (const seg of ctx.segments ?? []) {
+  const transitionPlans = transitionPlansOf(ctx)
+  for (const [index, seg] of (ctx.segments ?? []).entries()) {
     if (seg.stab?.enabled !== true) continue
-    const key = stabSegmentKey(seg, ctx.transparentCtx.fps)
+    // v10：合成链的视频 trim 使用扩展手柄区间；detect 必须分析**同一段**源，
+    // 否则 .trf 的帧序号与 transform 输入的帧序列错位。
+    const ext = transitionPlans?.get(index)
+    const sourceInSec = ext ? ext.sourceInExtSec : seg.sourceInSec
+    const sourceOutSec = ext ? ext.sourceOutExtSec : seg.sourceOutSec
+    const key = stabSegmentKey({ ...seg, sourceInSec, sourceOutSec }, ctx.transparentCtx.fps)
     if (seen.has(key)) continue
     seen.add(key)
     items.push({
       key,
       file: `stab_${items.length}.trf`,
       inputPath: seg.refVideoPath,
-      sourceInSec: seg.sourceInSec,
-      sourceOutSec: seg.sourceOutSec,
+      sourceInSec,
+      sourceOutSec,
       stab: seg.stab
     })
   }
@@ -164,10 +204,15 @@ function buildCompositeArgs(
   encoder: string | null
 ): string[] {
   // 有音频段就必须走多输入（单输入 builder 不带混音链），基线段仍按同一套 trim+concat；
-  // 多轨工程即使没有音频段也要走多输入（旧单输入 builder 没有分层入口）。
+  // 多轨工程即使没有音频段也要走多输入（旧单输入 builder 没有分层入口）；
+  // v10：显式画布同样必须走多输入（单输入 builder 没有逐段归一入口）。
   const multi =
+    (ctx.canvas !== undefined && (ctx.segments?.length ?? 0) > 0) ||
     segmentsNeedMultiInput(ctx.segments) ||
     ((ctx.audioClips?.length ?? 0) > 0 && (ctx.segments?.length ?? 0) > 0)
+  const canvas = ctx.canvas
+    ? { width: ctx.canvas.width, height: ctx.canvas.height, fit: ctx.canvas.fit ?? ctx.fit ?? 'contain' }
+    : undefined
   if (!multi) {
     return ctx.directPipe
       ? buildOverlayMp4DirectPipe({
@@ -180,7 +225,9 @@ function buildCompositeArgs(
           spanEndSec: ctx.spanEndSec,
           audioMode,
           fpsMode: ctx.fpsMode,
-          watermark: ctx.watermark
+          watermark: ctx.watermark,
+          quality: ctx.quality,
+          mastering: ctx.audioMastering
         }, encoder)
       : buildOverlayMp4({
           refVideoPath: ctx.refVideoPath,
@@ -193,10 +240,13 @@ function buildCompositeArgs(
           spanEndSec: ctx.spanEndSec,
           audioMode,
           fpsMode: ctx.fpsMode,
-          watermark: ctx.watermark
+          watermark: ctx.watermark,
+          quality: ctx.quality,
+          mastering: ctx.audioMastering
         }, encoder)
   }
-  const segments: ConcatSegment[] = (ctx.segments ?? []).map((seg) => {
+  const transitionPlans = transitionPlansOf(ctx)
+  const segments: ConcatSegment[] = (ctx.segments ?? []).map((seg, index) => {
     const base = {
       ...seg,
       // 拼接路径里逐段音频是否存在的判定在渲染侧已完成（无音轨段不能进 copy）；
@@ -207,7 +257,12 @@ function buildCompositeArgs(
     }
     // v8：启用的段按去重键拿到已分析的 .trf（同一键共享同一份）；未分配则不写 stabFile，段链退回不防抖
     if (seg.stab?.enabled !== true) return base
-    const stabFile = stabFiles.get(stabSegmentKey(seg, ctx.transparentCtx.fps))
+    // v10：转场段的合成链用扩展手柄，.trf 键必须与 planStabWork 的 detect 区间一致
+    const ext = transitionPlans?.get(index)
+    const keySeg = ext
+      ? { ...seg, sourceInSec: ext.sourceInExtSec, sourceOutSec: ext.sourceOutExtSec }
+      : seg
+    const stabFile = stabFiles.get(stabSegmentKey(keySeg, ctx.transparentCtx.fps))
     return stabFile ? { ...base, stabFile } : base
   })
   const basis = {
@@ -221,7 +276,11 @@ function buildCompositeArgs(
     audioMode,
     fpsMode: ctx.fpsMode,
     watermark: ctx.watermark,
-    audioClips: ctx.audioClips
+    audioClips: ctx.audioClips,
+    // v10：显式画布与画质档原样下传（缺省时不产生任何 argv 差异）
+    canvas,
+    quality: ctx.quality,
+    mastering: ctx.audioMastering
   }
   return ctx.directPipe
     ? buildOverlayMp4MultiInputDirectPipe({ ...basis, frameFormat: ctx.frameFormat }, encoder)
@@ -337,15 +396,27 @@ export async function runOverlayMp4(ctx: OverlayRunCtx): Promise<'done' | 'cance
    * 无音轨（audioCodec === null）不算转码，不提示；v2 拼接路径重编码同理。
    */
   // v3：混音段同样要求多输入（否则会把带过滤器的音频流当 copy 直通，见 buildCompositeArgs）
+  // v10：显式画布也强制多输入（与 buildCompositeArgs 同口径），音频随之重编码
   const multi =
+    (ctx.canvas !== undefined && (ctx.segments?.length ?? 0) > 0) ||
     segmentsNeedMultiInput(ctx.segments) ||
     ((ctx.audioClips?.length ?? 0) > 0 && (ctx.segments?.length ?? 0) > 0)
-  const audio = effectiveAudioMode(ctx.audioMode, multi)
+  const audio = effectiveAudioMode(ctx.audioMode, multi, ctx.audioMastering)
   if (audio !== ctx.audioMode) {
-    ctx.state.notices.push('媒体轨含多段/剪裁：音频随基座一并重编码为 AAC 192k。')
+    ctx.state.notices.push(
+      ctx.audioMastering === 'social' || ctx.audioMastering === 'broadcast'
+        ? '响度标准化：音频转为 AAC 192k。'
+        : '媒体轨含多段/剪裁：音频随基座一并重编码为 AAC 192k。'
+    )
     ctx.onTick()
   }
-  if (audio === 'aac' && ctx.refMeta.audioCodec !== null && multi === false) {
+  if (
+    audio === 'aac' &&
+    ctx.refMeta.audioCodec !== null &&
+    multi === false &&
+    // 响度已经单独提示过；这里只解释「原音轨本身不能 copy」
+    !(ctx.audioMastering === 'social' || ctx.audioMastering === 'broadcast')
+  ) {
     ctx.state.notices.push(`音频已转码为 AAC 192k（原音轨 ${ctx.refMeta.audioCodec} 不能直接复制）。`)
     ctx.onTick()
   }

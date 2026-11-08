@@ -866,3 +866,58 @@ describe('Timeline v3 多轨', () => {
     expect(mediaClip('a').trackId).toBe(newTrackId)
   })
 })
+
+/** v10：切点转场标记（合法才出现；点击选中右侧片段且不跳转）。 */
+describe('v10 转场标记', () => {
+  function seedMarker(options: { bStart: number; transitionOn: 'a' | 'b' }): void {
+    seedTools()
+    const project = useProjectStore.getState().project
+    const transition = { type: 'dissolve' as const, durationSec: 0.5 }
+    const a = {
+      ...mediaClip('a'),
+      ...(options.transitionOn === 'a' ? { transitionIn: transition } : {})
+    }
+    const b = {
+      ...mediaClip('b'),
+      timelineStartSec: options.bStart,
+      timelineEndSec: options.bStart + 2,
+      sourceInSec: 2,
+      sourceOutSec: 4,
+      ...(options.transitionOn === 'b' ? { transitionIn: transition } : {})
+    }
+    useProjectStore.setState({
+      project: { ...project, mediaClips: [a, b] },
+      selectedMediaClipId: null,
+      selectionKind: 'subtitle'
+    })
+  }
+
+  it('合法转场在切点画出标记（类型 + 时长），点击选中右侧片段且不跳转', () => {
+    seedMarker({ bStart: 2, transitionOn: 'b' })
+    const seekTo = vi.fn()
+    const root = renderTimeline(seekTo)
+
+    const marker = root.querySelector('.timeline__transition-marker') as HTMLButtonElement
+    expect(marker).toBeTruthy()
+    expect(marker.getAttribute('aria-label')).toBe('转场：溶解 0.5 秒')
+    expect(marker.getAttribute('title')).toContain('溶解')
+    // 标记挂在切点位置（B 起点 2s × 72px/s = 144px）
+    expect(parseFloat(marker.style.left)).toBeCloseTo(2 * PX_PER_SEC, 6)
+
+    fireEvent.click(marker)
+    expect(useProjectStore.getState().selectedMediaClipId).toBe('b')
+    expect(seekTo).not.toHaveBeenCalled()
+  })
+
+  it('前段与后段之间有空隙：不画标记', () => {
+    seedMarker({ bStart: 5, transitionOn: 'b' })
+    const root = renderTimeline(vi.fn())
+    expect(root.querySelector('.timeline__transition-marker')).toBeNull()
+  })
+
+  it('首段没有入场转场：即使数据里写了也不画标记', () => {
+    seedMarker({ bStart: 2, transitionOn: 'a' })
+    const root = renderTimeline(vi.fn())
+    expect(root.querySelector('.timeline__transition-marker')).toBeNull()
+  })
+})

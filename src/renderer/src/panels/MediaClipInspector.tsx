@@ -1,10 +1,32 @@
 import type { ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
 import { secondsToTimecode } from '@shared/timecode'
+import { durationSecToFrames, frameIntervalSec } from '@shared/fps'
+import { TRANSITION_DURATION } from '@shared/constants'
 import { MEDIA_VIDEO_RANGE, defaultMediaVideo, isDefaultMediaVideo } from '@shared/mediaClipVideo'
 import { clipAudioEdited, clipTimelineDurationSec } from '@shared/mediaClipAudio'
 import { STAB_LEVELS, stabProxyTimeOf } from '@shared/mediaStab'
-import type { ClipAudio, ClipSpeed, Fps, MediaClip, MediaClipStab, MediaClipVideo, StabLevel } from '@shared/types'
+import {
+  DEFAULT_TRANSITION_DURATION_SEC,
+  TRANSITION_MAP,
+  isTransitionAdjacent,
+  previousMediaClipOnTrack,
+  resolveTransitionDuration,
+  transitionMaxDurationSec,
+  transitionMediaMetaOf,
+  transitionsByFamily,
+  type TransitionBlockReason
+} from '@shared/transitions'
+import type {
+  ClipAudio,
+  ClipSpeed,
+  Fps,
+  MediaClip,
+  MediaClipStab,
+  MediaClipVideo,
+  StabLevel,
+  TransitionType
+} from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 import { useExportStore } from '../state/exportStore'
@@ -50,6 +72,8 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
   const resetVideo = useProjectStore((state) => state.resetMediaClipVideo)
   const updateAudio = useProjectStore((state) => state.updateMediaClipAudio)
   const updateSpeed = useProjectStore((state) => state.updateMediaClipSpeed)
+  const setTransition = useProjectStore((state) => state.setMediaClipTransition)
+  const project = useProjectStore((state) => state.project)
   const compactTimeline = useProjectStore((state) => state.compactTimeline)
   const snapTogether = useUiStore((state) => state.timelineTools.snapTogether)
   const stageInteract = useUiStore((state) => state.stageInteract)
@@ -58,6 +82,49 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
   const stab = clip.stab
   const stabOn = stab?.enabled === true
   const edited = !isDefaultMediaVideo(clip.video) || stabOn || clipAudioEdited(clip.audio, clip.speed)
+
+  // v10：入场转场——前段/空隙/手柄不足时只给原因，不渲染可写入口
+  const transitionPrev = previousMediaClipOnTrack(project.mediaClips, clip)
+  const transitionInput = {
+    prev: transitionPrev,
+    clip,
+    prevMeta: transitionMediaMetaOf(project, transitionPrev),
+    clipMeta: transitionMediaMetaOf(project, clip),
+    requestedSec: clip.transitionIn?.durationSec ?? DEFAULT_TRANSITION_DURATION_SEC,
+    fps
+  }
+  const transitionResolution = resolveTransitionDuration(transitionInput)
+  const transitionFirst = transitionPrev === null
+  const transitionHasGap = transitionPrev !== null && !isTransitionAdjacent(transitionPrev, clip, fps)
+  const transitionAvailableSec = transitionMaxDurationSec(transitionInput)
+  const transitionType = clip.transitionIn?.type
+  const transitionDurationSec = clip.transitionIn?.durationSec ?? transitionResolution.durationSec
+
+  const transitionBlockText = (reason: TransitionBlockReason): string => {
+    if (reason === 'no-tail') return TEXT.transition.noTail
+    if (reason === 'no-head') return TEXT.transition.noHead
+    if (reason === 'no-type') return TEXT.transition.noType
+    return TEXT.transition.tooShort
+  }
+
+  /** 选类型：沿用当前时长（没有时用解析出的默认值；store 会再按手柄夹一次） */
+  const chooseTransitionType = (type: TransitionType): void => {
+    setTransition(clip.id, {
+      type,
+      durationSec: clip.transitionIn?.durationSec ?? (transitionResolution.ok ? transitionResolution.durationSec : DEFAULT_TRANSITION_DURATION_SEC)
+    })
+  }
+
+  /** 改时长：先在面板侧解析（首段/空隙/手柄不足不写），再由 store 归一落盘 */
+  const changeTransitionDuration = (raw: string): void => {
+    const type = clip.transitionIn?.type
+    if (!type) return
+    const requested = Number(raw)
+    if (!Number.isFinite(requested)) return
+    const resolved = resolveTransitionDuration({ ...transitionInput, requestedSec: requested })
+    if (!resolved.ok) return
+    setTransition(clip.id, { type, durationSec: resolved.durationSec })
+  }
 
   // v8.1：防抖预览代理——当前签名与记账一致才算「已就绪」；参数一动自动回落原片。
   const mediaItem = useProjectStore((state) => state.project.media.find((m) => m.id === clip.mediaId) ?? null)
@@ -143,6 +210,69 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
             {TEXT.videoEditor.reset}
           </button>
         </div>
+      </section>
+
+      <section className="group">
+        <div className="group__head">
+          <span className="group__title">{TEXT.transition.title}</span>
+          {transitionType ? (
+            <span className="chip chip--accent">{TRANSITION_MAP[transitionType].label}</span>
+          ) : null}
+        </div>
+        {transitionFirst ? (
+          <span className="muted">{TEXT.transition.first}</span>
+        ) : transitionHasGap ? (
+          <span className="muted">{TEXT.transition.gap}</span>
+        ) : !transitionResolution.ok ? (
+          <>
+            <span className="chip chip--warn">{transitionBlockText(transitionResolution.reason)}</span>
+            <span className="muted">{TEXT.transition.insufficient(transitionAvailableSec.toFixed(2))}</span>
+          </>
+        ) : (
+          <>
+            {transitionsByFamily().map((group) => (
+              <div key={group.family} className="transition-family">
+                <div className="facet-label">{group.label}</div>
+                <div className="transition-grid" role="group" aria-label={group.label}>
+                  {group.transitions.map((meta) => (
+                    <button
+                      key={meta.type}
+                      type="button"
+                      className={`btn btn--sm${transitionType === meta.type ? ' btn--primary' : ''}`}
+                      aria-pressed={transitionType === meta.type}
+                      onClick={() => chooseTransitionType(meta.type)}
+                    >
+                      {meta.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {clip.transitionIn ? (
+              <div className="row transition-duration-row">
+                <input
+                  className="transition-duration"
+                  type="number"
+                  aria-label={TEXT.transition.duration}
+                  min={TRANSITION_DURATION.min}
+                  max={TRANSITION_DURATION.max}
+                  step={frameIntervalSec(fps)}
+                  value={transitionDurationSec}
+                  onChange={(event) => changeTransitionDuration(event.target.value)}
+                />
+                <span className="muted mono">{TEXT.transition.frames(durationSecToFrames(transitionDurationSec, fps, 0))}</span>
+                <button
+                  type="button"
+                  className="btn btn--sm btn--subtle"
+                  onClick={() => setTransition(clip.id, null)}
+                >
+                  {TEXT.transition.remove}
+                </button>
+              </div>
+            ) : null}
+          </>
+        )}
+        <span className="muted">{TEXT.transition.hint}</span>
       </section>
 
       <section className="group">

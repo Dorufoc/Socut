@@ -252,6 +252,67 @@ describe('音频片段的音频与变速编辑', () => {
   })
 })
 
+/** v10：降噪 / 角色 / ducking（全部导出生效，但控件与恢复默认同一口径） */
+describe('音频质量：降噪、BGM 角色与 ducking（v10）', () => {
+  it('降噪默认「关闭」；选标准写回 audio.denoise；回到关闭整键删除', () => {
+    const { audioClipId } = seed()
+    act(() => useProjectStore.getState().selectAudioClip(audioClipId))
+    render(<ClipInspector />)
+
+    const denoise = screen.getByLabelText(TEXT.clipAudio.denoise) as HTMLSelectElement
+    expect(denoise.value).toBe('off')
+    fireEvent.change(denoise, { target: { value: 'standard' } })
+    expect(audioOf(audioClipId).audio).toEqual({
+      volumePercent: 100,
+      fadeInSec: 0,
+      fadeOutSec: 0,
+      denoise: 'standard'
+    })
+    fireEvent.change(denoise, { target: { value: 'off' } })
+    expect('audio' in audioOf(audioClipId)).toBe(false)
+  })
+
+  it('角色：默认人声；切 BGM 落盘，切回人声删除；BGM 时出现 ducking 下拉', () => {
+    const { audioClipId } = seed()
+    act(() => useProjectStore.getState().selectAudioClip(audioClipId))
+    render(<ClipInspector />)
+
+    expect(screen.getByRole('button', { name: TEXT.audioRole.voice }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.queryByLabelText(TEXT.audioRole.ducking)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.audioRole.bgm }))
+    expect(audioOf(audioClipId).role).toBe('bgm')
+    expect(screen.getByRole('button', { name: TEXT.audioRole.bgm }).getAttribute('aria-pressed')).toBe('true')
+
+    const ducking = screen.getByLabelText(TEXT.audioRole.ducking) as HTMLSelectElement
+    expect(ducking.value).toBe('off')
+    fireEvent.change(ducking, { target: { value: 'standard' } })
+    expect(audioOf(audioClipId).ducking).toBe('standard')
+    fireEvent.change(ducking, { target: { value: 'off' } })
+    expect('ducking' in audioOf(audioClipId)).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.audioRole.voice }))
+    expect('role' in audioOf(audioClipId)).toBe(false)
+    expect(screen.queryByLabelText(TEXT.audioRole.ducking)).toBeNull()
+  })
+
+  it('角色或 ducking 也算「已编辑」；恢复默认把它们一起清掉', () => {
+    const { audioClipId } = seed()
+    act(() => useProjectStore.getState().selectAudioClip(audioClipId))
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.audioRole.bgm }))
+    fireEvent.change(screen.getByLabelText(TEXT.audioRole.ducking), { target: { value: 'strong' } })
+    expect(screen.getByText(TEXT.audioEditor.edited)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.audioEditor.reset }))
+    const cleared = audioOf(audioClipId)
+    expect('role' in cleared).toBe(false)
+    expect('ducking' in cleared).toBe(false)
+    expect(screen.queryByText(TEXT.audioEditor.edited)).toBeNull()
+  })
+})
+
 /** P5：点音频段只选中不跳转，于是音频编辑器也要有明确的「过去」入口 */
 describe('音频编辑器 · 定位到这一段（P5）', () => {
   it('播放头在本段之外时出现，点一下跳到该段中点', () => {

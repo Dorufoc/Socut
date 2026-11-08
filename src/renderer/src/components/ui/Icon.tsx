@@ -50,6 +50,14 @@ export function IconTrash({ size = 14, strokeWidth = 1.8 }: IconProps): ReactEle
   ])
 }
 
+/** 预览代理（素材库卡片上的「生成预览代理」入口）：画框 + 播放三角 */
+export function IconProxy({ size = 14, strokeWidth = 1.8 }: IconProps): ReactElement {
+  return frame(size, [
+    <rect key="frame" x="3.2" y="4.6" width="17.6" height="14.8" rx="2.4" strokeWidth={strokeWidth} />,
+    <polygon key="play" points="10,9 15.4,12 10,15" strokeWidth={strokeWidth} />
+  ])
+}
+
 /** 铅笔（素材库紧凑卡片上的「重命名」入口） */
 export function IconPencil({ size = 14, strokeWidth = 1.8 }: IconProps): ReactElement {
   return frame(size, [

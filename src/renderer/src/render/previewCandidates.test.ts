@@ -9,6 +9,7 @@ import {
   previewClipStartSourceTime,
   previewPrerollTarget,
   previewSourceTimeAt,
+  previewTransitionSourceTime,
   selectPreviewCandidates
 } from './previewCandidates'
 
@@ -112,6 +113,40 @@ describe('selectPreviewCandidates', () => {
 
     expect(selectPreviewCandidates(tracks, 2, oneTrack).map((c) => c.id)).toEqual(['b', 'a'])
   })
+
+  it('转场窗口两侧强制保留：左侧超过 hold 仍为右侧的转场候选', () => {
+    const prev = clip('prev', 0, 2, { sourceInSec: 0, sourceOutSec: 2 })
+    // 右侧 sourceIn 1s → 最大转场 1.5s，窗口到 2.75s
+    const right = clip('right', 2, 4.5, {
+      sourceInSec: 1,
+      sourceOutSec: 3.5,
+      transitionIn: { type: 'dissolve', durationSec: 1.5 }
+    })
+
+    // 2.7s：左侧已结束 0.7s，超出普通 hold 0.5s，单独选候选不会保留它
+    expect(selectPreviewCandidates([prev, right], 2.7, oneTrack).map((c) => c.id)).toEqual(['right'])
+    expect(
+      selectPreviewCandidates([prev, right], 2.7, oneTrack, { leftId: 'prev', rightId: 'right' }).map(
+        (c) => c.id
+      )
+    ).toEqual(['right', 'prev'])
+  })
+
+  it('转场两侧在切点前也一定同时挂载（右侧即使不在前瞻窗口）', () => {
+    const prev = clip('prev', 0, 2, { sourceInSec: 0, sourceOutSec: 2 })
+    const right = clip('right', 2, 4.5, {
+      sourceInSec: 1,
+      sourceOutSec: 3.5,
+      transitionIn: { type: 'dissolve', durationSec: 1.5 }
+    })
+
+    // 1.3s：右侧起点 2s 在前瞻窗口内；显式转场对必须同时保留
+    const selected = selectPreviewCandidates([prev, right], 1.3, oneTrack, [
+      { leftId: 'prev', rightId: 'right' }
+    ])
+    expect(selected.map((c) => c.id)).toEqual(['prev', 'right'])
+    expect(selected).toHaveLength(2)
+  })
 })
 
 describe('previewSourceTimeAt', () => {
@@ -131,6 +166,29 @@ describe('previewSourceTimeAt', () => {
     expect(previewSourceTimeAt(c, 13, true)).toBe(3)
     expect(previewClipStartSourceTime(c, true)).toBe(0)
     expect(previewClipStartSourceTime(c, false)).toBe(100)
+  })
+})
+
+describe('previewTransitionSourceTime（转场手柄）', () => {
+  it('片段起点前允许负本地时间（后段头部手柄），只钳最终源秒 >= 0', () => {
+    const c = clip('a', 10, 20, { sourceInSec: 5, sourceOutSec: 15 })
+
+    expect(previewTransitionSourceTime(c, 10)).toBe(5)
+    expect(previewTransitionSourceTime(c, 9.8)).toBeCloseTo(4.8, 9)
+    expect(previewTransitionSourceTime(c, 12)).toBe(7)
+    // 源秒不会小于 0：起点前的可用手柄已被 resolveTransitionDuration 限制在 sourceIn 内
+    expect(previewTransitionSourceTime(clip('early', 10, 20, { sourceInSec: 0.1 }), 9)).toBe(0)
+  })
+
+  it('倍速同样作用在手柄上（源秒 = 入点 + 负本地时间 × speed）', () => {
+    const c = clip('a', 10, 20, {
+      sourceInSec: 5,
+      sourceOutSec: 15,
+      speed: { speed: 2, maintainPitch: true }
+    })
+
+    expect(previewTransitionSourceTime(c, 10)).toBe(5)
+    expect(previewTransitionSourceTime(c, 9.8)).toBeCloseTo(4.6, 9)
   })
 })
 

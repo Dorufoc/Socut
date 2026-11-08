@@ -4,7 +4,7 @@ import path from 'node:path'
 import { CHANNELS } from '../shared/ipcChannels'
 import { APP_NAME, WINDOW_TITLE } from '../shared/constants'
 import { validateAllPresets } from '../shared/presets'
-import type { AudioPeaksRequest, AudioPeaksResult, ExportRequest, Fps, MediaStripRequest, MediaStripResult, Project, StabPreviewRequest, StabPreviewResult, VideoMeta } from '../shared/types'
+import type { AudioPeaksRequest, AudioPeaksResult, CoverExportRequest, ExportRequest, Fps, MediaProxyRequest, MediaProxyResult, MediaProxyStatusResult, MediaStripRequest, MediaStripResult, Project, StabPreviewRequest, StabPreviewResult, VideoMeta } from '../shared/types'
 import type { AppInfo, CoverCaptureRect, EstimateInput } from '../shared/api'
 import { AUTOSAVE_ENTRY_ID, RECENT_ENTRY_ID_PATTERN, recentEntryIdForPath } from '../shared/recentProjects'
 import { describeBinarySource, resolveFfmpegBinaries, userFontsDir } from './paths'
@@ -38,11 +38,13 @@ import { generateStrip, removeStripsFor } from './stripProtocol'
 import { generateAudioPeaks, removePeaksFor } from './audioPeaks'
 import { cancelCfr, convertToCfr } from './cfrTranscode'
 import { applyStabPreview, cancelStabPreview, removeStabPreviewForClip } from './stabPreview'
+import { applyMediaProxy, cancelMediaProxy, removeMediaProxy, statusMediaProxy } from './mediaProxy'
 import { smokeConfig, verifySmokeReport, writeSmokeReport } from './smoke'
 import { getGpuDiagnostics } from './gpu'
 import { getRenderSettings, getStartupPreference, saveRenderSettings } from './renderSettings'
 import type { GpuDiagnostics, RenderSettings } from '../shared/gpu'
 import { installFrameIpc } from './export/frameChannel'
+import { exportCover } from './export/cover'
 import type { SmokeReport } from '../shared/api'
 import type { ExportEngine } from './export/engine'
 
@@ -410,6 +412,31 @@ export function registerIpc(engine: ExportEngine): void {
     return generateAudioPeaks(request)
   })
 
+  /**
+   * v10：4K / MXF 预览代理：后台整片转码 720p H.264，进度/结果经 job 事件流；
+   * 命中磁盘缓存时不起子进程直接返回路径。受理失败（非视频/源不在/FFmpeg 缺失）抛错给渲染侧。
+   */
+  ipcMain.handle(CHANNELS.mediaProxy, async (event, request: MediaProxyRequest): Promise<MediaProxyResult> => {
+    if (typeof request !== 'object' || request === null) throw new Error('缺少预览代理请求参数')
+    return applyMediaProxy(request, senderWindow(event))
+  })
+
+  /** v10：代理新鲜度查询（不写盘、不起进程，只 stat 源与候选产物）。 */
+  ipcMain.handle(
+    CHANNELS.mediaProxyStatus,
+    async (_event, request: MediaProxyRequest): Promise<MediaProxyStatusResult> => {
+      if (typeof request !== 'object' || request === null) {
+        return { fresh: false, path: null, signature: '' }
+      }
+      return statusMediaProxy(request)
+    }
+  )
+
+  /** v10：素材移出池时回收它的全部代理版本（同时取消在跑作业，不留半成品）。 */
+  ipcMain.handle(CHANNELS.mediaProxyRemove, async (_event, mediaId: string): Promise<void> => {
+    if (typeof mediaId === 'string' && mediaId.length > 0) await removeMediaProxy(mediaId)
+  })
+
   ipcMain.handle(CHANNELS.videoCfrConvert, async (event, target: string, fps: Fps, meta: VideoMeta) => {
     const job = await convertToCfr(String(target), fps, meta, senderWindow(event))
     return job
@@ -458,10 +485,15 @@ export function registerIpc(engine: ExportEngine): void {
     await cancelCfr(String(jobId))
     // v8.1：防抖预览作业与导出共用取消入口（jobId 前缀 stab-，不在 engine 注册表里自然无副作用）
     await cancelStabPreview(String(jobId))
+    // v10：预览代理作业（jobId 前缀 proxy-）同一取消入口；未命中注册表时无副作用
+    await cancelMediaProxy(String(jobId))
   })
 
   // ---------------------------------------------------------------- 导出
   ipcMain.handle(CHANNELS.exportEstimate, async (_event, input: EstimateInput) => engine.estimate(input))
+
+  /** v10：封面帧 PNG（媒体层 + 透明字幕 + 水印）；不占导出队列，单次子进程。 */
+  ipcMain.handle(CHANNELS.exportCover, async (_event, request: CoverExportRequest) => exportCover(request))
 
   ipcMain.handle(CHANNELS.exportStart, async (event, request: ExportRequest) => {
     const window = senderWindow(event)

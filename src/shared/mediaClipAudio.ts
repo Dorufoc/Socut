@@ -1,4 +1,5 @@
-import type { ClipAudio, ClipSpeed } from './types'
+import { denoiseFilter } from './audioQuality'
+import type { AudioDenoiseLevel, ClipAudio, ClipSpeed } from './types'
 
 /**
  * 片段音频参数与变速的纯口径（v9，主/渲染/测试共用）。
@@ -66,14 +67,21 @@ function rate(value: number): string {
   return String(round3(value))
 }
 
+function isDenoiseLevel(value: unknown): value is AudioDenoiseLevel {
+  return value === 'light' || value === 'standard' || value === 'strong'
+}
+
 /** 任意 JSON → 合法音频参数；**全部默认时返回 undefined**（调用方据此整键删除）。 */
 export function normalizeClipAudio(raw: unknown): ClipAudio | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const record = raw as Record<string, unknown>
+  const denoise = isDenoiseLevel(record['denoise']) ? record['denoise'] : undefined
   const next: ClipAudio = {
     volumePercent: round2(clamp(num(record['volumePercent'], 100), CLIP_AUDIO_RANGE.volume.min, CLIP_AUDIO_RANGE.volume.max)),
     fadeInSec: round2(clamp(num(record['fadeInSec'], 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max)),
-    fadeOutSec: round2(clamp(num(record['fadeOutSec'], 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max))
+    fadeOutSec: round2(clamp(num(record['fadeOutSec'], 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max)),
+    // v10：降噪只在非关闭档位落盘；缺省不写进工程
+    ...(denoise ? { denoise } : {})
   }
   return isDefaultClipAudio(next) ? undefined : next
 }
@@ -94,7 +102,9 @@ export function isDefaultClipAudio(audio: ClipAudio | undefined): boolean {
   return (
     Math.abs(audio.volumePercent - 100) < 1e-6 &&
     Math.abs(audio.fadeInSec) < 1e-6 &&
-    Math.abs(audio.fadeOutSec) < 1e-6
+    Math.abs(audio.fadeOutSec) < 1e-6 &&
+    // v10：降噪非默认时整键必须落盘
+    audio.denoise === undefined
   )
 }
 
@@ -109,7 +119,8 @@ export function clipAudioOf(audio: ClipAudio | undefined): ClipAudio {
   return {
     volumePercent: round2(clamp(num(audio.volumePercent, 100), CLIP_AUDIO_RANGE.volume.min, CLIP_AUDIO_RANGE.volume.max)),
     fadeInSec: round2(clamp(num(audio.fadeInSec, 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max)),
-    fadeOutSec: round2(clamp(num(audio.fadeOutSec, 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max))
+    fadeOutSec: round2(clamp(num(audio.fadeOutSec, 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max)),
+    ...(isDenoiseLevel(audio.denoise) ? { denoise: audio.denoise } : {})
   }
 }
 
@@ -236,9 +247,9 @@ export function fadeFilters(audio: ClipAudio | undefined, outputDurationSec: num
 /**
  * 一段音频（媒体段原声或音频段）在 `asetpts=PTS-STARTPTS` 之后要挂的滤镜串。
  *
- * 顺序固定：**变速 → 音量 → 渐入 → 渐出**
- * （变速在前，渐变的秒数才等于用户在时间轴上读到的秒数；音量与淡变次序不影响结果，
- * 但固定一个顺序才能让预览与导出对得上）。
+ * 顺序固定：**降噪 → 变速 → 音量 → 渐入 → 渐出**
+ * （降噪在变速前，频域降噪面对的是源采样率/原时长；变速在前，渐变的秒数才等于用户在
+ * 时间轴上读到的秒数；音量与淡变次序不影响结果，但固定一个顺序才能让预览与导出对得上）。
  * 全部默认时返回 `''`，调用方拼接时不会多出逗号。
  */
 export function clipAudioFilterChain(input: {
@@ -246,7 +257,9 @@ export function clipAudioFilterChain(input: {
   speed?: ClipSpeed
   outputDurationSec: number
 }): string {
+  const denoise = denoiseFilter(input.audio?.denoise)
   const parts = [
+    ...(denoise ? [denoise] : []),
     ...tempoFilters(input.speed),
     ...(() => {
       const volume = volumeFilter(input.audio)

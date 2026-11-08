@@ -25,3 +25,4 @@ docs/verification/artifacts/
 .DS_Store
 Thumbs.db
 .omo/
+.trae/*

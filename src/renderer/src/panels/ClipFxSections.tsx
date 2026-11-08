@@ -7,7 +7,7 @@ import {
   clipAudioOf,
   clipSpeedOf
 } from '@shared/mediaClipAudio'
-import type { ClipAudio, ClipSpeed } from '@shared/types'
+import type { AudioDenoiseLevel, ClipAudio, ClipSpeed } from '@shared/types'
 import { Slider } from './Slider'
 
 /**
@@ -67,6 +67,27 @@ export function ClipAudioSection({ audio, durationSec, onChange }: ClipAudioSect
         title={TEXT.clipAudio.fadeOutHint}
         onChange={(value) => onChange({ fadeOutSec: value })}
       />
+      {/* v10：降噪只作用于导出（预览不要求听得出差别），所以下拉本身标注「导出生效」 */}
+      <label className="field">
+        <span className="field__label">{TEXT.clipAudio.denoise}</span>
+        <select
+          className="select"
+          aria-label={TEXT.clipAudio.denoise}
+          title={TEXT.clipAudio.denoiseHint}
+          value={resolved.denoise ?? 'off'}
+          onChange={(event) => {
+            const value = event.target.value
+            onChange({
+              denoise: value === 'off' ? undefined : (value as AudioDenoiseLevel)
+            })
+          }}
+        >
+          <option value="off">{TEXT.clipAudio.denoiseOff}</option>
+          <option value="light">{TEXT.clipAudio.denoiseLight}</option>
+          <option value="standard">{TEXT.clipAudio.denoiseStandard}</option>
+          <option value="strong">{TEXT.clipAudio.denoiseStrong}</option>
+        </select>
+      </label>
     </section>
   )
 }

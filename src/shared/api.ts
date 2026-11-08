@@ -2,6 +2,8 @@ import type {
   AudioPeaksRequest,
   AudioPeaksResult,
   CompatFlags,
+  CoverExportRequest,
+  CoverExportResult,
   ExportRequest,
   Fps,
   FontRecord,
@@ -10,6 +12,9 @@ import type {
   FrameResponse,
   JobProgress,
   JobResult,
+  MediaProxyRequest,
+  MediaProxyResult,
+  MediaProxyStatusResult,
   MediaStripRequest,
   MediaStripResult,
   Project,
@@ -310,11 +315,21 @@ export interface FocusNewsApi {
      * 并折成等分桶峰值（0..1）；无音轨 / 不可用时 `peaks` 为空数组，卡片不画频谱条。
      */
     peaks(request: AudioPeaksRequest): Promise<AudioPeaksResult>
+    /**
+     * v10：4K / MXF 预览代理（整片 720p H.264；进度/结果经 job 事件流，jobId 前缀 proxy-）。
+     * 命中磁盘缓存时 status='cached' 直接给路径、不起子进程。
+     */
+    proxy(request: MediaProxyRequest): Promise<MediaProxyResult>
+    /** v10：代理新鲜度查询（源 size/mtime 变化即失效，渲染侧据此回落原片） */
+    proxyStatus(request: MediaProxyRequest): Promise<MediaProxyStatusResult>
+    /** v10：素材移出池时回收它的全部代理版本 */
+    removeProxy(mediaId: string): Promise<void>
   }
   export: {
     estimate(input: EstimateInput): Promise<SizeEstimate>
     start(request: ExportRequest): Promise<{ jobId: string }>
     cancel(jobId: string): Promise<void>
+    cover(request: CoverExportRequest): Promise<CoverExportResult>
     /** 主进程 pull 第 N 帧（或任务结束通知） */
     onFrameRequest(handler: (message: FrameRequest | FrameEnd) => void): Unsubscribe
     /** 回传一帧 PNG 字节 */

@@ -13,9 +13,14 @@ import type { AudioClip, MediaClip, MediaItem, RenderJobSpec } from '@shared/typ
 import { usePreviewLoop } from '../hooks/usePreviewLoop'
 import { containFrameRect, displayToNative, hitTestClips } from '../render/hitTest'
 import { selectPreviewCandidates, isClipActiveAt, type PreviewCandidate } from '../render/previewCandidates'
+import {
+  previewTransitionForTrack,
+  type PreviewTransitionState
+} from '../render/previewTransition'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 import { stabSignatureFor, useStabPreviewStore } from '../state/stabPreviewStore'
+import { useProxyStore } from '../state/proxyStore'
 import { FontLoadingOverlay } from '../dialog/FontLoadingOverlay'
 import { MediaPreviewLayer, type MediaPreviewHandle } from './MediaPreviewLayer'
 import { StageTransformOverlay } from './StageTransformOverlay'
@@ -78,16 +83,20 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   const previewTime = hoverPreviewSec ?? displayTime
   const setDisplayTime = useUiStore((state) => state.setDisplayTime)
   const selectClip = useProjectStore((state) => state.selectClip)
-  const mediaClips = useProjectStore((state) => state.project.mediaClips)
-  const mediaTracks = useProjectStore((state) => state.project.mediaTracks)
-  const mediaPool = useProjectStore((state) => state.project.media)
+  const project = useProjectStore((state) => state.project)
+  const mediaClips = project.mediaClips
+  const mediaTracks = project.mediaTracks
+  const mediaPool = project.media
   // @deprecated v1 兼容：冒烟取证脚本直接写 refVideo，没有 mediaClips 时仍按旧路取源
   const legacyRefPath = useProjectStore((state) => state.project.refVideo?.path ?? null)
   const legacyHasAudio = useProjectStore((state) => state.project.refVideo?.meta.audioCodec != null)
   const watermark = useProjectStore((state) => state.project.watermark)
 
   const projectFps = useProjectStore((state) => state.project.fps)
+  const previewCanvasKind = useUiStore((state) => state.previewCanvasKind)
+  const previewFit = useUiStore((state) => state.previewFit)
   const stabApplied = useStabPreviewStore((state) => state.applied)
+  const proxyEntries = useProxyStore((state) => state.entries)
 
   /**
    * 多轨合成：轨道数组顺序 = 绘制顺序（索引 0 在最底），隐藏轨不参与画面。
@@ -103,12 +112,56 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   }, [mediaClips, mediaTracks, visibleTracks])
 
   /**
+   * 转场预览：每条可见轨道各自算一次（切点/时长/进度与导出计划同一口径）。
+   * 同一轨道同时只会有一个有效窗口；多轨可各自独立。
+   */
+  const transitionByTrack = useMemo(() => {
+    const map = new Map<string, PreviewTransitionState>()
+    const atSec = Math.max(0, previewTime)
+    for (const track of visibleTracks) {
+      const state = previewTransitionForTrack({
+        clips: visibleClips,
+        atSec,
+        project,
+        fps: projectFps,
+        trackId: track.id
+      })
+      if (state) map.set(track.id, state)
+    }
+    return map
+  }, [visibleTracks, visibleClips, project, projectFps, previewTime])
+
+  const transitionIds = useMemo(
+    () =>
+      [...transitionByTrack.values()].map((state) => ({
+        leftId: state.leftClipId,
+        rightId: state.rightClipId
+      })),
+    [transitionByTrack]
+  )
+
+  /** 转场两侧的片段不用防抖代理：代理只覆盖原源区间，看不到头/尾手柄。 */
+  const transitionClipIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const pair of transitionIds) {
+      ids.add(pair.leftId)
+      ids.add(pair.rightId)
+    }
+    return ids
+  }, [transitionIds])
+
+  /**
    * 预览候选池：当前图层 + 刚结束的兜底段 + 前瞻窗口内的下一段。
-   * 路径在这里就解析成原片/防抖代理，DOM 层只负责挂载与同步。
+   * 转场窗口内两侧强制同时挂载；路径在这里就解析成原片/防抖代理，DOM 层只负责挂载与同步。
    */
   const candidates = useMemo((): PreviewCandidate[] => {
     const out: PreviewCandidate[] = []
-    for (const clip of selectPreviewCandidates(visibleClips, Math.max(0, previewTime), trackOrder)) {
+    for (const clip of selectPreviewCandidates(
+      visibleClips,
+      Math.max(0, previewTime),
+      trackOrder,
+      transitionIds
+    )) {
       const item = mediaPool.find((media) => media.id === clip.mediaId)
       if (!item) continue
       const kind = mediaKindOf(item)
@@ -116,7 +169,8 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
       const hasAudio = typeof item.meta.audioCodec === 'string' && item.meta.audioCodec.length > 0
       let sourcePath = item.path
       let useStabProxy = false
-      if (clip.stab?.enabled) {
+      // 转场窗口要读片段头/尾手柄，防抖代理只覆盖原源区间，因此回落到原片
+      if (clip.stab?.enabled && !transitionClipIds.has(clip.id)) {
         const applied = stabApplied[clip.id]
         if (applied?.path) {
           const signature = stabSignatureFor({
@@ -131,6 +185,16 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
             useStabProxy = true
           }
         }
+      }
+      /**
+       * v10：媒体预览代理（4K / MXF）。优先级：新鲜防抖代理 > 新鲜媒体代理 > 原片。
+       * 代理是整片 1:1 转码，源坐标不需要偏移（useStabProxy 仍为 false）；
+       * 图像/音频不走代理，转场窗口也不换（手柄需要原片范围，代理同为整片所以无影响，
+       * 但保持与防抖同一保守口径）。
+       */
+      if (!useStabProxy && kind === 'video') {
+        const proxyPath = proxyEntries[item.id]
+        if (proxyPath && proxyPath.sourcePath === item.path) sourcePath = proxyPath.path
       }
       out.push({ clip, kind, hasAudio, sourcePath, useStabProxy })
     }
@@ -158,7 +222,10 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     mediaPool,
     previewTime,
     stabApplied,
+    proxyEntries,
     projectFps,
+    transitionIds,
+    transitionClipIds,
     legacyRefPath,
     legacyHasAudio
   ])
@@ -422,7 +489,10 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   return (
     <div className="stage__canvas-wrap" ref={wrapRef}>
       {/* 画面框：唯一与目标分辨率同比例的矩形，里面所有层共用同一原点与缩放比 */}
-      <div className="stage__frame" style={frameStyle}>
+      <div
+        className={`stage__frame stage__frame--${previewFit === 'cover' ? 'cover' : 'contain'}`}
+        style={frameStyle}
+      >
         {/* 每层一条可见媒体轨，按轨道升序渲染：DOM 顺序 = 合成顺序，高处轨道盖住低处 */}
         {layerGroups.map((group) => (
           <MediaPreviewLayer
@@ -431,6 +501,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
             candidates={group.candidates}
             fps={projectFps}
             audioEnabled={group.trackId === audioOwnerTrackId}
+            transition={transitionByTrack.get(group.trackId) ?? null}
             onVisibleChange={(visible) => handleVisibleChange(group.trackId, visible)}
             onAudioChange={(element, clip) => handleAudioChange(group.trackId, element, clip)}
             onFailure={handleFailure}
@@ -464,6 +535,11 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
           {spec ? (
             <span className="chip mono">
               {spec.width}×{spec.height} · {fpsToString(spec.fps)} · {MODE_LABEL[spec.aspectMode] ?? spec.aspectMode}
+            </span>
+          ) : null}
+          {previewCanvasKind ? (
+            <span className="chip chip--ok">
+              目标画布 {previewCanvasKind === 'portrait' ? '9:16' : previewCanvasKind === 'square' ? '1:1' : '16:9'}
             </span>
           ) : null}
           {mediaVisibleReady ? <span className="chip chip--ok">媒体叠加</span> : null}

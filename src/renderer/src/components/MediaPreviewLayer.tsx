@@ -9,6 +9,7 @@ import {
 import { frameIntervalSec } from '@shared/fps'
 import { clipTimelineDurationSec, previewGainAt, previewPlaybackRate, previewPreservesPitch } from '@shared/mediaClipAudio'
 import { mediaVideoFilter, mediaVideoTransform, curveTableValues, needsChannelTable } from '@shared/mediaClipVideo'
+import { transitionProgressAt } from '@shared/transitions'
 import type { Fps, MediaClip } from '@shared/types'
 import { attachPreviewAudio, setElementLevel, setPreservesPitch } from '../audio/previewAudioGraph'
 import {
@@ -18,8 +19,10 @@ import {
   previewGradeFilterId,
   previewPrerollTarget,
   previewSourceTimeAt,
+  previewTransitionSourceTime,
   type PreviewCandidate
 } from '../render/previewCandidates'
+import { transitionStyles, type PreviewTransitionState } from '../render/previewTransition'
 
 /**
  * 媒体预览层（v10）：候选池的 DOM 实现。
@@ -50,6 +53,8 @@ export interface MediaPreviewLayerProps {
   /** 当前负责出声的视频元素（null = 没有媒体原声） */
   onAudioChange?: (element: HTMLVideoElement | null, clip: MediaClip | null) => void
   onFailure?: (clipId: string) => void
+  /** 转场窗口内由 PreviewStage 计算；null / 缺省 = 当前单层行为不变 */
+  transition?: PreviewTransitionState | null
 }
 
 /** 源路径 → 协议地址；null = 已失败，不再重试。跨挂载复用，避免每次切段重发 IPC。 */
@@ -81,7 +86,7 @@ function seekVideo(video: HTMLVideoElement, target: number): void {
 
 export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLayerProps>(
   function MediaPreviewLayer(
-    { candidates, fps, audioEnabled = true, onVisibleChange, onAudioChange, onFailure },
+    { candidates, fps, audioEnabled = true, onVisibleChange, onAudioChange, onFailure, transition },
     ref
   ) {
     const [urls, setUrls] = useState<Record<string, string | null>>({})
@@ -107,6 +112,11 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     const visibleRef = useRef(false)
     const audioClipIdRef = useRef<string | null>(null)
     const audioElementRef = useRef<HTMLVideoElement | null>(null)
+    /** 转场色块（黑/白/灰）叠加层；只有转场轨道的这一层会写 opacity */
+    const flashRef = useRef<HTMLDivElement | null>(null)
+    /** 被转场命令式改过 transform/filter/zIndex 的 clipId；退出转场时按基座样式还原 */
+    const transitionStyledRef = useRef(new Set<string>())
+    const transitionRef = useRef<PreviewTransitionState | null>(transition ?? null)
 
     candidatesRef.current = candidates
     fpsRef.current = fps
@@ -114,6 +124,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     onVisibleRef.current = onVisibleChange
     onAudioRef.current = onAudioChange
     onFailureRef.current = onFailure
+    transitionRef.current = transition ?? null
 
     const pathsKey = candidates.map((candidate) => candidate.sourcePath).join('\n')
 
@@ -241,13 +252,146 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       return callback
     }
 
+    /** 转场增量 + 片段基座样式：只改 DOM style，不触发 React state。 */
+    const applyTransitionElementStyle = (
+      candidate: PreviewCandidate,
+      element: HTMLVideoElement | HTMLImageElement,
+      style: CSSProperties
+    ): void => {
+      const base = mediaStyleOf(candidate.clip)
+      const baseTransform =
+        typeof base.transform === 'string' && base.transform !== 'none' ? base.transform : ''
+      const transitionTransform =
+        typeof style.transform === 'string' && style.transform !== 'none' ? style.transform : ''
+      const baseFilter =
+        typeof base.filter === 'string' && base.filter !== 'none' ? base.filter : ''
+      const transitionFilter =
+        typeof style.filter === 'string' && style.filter !== 'none' ? style.filter : ''
+      element.style.transform = [baseTransform, transitionTransform].filter(Boolean).join(' ')
+      element.style.filter = [baseFilter, transitionFilter].filter(Boolean).join(' ')
+      element.style.zIndex = style.zIndex === undefined ? '' : String(style.zIndex)
+      element.style.opacity = String(style.opacity ?? 1)
+      transitionStyledRef.current.add(candidate.clip.id)
+    }
+
+    /** 退出转场 / 转场未就绪：把 transform/filter/zIndex 还原到片段基座。 */
+    const restoreTransitionStyles = (list: PreviewCandidate[]): void => {
+      for (const clipId of transitionStyledRef.current) {
+        const candidate = list.find((item) => item.clip.id === clipId)
+        const element = elementsRef.current.get(clipId)
+        if (!candidate || !element) {
+          transitionStyledRef.current.delete(clipId)
+          continue
+        }
+        const base = mediaStyleOf(candidate.clip)
+        element.style.transform =
+          typeof base.transform === 'string' && base.transform !== 'none' ? base.transform : ''
+        element.style.filter =
+          typeof base.filter === 'string' && base.filter !== 'none' ? base.filter : ''
+        element.style.zIndex = ''
+        transitionStyledRef.current.delete(clipId)
+      }
+      if (flashRef.current) flashRef.current.style.opacity = '0'
+    }
+
+    /**
+     * 转场窗口：两层同时可见，按族写 opacity / translate / scale / blur / 色块。
+     * 任一层还没 ready 时返回 false，交给现有单层逻辑兜底（宁可近似中断，也不黑屏）。
+     * 音频仍按切点硬切：只有切点这一侧的视频元素解除静音。
+     */
+    const applyTransition = (
+      list: PreviewCandidate[],
+      atSec: number,
+      playing: boolean,
+      halfFrame: number
+    ): boolean => {
+      const tr = transitionRef.current
+      if (!tr) return false
+      // 播放中 displayTime 每帧刷新后 transition 可能晚一拍才清空；用窗口再兜一层
+      if (atSec < tr.startSec - EPS || atSec > tr.endSec + EPS) return false
+
+      const left = list.find((candidate) => candidate.clip.id === tr.leftClipId)
+      const right = list.find((candidate) => candidate.clip.id === tr.rightClipId)
+      if (!left || !right) return false
+      const leftElement = elementsRef.current.get(left.clip.id)
+      const rightElement = elementsRef.current.get(right.clip.id)
+      if (!leftElement || !rightElement) return false
+      if (!readyRef.current.has(left.clip.id) || !readyRef.current.has(right.clip.id)) return false
+
+      const styles = transitionStyles(
+        tr.type,
+        transitionProgressAt(atSec, tr.cutSec, tr.durationSec)
+      )
+      applyTransitionElementStyle(left, leftElement, styles.left)
+      applyTransitionElementStyle(right, rightElement, styles.right)
+      if (flashRef.current) {
+        flashRef.current.style.background = styles.flash?.color ?? '#000'
+        flashRef.current.style.opacity = String(styles.flash?.opacity ?? 0)
+      }
+      publishVisible(true)
+
+      // 硬切只在切点选一侧：切点前左侧出声、切点后右侧出声；另一侧始终静音。
+      const audioSide = atSec < tr.cutSec ? left : right
+      const audioCandidate =
+        audioEnabledRef.current && audioSide.kind === 'video' && audioSide.hasAudio
+          ? audioSide
+          : null
+      const audioElement = audioCandidate
+        ? ((elementsRef.current.get(audioCandidate.clip.id) as HTMLVideoElement | undefined) ?? null)
+        : null
+      publishAudio(audioElement, audioCandidate?.clip ?? null)
+
+      for (const candidate of [left, right]) {
+        const element = elementsRef.current.get(candidate.clip.id)
+        if (!element || !(element instanceof HTMLVideoElement)) continue
+        const rate = previewPlaybackRate(candidate.clip.speed)
+        if (Math.abs(element.playbackRate - rate) > 1e-3) {
+          element.playbackRate = rate
+          element.defaultPlaybackRate = rate
+        }
+        setPreservesPitch(element, previewPreservesPitch(candidate.clip.speed))
+
+        // 头部手柄允许 atSec 早于片段起点：用转场专用源坐标，负本地时间继续往前读。
+        const target = previewTransitionSourceTime(candidate.clip, atSec)
+        if (playing) {
+          if (element.paused) void element.play().catch(() => undefined)
+          if (Math.abs(element.currentTime - target) > PREVIEW_DRIFT_SEC) seekVideo(element, target)
+        } else {
+          element.pause()
+          if (Math.abs(element.currentTime - target) > halfFrame) seekVideo(element, target)
+        }
+
+        const audible = playing && candidate === audioCandidate
+        element.muted = !audible
+        if (audible) {
+          attachPreviewAudio(element, 0)
+          setElementLevel(
+            element,
+            previewGainAt(
+              candidate.clip.audio,
+              Math.max(0, atSec - candidate.clip.timelineStartSec),
+              clipTimelineDurationSec(candidate.clip)
+            )
+          )
+        } else {
+          setElementLevel(element, 0)
+        }
+      }
+      return true
+    }
+
     const tick = (atSec: number, playing: boolean): void => {
       const list = candidatesRef.current
       if (list.length === 0) {
+        restoreTransitionStyles(list)
         publishVisible(false)
         publishAudio(null, null)
         return
       }
+
+      const halfFrame = frameIntervalSec(fpsRef.current) / 2
+      if (applyTransition(list, atSec, playing, halfFrame)) return
+      restoreTransitionStyles(list)
 
       // 1. 该显示哪一段：上层 ready 优先；上层没就绪时回落到下层 ready；
       //    都没有就保留刚结束那一段的最后一帧（切点兜底）。
@@ -296,7 +440,6 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       publishAudio(audioElement, audioCandidate?.clip ?? null)
 
       // 3. 时间 / 倍速 / 音量
-      const halfFrame = frameIntervalSec(fpsRef.current) / 2
       for (const candidate of list) {
         const element = elementsRef.current.get(candidate.clip.id)
         if (!element || !(element instanceof HTMLVideoElement)) continue
@@ -440,6 +583,8 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
             />
           )
         })}
+        {/* 转场色块（黑/白/灰）：在媒体层之上、字幕 Canvas 之下（z-index 见 styles.css） */}
+        <div className="stage__transition-flash" ref={flashRef} aria-hidden="true" />
       </>
     )
   }

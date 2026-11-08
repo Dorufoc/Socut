@@ -1,6 +1,6 @@
 import { create } from 'zustand'
-import { DEFAULT_FPS, DEFAULT_RESOLUTION, MAX_TRACK_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
-import { applyClipStyleToAll, createClip, createId, duplicateClip, normalizeProject, splitSubtitleClipAt } from '@shared/projectSchema'
+import { DEFAULT_FPS, DEFAULT_RESOLUTION, MAX_TRACK_SEC, MEDIA_BIN_MAX_COUNT, MEDIA_BIN_NAME_MAX_LENGTH, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
+import { applyClipStyleToAll, createClip, createId, duplicateClip, normalizeMediaTags, normalizeProject, normalizeTransition, splitSubtitleClipAt } from '@shared/projectSchema'
 import { frameIntervalSec, snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
 import { compactMediaClips, splitMediaClipAt } from '@shared/mediaClips'
 import { clampMoveToGap, clampTrimEnd, clampTrimStart, firstFreeStart, gapAround, type TimelineSpan } from '@shared/clipCollision'
@@ -8,12 +8,17 @@ import { resolveTargetAt, findSelectedRef, type TargetRef, type TimelineSelectio
 import { useStabPreviewStore } from './stabPreviewStore'
 import type {
   AudioClip,
+  AudioDuckingLevel,
+  AudioMastering,
+  AudioRole,
   ClipAudio,
   ClipSpeed,
   FontRecord,
   Fps,
+  MediaBin,
   MediaClip,
   MediaClipStab,
+  MediaClipTransition,
   MediaClipVideo,
   MediaItem,
   PresetId,
@@ -28,6 +33,12 @@ import { clipWithPresetDefaults, hasKeys } from '@shared/clipStyle'
 import { defaultMediaVideo, normalizeMediaVideo } from '@shared/mediaClipVideo'
 import { defaultMediaStab, normalizeMediaStab } from '@shared/mediaStab'
 import { defaultClipAudio, defaultClipSpeed, normalizeClipAudio, normalizeClipSpeed, speedValueOf } from '@shared/mediaClipAudio'
+import {
+  cleanupInvalidTransitions,
+  previousMediaClipOnTrack,
+  resolveTransitionDuration,
+  transitionMediaMetaOf
+} from '@shared/transitions'
 import { IMAGE_STILL_SEC, applyAudioClipSpeed, inferMediaKind, makeAudioClip, moveAudioClip as applyMoveAudioClip, sortAudioClips, splitAudioClipAt, trimAudioClip as applyTrimAudioClip } from '@shared/audioClips'
 import {
   addAudioTrack as appendAudioTrack,
@@ -126,6 +137,18 @@ export interface ProjectState {
   ackMediaHdr: (mediaId: string, value: boolean) => void
   setMediaThumb: (mediaId: string, thumbnailUrl: string) => void
 
+  // ---------------------------------------------------------------- v10 素材分组与标签
+  /** 新建分组（名称 trim/限长；为空或已达上限返回 null），返回分组 id。 */
+  addMediaBin: (name: string) => string | null
+  /** 重命名分组（空名或分组不存在时忽略）。 */
+  renameMediaBin: (id: string, name: string) => void
+  /** 删除分组：分组消失，组内素材回到未分组（素材与时间轴引用都不动）。 */
+  removeMediaBin: (id: string) => void
+  /** 把素材归入分组（null/undefined = 未分组；指向不存在的分组时忽略）。 */
+  assignMediaBin: (mediaId: string, binId: string | null | undefined) => void
+  /** 写回素材标签（trim/丢空/去重/限长/限量；空数组删除 tags 键）。 */
+  setMediaTags: (mediaId: string, tags: string[]) => void
+
   // ---------------------------------------------------------------- 水印
   /** 写入 / 替换水印设置（导入成功后调用）；传 null 等于移除，工程回到无水印形态。 */
   setWatermark: (settings: WatermarkSettings | null) => void
@@ -176,6 +199,13 @@ export interface ProjectState {
   /** 写回媒体段的防抖参数（patch 为增量；全部默认时整键删除） */
   updateMediaClipStab: (id: string, patch: Partial<MediaClipStab>) => void
 
+  // ---------------------------------------------------------------- v10 转场
+  /**
+   * 设置 / 移除本段的入场转场（落在切点右侧片段上）。
+   * 类型/时长走 schema 归一与手柄解析；首段、空隙、手柄不足时不写入无效数据。
+   */
+  setMediaClipTransition: (id: string, transition: MediaClipTransition | null) => void
+
   // ---------------------------------------------------------------- v9 音频与变速
   /** 写回媒体段原声的音量/渐入渐出（patch 为增量；全默认整键删除） */
   updateMediaClipAudio: (id: string, patch: Partial<ClipAudio>) => void
@@ -188,8 +218,16 @@ export interface ProjectState {
   updateAudioClipAudio: (id: string, patch: Partial<ClipAudio>) => void
   /** 写回音频段变速（同上：源窗口不动，时间轴长度伸缩） */
   updateAudioClipSpeed: (id: string, patch: Partial<ClipSpeed>) => void
-  /** 本条音频的音量/渐变/变速全部回到默认（时间轴长度回到源窗口长度） */
+  /** v10：写回音频段角色（voice = 默认，不落盘；bgm 落盘） */
+  updateAudioClipRole: (id: string, role: AudioRole) => void
+  /** v10：写回音频段 BGM 自动压低档位（undefined = 关闭，不落盘） */
+  updateAudioClipDucking: (id: string, level: AudioDuckingLevel | undefined) => void
+  /** 本条音频的音量/渐变/变速/角色/ducking 全部回到默认（时间轴长度回到源窗口长度） */
   resetAudioClipFx: (id: string) => void
+
+  // ---------------------------------------------------------------- v10 音频质量
+  /** 工程级响度标准化：social/broadcast 落盘，off/undefined 删除键；单次写入推一次 revision */
+  setAudioMastering: (mastering: AudioMastering | undefined) => void
 
   // ---------------------------------------------------------------- v7 音频轨
   selectAudioClip: (id: string | null) => void
@@ -297,6 +335,11 @@ function normalizeImportedMedia(item: MediaItem): MediaItem {
   const kind = item.kind ?? inferMediaKind(item.path, item.meta)
   const meta = kind === 'image' && !(item.meta.durationSec > 0) ? { ...item.meta, durationSec: IMAGE_STILL_SEC } : item.meta
   return { ...item, meta, ...(kind !== 'video' ? { kind } : {}) }
+}
+
+/** v10：分组名校验（与 schema 归一同一口径：trim → 限长 → 再去尾空白）。 */
+function normalizeBinName(name: string): string {
+  return name.trim().slice(0, MEDIA_BIN_NAME_MAX_LENGTH).trim()
 }
 
 /** v7：音频轨写入口（按时间排序；空轨道时删掉整个键，保持 JSON 干净） */
@@ -637,8 +680,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       !removeClips || !state.project.mediaClips.some((c) => c.id === state.selectedMediaClipId && c.mediaId === mediaId)
         ? state.selectedMediaClipId
         : (mediaClips[0]?.id ?? null)
+    const nextProject = withMediaClips({ ...state.project, media }, mediaClips)
     set({
-      project: withMediaClips({ ...state.project, media }, mediaClips),
+      // removeClips=false 是「重新定位」的临时态：片段还在但素材暂时不在池里，
+      // 此时不做手柄清理，避免把有效转场误删。
+      project: removeClips ? cleanupInvalidTransitions(nextProject, state.project.fps) : nextProject,
       selectedMediaClipId,
       revision: state.revision + 1
     })
@@ -685,6 +731,87 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setMediaThumb: (mediaId, thumbnailUrl) => {
     const state = get()
     const media = state.project.media.map((m) => (m.id === mediaId ? { ...m, thumbnailUrl } : m))
+    set({ project: { ...state.project, media }, revision: state.revision + 1 })
+  },
+
+  // ---------------------------------------------------------------- v10 素材分组与标签
+
+  addMediaBin: (name) => {
+    const state = get()
+    const trimmed = normalizeBinName(name)
+    if (trimmed.length === 0) return null
+    const bins = state.project.mediaBins ?? []
+    if (bins.length >= MEDIA_BIN_MAX_COUNT) return null
+    const bin: MediaBin = { id: createId('bin'), name: trimmed }
+    set({
+      project: { ...state.project, mediaBins: [...bins, bin] },
+      revision: state.revision + 1
+    })
+    return bin.id
+  },
+
+  renameMediaBin: (id, name) => {
+    const state = get()
+    const bins = state.project.mediaBins ?? []
+    if (!bins.some((bin) => bin.id === id)) return
+    const trimmed = normalizeBinName(name)
+    if (trimmed.length === 0) return
+    const mediaBins = bins.map((bin) => (bin.id === id ? { ...bin, name: trimmed } : bin))
+    set({ project: { ...state.project, mediaBins }, revision: state.revision + 1 })
+  },
+
+  removeMediaBin: (id) => {
+    const state = get()
+    const bins = state.project.mediaBins ?? []
+    if (!bins.some((bin) => bin.id === id)) return
+    const mediaBins = bins.filter((bin) => bin.id !== id)
+    // 只清归属，不删素材也不动时间轴片段：分组是轻量组织，不是引用关系
+    const media = state.project.media.map((item) => {
+      if (item.binId !== id) return item
+      const next: MediaItem = { ...item }
+      delete next.binId
+      return next
+    })
+    const project: Project = { ...state.project, media }
+    if (mediaBins.length > 0) project.mediaBins = mediaBins
+    else delete project.mediaBins
+    set({ project, revision: state.revision + 1 })
+  },
+
+  assignMediaBin: (mediaId, binId) => {
+    const state = get()
+    const item = state.project.media.find((m) => m.id === mediaId)
+    if (!item) return
+    // 非法分组（手改 JSON / 已被删）：忽略而不是写入悬空引用
+    if (binId && !(state.project.mediaBins ?? []).some((bin) => bin.id === binId)) return
+    const current = item.binId ?? null
+    const target = binId ?? null
+    if (current === target) return
+    const media = state.project.media.map((m) => {
+      if (m.id !== mediaId) return m
+      const next: MediaItem = { ...m }
+      if (target) next.binId = target
+      else delete next.binId
+      return next
+    })
+    set({ project: { ...state.project, media }, revision: state.revision + 1 })
+  },
+
+  setMediaTags: (mediaId, tags) => {
+    const state = get()
+    const item = state.project.media.find((m) => m.id === mediaId)
+    if (!item) return
+    // 与读盘同一套归一：trim / 丢空 / 精确去重 / 单条限长 / 上限 12 个
+    const normalized = normalizeMediaTags(tags)
+    const current = item.tags ?? []
+    if (JSON.stringify(current) === JSON.stringify(normalized ?? [])) return
+    const media = state.project.media.map((m) => {
+      if (m.id !== mediaId) return m
+      const next: MediaItem = { ...m }
+      if (normalized) next.tags = normalized
+      else delete next.tags
+      return next
+    })
     set({ project: { ...state.project, media }, revision: state.revision + 1 })
   },
 
@@ -755,7 +882,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       sourceOutSec: sourceOut
     })
     set({
-      project: withMediaClips(state.project, [...state.project.mediaClips, clip]),
+      project: cleanupInvalidTransitions(
+        withMediaClips(state.project, [...state.project.mediaClips, clip]),
+        fps
+      ),
       selectedMediaClipId: clip.id,
       revision: state.revision + 1
     })
@@ -805,7 +935,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return
     }
     set({
-      project: withMediaClips(state.project, merged),
+      project: cleanupInvalidTransitions(withMediaClips(state.project, merged), fps),
       selectedMediaClipId: id,
       revision: state.revision + 1
     })
@@ -865,9 +995,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }
     }
     set({
-      project: withMediaClips(
-        state.project,
-        state.project.mediaClips.map((c) => (c.id === id ? next : c))
+      project: cleanupInvalidTransitions(
+        withMediaClips(state.project, state.project.mediaClips.map((c) => (c.id === id ? next : c))),
+        fps
       ),
       revision: state.revision + 1
     })
@@ -884,7 +1014,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     // v8.1：片段没了，它的防抖代理账本与磁盘缓存一起回收（fire-and-forget，不阻塞删轨）
     useStabPreviewStore.getState().clearForClip(id, true)
     set({
-      project: withMediaClips(state.project, mediaClips),
+      project: cleanupInvalidTransitions(withMediaClips(state.project, mediaClips), state.project.fps),
       selectedMediaClipId,
       // 删掉了正在编辑的那条且再无媒体段：检查器退回字幕编辑器，不留一个空视频面板
       ...(removedSelected && selectedMediaClipId === null ? { selectionKind: 'subtitle' as const } : {}),
@@ -935,9 +1065,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (isTrackLocked(trackById(state.project.mediaTracks, clip.trackId))) return null
     const result = splitMediaClipAt(clip, atSec, fps, () => createId('mclip'))
     if (!result) return null
-    const mediaClips = state.project.mediaClips.filter((item) => item.id !== clip.id).concat(result.left, result.right)
+    // 转场属于「切点」而不是素材：左半保留原入场转场，右半是新的切点，不继承。
+    const right: MediaClip = { ...result.right }
+    delete right.transitionIn
+    const mediaClips = state.project.mediaClips.filter((item) => item.id !== clip.id).concat(result.left, right)
     set({
-      project: withMediaClips(state.project, mediaClips),
+      project: cleanupInvalidTransitions(withMediaClips(state.project, mediaClips), fps),
       selectedMediaClipId: result.right.id,
       // 拆完直接编辑右半段，检查器跟着切到视频视图
       selectionKind: 'media',
@@ -1021,6 +1154,65 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
   },
 
+  // ---------------------------------------------------------------- v10 转场
+
+  setMediaClipTransition: (id, transition) => {
+    const state = get()
+    const fps = state.project.fps
+    const clip = state.project.mediaClips.find((item) => item.id === id)
+    if (!clip) return
+
+    if (transition === null) {
+      if (!clip.transitionIn) return
+      const mediaClips = state.project.mediaClips.map((item) => {
+        if (item.id !== id) return item
+        const next: MediaClip = { ...item }
+        delete next.transitionIn
+        return next
+      })
+      set({
+        project: withMediaClips(state.project, mediaClips),
+        revision: state.revision + 1
+      })
+      return
+    }
+
+    // 类型 / 时长合法性统一走 schema 归一（与读盘时同一口径），无效数据直接丢弃
+    const normalized = normalizeTransition(transition, fps)
+    if (!normalized) return
+
+    const prev = previousMediaClipOnTrack(state.project.mediaClips, clip)
+    const resolution = resolveTransitionDuration({
+      prev,
+      clip,
+      prevMeta: transitionMediaMetaOf(state.project, prev),
+      clipMeta: transitionMediaMetaOf(state.project, clip),
+      requestedSec: normalized.durationSec,
+      fps
+    })
+    // 首段 / 有空隙 / 手柄不足：不写入无效数据（检查器给原因）
+    if (!resolution.ok) return
+
+    const nextTransition: MediaClipTransition = {
+      type: normalized.type,
+      durationSec: resolution.durationSec
+    }
+    if (
+      clip.transitionIn?.type === nextTransition.type &&
+      Math.abs(clip.transitionIn.durationSec - nextTransition.durationSec) < 1e-9
+    ) {
+      return
+    }
+    const mediaClips = state.project.mediaClips.map((item) =>
+      item.id === id ? { ...item, transitionIn: nextTransition } : item
+    )
+    // 同一升/降级里的相邻转场可能占用同一片段的头/尾，交给统一清理夹到半段
+    set({
+      project: cleanupInvalidTransitions(withMediaClips(state.project, mediaClips), fps),
+      revision: state.revision + 1
+    })
+  },
+
   // ---------------------------------------------------------------- v9 音频与变速
 
   updateMediaClipAudio: (id, patch) => {
@@ -1084,6 +1276,31 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
   },
 
+  updateAudioClipRole: (id, role) => {
+    const state = get()
+    const audioClips = (state.project.audioClips ?? []).map((clip) => {
+      if (clip.id !== id) return clip
+      const next: AudioClip = { ...clip }
+      // voice 是默认角色：整键删除，旧工程 JSON 形态不变
+      if (role === 'bgm') next.role = 'bgm'
+      else delete next.role
+      return next
+    })
+    set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
+  },
+
+  updateAudioClipDucking: (id, level) => {
+    const state = get()
+    const audioClips = (state.project.audioClips ?? []).map((clip) => {
+      if (clip.id !== id) return clip
+      const next: AudioClip = { ...clip }
+      if (level === 'light' || level === 'standard' || level === 'strong') next.ducking = level
+      else delete next.ducking
+      return next
+    })
+    set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
+  },
+
   resetAudioClipFx: (id) => {
     const state = get()
     const fps = state.project.fps
@@ -1091,10 +1308,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (clip.id !== id) return clip
       const cleared: AudioClip = { ...clip }
       delete cleared.audio
+      // v10：角色与 ducking 也属于“这一条的处理”，一并回到默认
+      delete cleared.role
+      delete cleared.ducking
       // 变速归位后时间轴长度要回到源窗口长度
       return applyAudioClipSpeed(cleared, undefined, fps)
     })
     set({ project: withAudioClips(state.project, audioClips), revision: state.revision + 1 })
+  },
+
+  // ---------------------------------------------------------------- v10 音频质量
+
+  setAudioMastering: (mastering) => {
+    const state = get()
+    const next: Project = { ...state.project }
+    if (mastering === 'social' || mastering === 'broadcast') next.audioMastering = mastering
+    else delete next.audioMastering
+    set({ project: next, revision: state.revision + 1 })
   },
 
   // ---------------------------------------------------------------- v7 音频轨
@@ -1409,7 +1639,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       )
     })
     if (!changed) return
-    set({ project: withMediaClips(state.project, compacted), revision: state.revision + 1 })
+    set({
+      project: cleanupInvalidTransitions(withMediaClips(state.project, compacted), state.project.fps),
+      revision: state.revision + 1
+    })
   }
 }))
 

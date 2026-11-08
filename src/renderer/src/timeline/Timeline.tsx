@@ -24,7 +24,8 @@ import { secondsToTimecode } from '@shared/timecode'
 import { TEXT } from '@shared/i18n'
 import { timelineContentEndSec } from '@shared/presetResolver'
 import { clipsOnAudioTrack, clipsOnMediaTrack, isTrackLocked } from '@shared/tracks'
-import type { AudioTrack, MediaTrack } from '@shared/types'
+import { TRANSITION_MAP, previousMediaClipOnTrack, resolveTransitionDuration, transitionMediaMetaOf } from '@shared/transitions'
+import type { AudioTrack, MediaClip, MediaTrack } from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
 import { useHistoryStore } from '../state/projectHistory'
 import { useUiStore } from '../state/uiStore'
@@ -558,6 +559,42 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     />
   )
 
+  /** v10：切点转场标记——只画解析成功的（首段/空隙/手柄不足不出现） */
+  const transitionMarkerOf = (clip: MediaClip): ReactElement | null => {
+    const transition = clip.transitionIn
+    if (!transition) return null
+    const prev = previousMediaClipOnTrack(project.mediaClips, clip)
+    const resolution = resolveTransitionDuration({
+      prev,
+      clip,
+      prevMeta: transitionMediaMetaOf(project, prev),
+      clipMeta: transitionMediaMetaOf(project, clip),
+      requestedSec: transition.durationSec,
+      fps: project.fps
+    })
+    if (!resolution.ok) return null
+    const meta = TRANSITION_MAP[transition.type]
+    const secLabel = String(Math.round(resolution.durationSec * 100) / 100)
+    return (
+      <button
+        key={`transition-${clip.id}`}
+        type="button"
+        className={`timeline__transition-marker${clip.id === selectedMediaClipId ? ' timeline__transition-marker--selected' : ''}`}
+        style={{ left: secToPx(clip.timelineStartSec, spanSec, widthPx) }}
+        aria-label={TEXT.transition.marker(meta.label, secLabel)}
+        title={`${meta.label} · ${secLabel}s`}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation()
+          selectMediaClip(clip.id)
+        }}
+      >
+        <span aria-hidden="true">◆</span>
+        {secLabel}
+      </button>
+    )
+  }
+
   return (
     <div
       className={`timeline${hoverActive ? ' timeline--hover-preview' : ''}`}
@@ -753,6 +790,7 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
                       onCommit={commitMediaDrag}
                     />
                   ))}
+                  {trackClips.map(transitionMarkerOf)}
                   {drop?.kind === 'media' && drop.trackId === track.id ? dropIndicator(drop.sec) : null}
                 </div>
               </div>

@@ -5,6 +5,7 @@ import {
   PRORES_PROFILE_4444,
   PRORES_PIX_FMT,
   buildAudioPeaksArgs,
+  buildCanvasNormalizeFilter,
   buildCfrArgs,
   buildMediaBasisFilterComplex,
   buildOverlayMp4,
@@ -29,7 +30,9 @@ import {
 import type { AudioPeaksArgsInput, ConcatSegment } from '@shared/ffmpegArgs'
 import { FPS_23_976, FPS_29_97, FPS_30 } from '@shared/constants'
 import { defaultMediaStab } from '@shared/mediaStab'
-import type { ClipAudio, ClipSpeed, MediaClipStab } from '@shared/types'
+import { defaultMediaVideo } from '@shared/mediaClipVideo'
+import { TRANSITION_MAP } from '@shared/transitions'
+import type { ClipAudio, ClipSpeed, MediaClipStab, MediaClipVideo, TransitionType } from '@shared/types'
 
 /** 夹具：一段多输入基座里的媒体段（v2/v8 两处 describe 共用，所以提到模块作用域） */
 const seg = (over: Partial<ConcatSegment> = {}): ConcatSegment => ({
@@ -263,14 +266,19 @@ describe('v2 缩略图与多输入 trim+concat argv', () => {
     expect(negative[negative.indexOf('-ss') + 1]).toBe('0.000000')
   })
 
-  it('两段拼接：逐段 trim + 平移，concat=n=2，透明层取最后一路输入', () => {
+  it('两段拼接：逐段 trim 后直接 concat（不再按时间轴平移 PTS），透明层取最后一路输入', () => {
     const fc = buildMediaBasisFilterComplex(
       basis([seg(), seg({ refVideoPath: 'D:/media/b.mp4', timelineStartSec: 4, timelineEndSec: 8, sourceInSec: 0, sourceOutSec: 4 })])
     )
     expect(fc).toContain('[0:v]trim=start=2.000000:end=6.000000')
     expect(fc).toContain('[1:v]trim=start=0.000000:end=4.000000')
-    expect(fc).toContain('[pres0]setpts=PTS+0.000000/TB[vs0]')
-    expect(fc).toContain('[pres1]setpts=PTS+4.000000/TB[vs1]')
+    // concat 自己会累加前序段时长：段链里只允许透传（null），绝不能 setpts/asetpts 再平移一次
+    expect(fc).toContain('[pres0]null[vs0]')
+    expect(fc).toContain('[pres1]null[vs1]')
+    // 音频直连 concat（`null` 只适用于视频）
+    expect(fc).toContain('[vs0][preas0][vs1][preas1]')
+    expect(fc).not.toContain('setpts=PTS+4.000000/TB')
+    expect(fc).not.toContain('asetpts=PTS+4.000000/TB')
     // 两段覆盖 0–8，span 到 10：尾部空隙自动补一段黑场+静音
     expect(fc).toContain('concat=n=3:v=1:a=1[vb][ab]')
     expect(fc).toContain('[2:v]setpts=PTS+0.000000/TB[ov]')
@@ -547,6 +555,32 @@ describe('v9 片段音频与变速 argv', () => {
     )
   })
 
+  it('音频：降噪挂在 asetpts 之后、变速之前（afftdn → atempo → volume → afade）', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis([
+        seg({
+          audio: audioOf({ denoise: 'standard', volumePercent: 120 }),
+          speed: speedOf(2)
+        })
+      ])
+    )
+    const chain = chainOf(fc, '[0:a]')
+    expect(chain).toContain(
+      'asetpts=PTS-STARTPTS,afftdn=nr=12:nf=-25,atempo=2,volume=1.2,'
+    )
+    expect(chain.indexOf('afftdn')).toBeLessThan(chain.indexOf('atempo=2'))
+    // 关闭时链里没有任何降噪（旧 argv 零差异）
+    expect(chainOf(buildMediaBasisFilterComplex(basis([seg({ audio: audioOf() })])), '[0:a]')).not.toContain('afftdn')
+  })
+
+  it('音频：只有降噪时也走 trim 链，且不动音量/淡变', () => {
+    const fc = buildMediaBasisFilterComplex(basis([seg({ audio: audioOf({ denoise: 'strong' }) })]))
+    const chain = chainOf(fc, '[0:a]')
+    expect(chain).toContain('afftdn=nr=20:nf=-20')
+    expect(chain).not.toContain('volume=')
+    expect(chain).not.toContain('afade')
+  })
+
   it('音频：关掉保持音高就走 asetrate（音高随倍速升降）', () => {
     const fc = buildMediaBasisFilterComplex(basis([seg({ speed: speedOf(2, false) })]))
     const chain = chainOf(fc, '[0:a]')
@@ -650,6 +684,192 @@ describe('segmentsNeedMultiInput（导出拓扑判定）', () => {
   })
 })
 
+/**
+ * v10 交付画布归一与画质档。
+ *
+ * 锁两条纪律：
+ * 1. 只有显式画布才注入 `scale/crop/pad`，缺省 argv 与旧版逐字节一致；
+ * 2. 画质档只改 CRF（high 恒等于旧的 18），编码器参数结构不变。
+ */
+describe('v10 画布归一与画质档 argv', () => {
+  const canvasCover = { width: 1080, height: 1920, fit: 'cover' as const }
+
+  it('buildCanvasNormalizeFilter：cover 裁切 / contain 补黑 / contain 透明补边，链尾恒 setsar=1', () => {
+    expect(buildCanvasNormalizeFilter({ ...canvasCover, transparent: false })).toBe(
+      'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1'
+    )
+    expect(buildCanvasNormalizeFilter({ width: 1080, height: 1920, fit: 'contain', transparent: false })).toBe(
+      'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1'
+    )
+    expect(buildCanvasNormalizeFilter({ width: 1080, height: 1080, fit: 'contain', transparent: true })).toBe(
+      'scale=1080:1080:force_original_aspect_ratio=decrease,pad=1080:1080:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1'
+    )
+  })
+
+  it('单轨：画布归一挂在 fps 之后、format=yuv420p 之前（cover 与 contain）', () => {
+    const cover = buildMediaBasisFilterComplex({ ...basis([seg()]), canvas: canvasCover })
+    expect(cover.split(';')[0]).toBe(
+      '[0:v]trim=start=2.000000:end=6.000000,setpts=PTS-STARTPTS,fps=30/1' +
+        ',scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1' +
+        ',format=yuv420p[pres0]'
+    )
+    const contain = buildMediaBasisFilterComplex({
+      ...basis([seg()]),
+      canvas: { width: 1080, height: 1920, fit: 'contain' }
+    })
+    expect(contain.split(';')[0]).toBe(
+      '[0:v]trim=start=2.000000:end=6.000000,setpts=PTS-STARTPTS,fps=30/1' +
+        ',scale=1080:1920:force_original_aspect_ratio=decrease' +
+        ',pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1' +
+        ',format=yuv420p[pres0]'
+    )
+  })
+
+  it('多轨：图层归一用透明补边（black@0.0），后接 format=rgba', () => {
+    const cover = buildMediaBasisFilterComplex({
+      ...basis([seg({ trackIndex: 1 })], '1'),
+      canvas: canvasCover
+    })
+    expect(cover).toContain(
+      '[0:v]trim=start=2.000000:end=6.000000,setpts=PTS-STARTPTS,fps=30/1' +
+        ',format=rgba,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[mc0_0]'
+    )
+    const contain = buildMediaBasisFilterComplex({
+      ...basis([seg({ trackIndex: 1 })], '1'),
+      canvas: { width: 1080, height: 1080, fit: 'contain' }
+    })
+    expect(contain).toContain(
+      ',format=rgba,scale=1080:1080:force_original_aspect_ratio=decrease' +
+        ',pad=1080:1080:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1[mc0_0]'
+    )
+  })
+
+  it('画质档：high/standard/small → -crf 18/23/28；缺省（undefined）保持 18', () => {
+    const withQuality = (quality?: 'high' | 'standard' | 'small'): string[] =>
+      buildOverlayMp4MultiInput({
+        ...basis([seg()]),
+        overlayPath: 'D:/tmp/o.mov',
+        ...(quality ? { quality } : {})
+      })
+    const crfOf = (args: string[]): string => args[args.indexOf('-crf') + 1]!
+    expect(crfOf(withQuality())).toBe('18')
+    expect(crfOf(withQuality('high'))).toBe('18')
+    expect(crfOf(withQuality('standard'))).toBe('23')
+    expect(crfOf(withQuality('small'))).toBe('28')
+
+    const overlayBase = {
+      refVideoPath: 'D:/videos/ref.mp4',
+      outputPath: 'D:/out/final.mp4',
+      fps: FPS_30,
+      spanStartSec: 0,
+      spanEndSec: 10,
+      audioMode: 'copy' as const,
+      fpsMode: 'cfr' as const
+    }
+    expect(crfOf(buildOverlayMp4({ ...overlayBase, overlayPath: 'C:/tmp/overlay.mov', quality: 'small' }))).toBe('28')
+    expect(crfOf(buildOverlayMp4DirectPipe({ ...overlayBase, quality: 'standard' }))).toBe('23')
+    expect(crfOf(buildOverlayMp4MultiInputDirectPipe({ ...basis([seg()]), frameFormat: 'raw', quality: 'small' }))).toBe(
+      '28'
+    )
+  })
+
+  it('零回归：不传 canvas/quality 时 argv 与旧基线逐字节一致', () => {
+    const baseline = buildOverlayMp4MultiInput({ ...basis([seg()]), overlayPath: 'D:/tmp/o.mov' })
+    expect(
+      buildOverlayMp4MultiInput({
+        ...basis([seg()]),
+        overlayPath: 'D:/tmp/o.mov',
+        canvas: undefined,
+        quality: undefined
+      })
+    ).toEqual(baseline)
+    // 单轨旧链不含任何缩放/裁切/补边
+    const fc = buildMediaBasisFilterComplex(basis([seg()]))
+    expect(fc).not.toContain('force_original_aspect_ratio')
+    expect(fc).not.toContain('crop=')
+    expect(fc).not.toContain('pad=')
+    // 多轨旧链保留原 scale+setsar+pad 字面量（连 setsar 的位置都不能变）
+    const legacy = buildMediaBasisFilterComplex(basis([seg({ trackIndex: 1 })], '1'))
+    expect(legacy).toContain(
+      ',scale=1920:1080:force_original_aspect_ratio=decrease' +
+        ',setsar=1,format=rgba,pad=1920x1080:(ow-iw)/2:(oh-ih)/2:color=black@0.0[mc0_0]'
+    )
+  })
+})
+
+describe('v10 片段画面变换/调色烧录（Task 3）', () => {
+  const videoOf = (over: Partial<MediaClipVideo> = {}): MediaClipVideo => ({
+    ...defaultMediaVideo(),
+    ...over
+  })
+  const chainOf = (fc: string, prefix: string): string =>
+    fc.split(';').find((statement) => statement.startsWith(prefix)) ?? ''
+
+  it('单轨：fx 接在画布归一之后、concat 之前（默认段链仍逐字节不变）', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis([seg({ video: videoOf({ brightness: 20 }) })])
+    )
+    expect(chainOf(fc, '[0:v]')).toBe(
+      '[0:v]trim=start=2.000000:end=6.000000,setpts=PTS-STARTPTS,fps=30/1,setsar=1[bv0]'
+    )
+    expect(chainOf(fc, '[bv0]')).toBe(
+      '[bv0]format=rgba,colorchannelmixer=rr=1.2:gg=1.2:bb=1.2:aa=1,format=yuv420p[fx0]'
+    )
+    expect(chainOf(fc, '[fx0]')).toBe('[fx0]null[vs0]')
+    // 旧标签不存在（避免两套段链同图混用）
+    expect(fc).not.toContain('[pres0]')
+    // 调色只改本段：concat/overlay 口径不变
+    expect(fc).toContain('concat=n=2:v=1:a=1[vb][ab]')
+  })
+
+  it('单轨：几何段补黑底 + overlay，最终回到 yuv420p', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis([seg({ video: videoOf({ scalePercent: 150, offsetXPercent: 20, flipH: true }) })])
+    )
+    expect(fc).toContain('[bv0]format=rgba,hflip,scale=trunc(iw*1.5/2)*2:trunc(ih*1.5/2)*2:flags=bicubic[fg]')
+    expect(fc).toContain('color=c=black:s=1920x1080:r=30/1:d=4.000000[bg]')
+    expect(fc).toContain(',format=yuv420p[fx0]')
+    // 2880x1620，居中 (-480, -270)，+20% 水平位移 +384 → x=-96
+    expect(fc).toContain('overlay=x=-96:y=-270:format=auto:eof_action=pass:shortest=0')
+  })
+
+  it('默认段（含显式传默认 video）与旧基线逐字节一致', () => {
+    const baseline = buildMediaBasisFilterComplex(basis([seg()]))
+    expect(buildMediaBasisFilterComplex(basis([seg({ video: videoOf() })]))).toBe(baseline)
+    expect(baseline.split(';')[0]).toBe(
+      '[0:v]trim=start=2.000000:end=6.000000,setpts=PTS-STARTPTS,fps=30/1,setsar=1,format=yuv420p[pres0]'
+    )
+  })
+
+  it('多轨：fx base 已归一为全帧透明层，fx 输出 rgba 后接图层合成', () => {
+    const fc = buildMediaBasisFilterComplex(
+      basis([seg({ trackIndex: 1, video: videoOf({ scalePercent: 150, offsetYPercent: 20 }) })], '1')
+    )
+    expect(fc).toContain(
+      ',scale=1920:1080:force_original_aspect_ratio=decrease' +
+        ',setsar=1,format=rgba,pad=1920x1080:(ow-iw)/2:(oh-ih)/2:color=black@0.0[bv0]'
+    )
+    expect(fc).toContain('[bv0]format=rgba,scale=trunc(iw*1.5/2)*2:trunc(ih*1.5/2)*2:flags=bicubic[fg]')
+    // 透明底 + 透明填充，fx 链尾保持 rgba（黑底留给最后的不透明合成）
+    expect(fc).toContain('color=c=black@0.0:s=1920x1080:r=30/1:d=4.000000[bg]')
+    expect(fc).toContain('format=rgba[fx0]')
+    expect(fc).toContain('[fx0][mg0]concat=n=2:v=1:a=0[ml0]')
+    expect(fc).toContain('format=yuv420p[mv]')
+  })
+
+  it('多轨 + 画布：base 先转 rgba 再做 cover 裁切', () => {
+    const fc = buildMediaBasisFilterComplex({
+      ...basis([seg({ trackIndex: 1, video: videoOf({ rotationDeg: 30 }) })], '1'),
+      canvas: { width: 1080, height: 1920, fit: 'cover' }
+    })
+    expect(fc).toContain(
+      '[0:v]trim=start=2.000000:end=6.000000,setpts=PTS-STARTPTS,fps=30/1' +
+        ',format=rgba,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[bv0]'
+    )
+    expect(fc).toContain('rotate=0.5236')
+  })
+})
+
 describe('v3 多轨图层合成', () => {
   it('按 trackIndex 从底到顶叠加，并为多轨原声补等长静音 [ab]', () => {
     const fc = buildMediaBasisFilterComplex(
@@ -703,6 +923,226 @@ describe('v3 多轨图层合成', () => {
     expect(legacy).toContain('[0:a]')
     expect(legacy).toContain('concat=n=2:v=1:a=1[vb][ab]')
     expect(legacy).not.toContain('color=c=black@0.0')
+  })
+})
+
+/**
+ * v10 转场导出（Task 7）：视频 xfade + 扩展手柄，音频独立 concat（硬切）。
+ *
+ * 夹具：两段各 1s、相邻；第二段 sourceIn=0.5 提供头部手柄，
+ * 第一段 sourceOut=1、素材 2s 提供尾部手柄。
+ */
+describe('v10 转场导出（xfade + 扩展手柄）', () => {
+  const left = (over: Partial<ConcatSegment> = {}): ConcatSegment =>
+    seg({
+      timelineStartSec: 0,
+      timelineEndSec: 1,
+      sourceInSec: 0,
+      sourceOutSec: 1,
+      sourceDurationSec: 2,
+      ...over
+    })
+  const right = (over: Partial<ConcatSegment> = {}): ConcatSegment =>
+    seg({
+      refVideoPath: 'D:/media/b.mp4',
+      timelineStartSec: 1,
+      timelineEndSec: 2,
+      sourceInSec: 0.5,
+      sourceOutSec: 1.5,
+      sourceDurationSec: 2,
+      transitionIn: { type: 'dissolve', durationSec: 0.5 },
+      ...over
+    })
+  const transitionBasis = (type: TransitionType = 'dissolve', over: Partial<ConcatSegment> = {}) => ({
+    ...basis([left(), right({ transitionIn: { type, durationSec: 0.5 }, ...over })]),
+    spanEndSec: 2
+  })
+
+  it('19 种类型全部落到对应的 xfade 原语', () => {
+    for (const meta of Object.values(TRANSITION_MAP)) {
+      const fc = buildMediaBasisFilterComplex(transitionBasis(meta.type))
+      expect(fc, `类型 ${meta.type} 未映射到 ${meta.xfade}`).toContain(`xfade=transition=${meta.xfade}`)
+    }
+  })
+
+  it('扩展 trim + xfade duration/offset；视频链 concat=v=1:a=0，音频链 concat=v=0:a=1', () => {
+    const fc = buildMediaBasisFilterComplex(transitionBasis())
+    // 尾手柄 +0.25 → 1.25；头手柄 0.5-0.25=0.25
+    expect(fc).toContain('[0:v]trim=start=0.000000:end=1.250000')
+    expect(fc).toContain('[1:v]trim=start=0.250000:end=1.500000')
+    expect(fc).toContain('xfade=transition=fade:duration=0.500000:offset=0.750000')
+    // 音频只用核心源区间（切点硬切），且与视频分别 concat
+    expect(fc).toContain('[0:a]atrim=start=0.000000:end=1.000000')
+    expect(fc).toContain('[1:a]atrim=start=0.500000:end=1.500000')
+    expect(fc).toContain('concat=n=2:v=0:a=1[ab]')
+    expect(fc).toContain('[tru0]null[vb]')
+    // 总输出仍从 0 开始、按 span 长度收口
+    expect(fc).toContain('[vb]setpts=PTS-0.000000/TB,fps=30/1[v0]')
+  })
+
+  it('无转场时与旧滤镜图逐字节一致（旧单轨 concat=v=1:a=1）', () => {
+    const make = (transitionIn: ConcatSegment['transitionIn']) =>
+      buildMediaBasisFilterComplex({
+        ...basis([left(), right({ transitionIn })]),
+        spanEndSec: 2
+      })
+    const baseline = make(undefined)
+    expect(baseline).toContain('concat=n=2:v=1:a=1[vb][ab]')
+    expect(baseline).not.toContain('xfade')
+    expect(make(undefined)).toBe(baseline)
+  })
+
+  it('硬切切点仍用 concat=v=1:a=0（同一 run 里只有部分切点有转场）', () => {
+    const fc = buildMediaBasisFilterComplex({
+      ...basis([
+        left(),
+        right({ transitionIn: undefined, timelineStartSec: 1, timelineEndSec: 2, sourceInSec: 0.5 }),
+        right({
+          refVideoPath: 'D:/media/c.mp4',
+          timelineStartSec: 2,
+          timelineEndSec: 3,
+          sourceInSec: 0.5,
+          sourceOutSec: 1.5,
+          transitionIn: { type: 'dissolve', durationSec: 0.5 }
+        })
+      ]),
+      spanEndSec: 3
+    })
+    expect(fc).toContain('[trv0][trv1]concat=n=2:v=1:a=0[trr0_1]')
+    expect(fc).toContain('[trr0_1][trv2]xfade=transition=fade:duration=0.500000:offset=1.750000')
+  })
+
+  it('多轨：该层用 rgba 扩展链做 xfade，其他层与合成顺序不变', () => {
+    const fc = buildMediaBasisFilterComplex({
+      ...basis(
+        [
+          left({ trackIndex: 0, timelineEndSec: 2, sourceInSec: 0, sourceOutSec: 2 }),
+          left({ trackIndex: 1 }),
+          right({ trackIndex: 1, transitionIn: { type: 'pushLeft', durationSec: 0.5 } })
+        ],
+        '3'
+      ),
+      spanEndSec: 2
+    })
+    expect(fc).toContain('[tmc1][tmc2]xfade=transition=coverleft')
+    expect(fc).toContain('format=rgba')
+    // 图层仍按 trackIndex 从底到顶合成
+    expect(fc.indexOf('[ml0]')).toBeLessThan(fc.indexOf('[ml1]'))
+  })
+
+  it('画布归一在 xfade 之前：每段先 cover 裁切到目标画布', () => {
+    const fc = buildMediaBasisFilterComplex({
+      ...transitionBasis('dissolve'),
+      canvas: { width: 1080, height: 1920, fit: 'cover' }
+    })
+    expect(fc).toContain(
+      '[0:v]trim=start=0.000000:end=1.250000,setpts=PTS-STARTPTS,fps=30/1' +
+        ',scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[trv0]'
+    )
+    expect(fc.indexOf('crop=1080:1920')).toBeLessThan(fc.indexOf('xfade='))
+  })
+
+  it('segmentsNeedMultiInput：只要带 transitionIn 就必须走多输入路径', () => {
+    expect(segmentsNeedMultiInput([left({ transitionIn: { type: 'dissolve', durationSec: 0.5 } })])).toBe(true)
+    expect(segmentsNeedMultiInput([left()])).toBe(false)
+  })
+})
+
+/**
+ * v10 响度标准化（Task 8）：单输入走 `-af`，多输入/无音频段在滤镜图尾部
+ * 把 `[ab]` 过一遍 loudnorm，`-map` 跟着换成 `[aout]`。
+ * 关闭时三条出口的 argv 必须与旧版逐字节一致。
+ */
+describe('v10 响度标准化 argv', () => {
+  const joined = (args: string[]): string => args.join(' ')
+
+  it('多输入、只有基座原声：在 [ab] 之后追加 loudnorm 并映射 [aout]', () => {
+    const args = buildOverlayMp4MultiInput({
+      ...basis([seg()]),
+      overlayPath: 'D:/tmp/o.mov',
+      mastering: 'social'
+    })
+    const fc = args[args.indexOf('-filter_complex') + 1] ?? ''
+    expect(fc).toContain('[ab]loudnorm=I=-14:TP=-1.5:LRA=11[aout]')
+    expect(joined(args)).toContain('-map [aout]')
+    expect(fc).not.toContain('-af')
+  })
+
+  it('多输入、有音轨：响度由混音计划施加（label 变为 aout）', () => {
+    const args = buildOverlayMp4MultiInput({
+      ...basis([seg()]),
+      overlayPath: 'D:/tmp/o.mov',
+      audioClips: [
+        {
+          path: 'D:/audio/bgm.mp3',
+          timelineStartSec: 0,
+          timelineEndSec: 4,
+          sourceInSec: 0,
+          role: 'bgm',
+          ducking: 'standard'
+        }
+      ],
+      mastering: 'broadcast'
+    })
+    const fc = args[args.indexOf('-filter_complex') + 1] ?? ''
+    expect(fc).toContain('sidechaincompress')
+    expect(fc).toContain('loudnorm=I=-23:TP=-1:LRA=7[aout]')
+    expect(joined(args)).toContain('-map [aout]')
+  })
+
+  it('单输入：mastering 打开时在 -map 0:a? 之后加 -af loudnorm，并强制 AAC', () => {
+    const args = buildOverlayMp4({
+      refVideoPath: 'D:/media/ref.mp4',
+      overlayPath: 'D:/tmp/o.mov',
+      outputPath: 'D:/out/final.mp4',
+      fps: FPS_30,
+      spanStartSec: 0,
+      spanEndSec: 1,
+      audioMode: 'copy',
+      fpsMode: 'cfr',
+      mastering: 'social'
+    })
+    const text = joined(args)
+    expect(text).toContain('-map 0:a? -af loudnorm=I=-14:TP=-1.5:LRA=11')
+    // loudnorm 不能作用在复制流上，必须重编码
+    expect(text).toContain('-c:a aac -b:a 192k')
+    expect(text).not.toContain('-c:a copy')
+  })
+
+  it('默认（off / 缺省）：三条出口都不出现 loudnorm / -af，多输入仍映射 [ab]', () => {
+    const multi = buildOverlayMp4MultiInput({ ...basis([seg()]), overlayPath: 'D:/tmp/o.mov', mastering: 'off' })
+    expect(joined(multi)).not.toContain('loudnorm')
+    expect(joined(multi)).toContain('-map [ab]')
+
+    const single = buildOverlayMp4({
+      refVideoPath: 'D:/media/ref.mp4',
+      overlayPath: 'D:/tmp/o.mov',
+      outputPath: 'D:/out/final.mp4',
+      fps: FPS_30,
+      spanStartSec: 0,
+      spanEndSec: 1,
+      audioMode: 'copy',
+      fpsMode: 'cfr'
+    })
+    expect(joined(single)).not.toContain('loudnorm')
+    expect(joined(single)).not.toContain('-af ')
+    expect(joined(single)).toContain('-c:a copy')
+  })
+
+  it('直接管道单输入同样支持 -af', () => {
+    const args = buildOverlayMp4DirectPipe({
+      refVideoPath: 'D:/media/ref.mp4',
+      outputPath: 'D:/out/final.mp4',
+      fps: FPS_30,
+      frameFormat: 'raw',
+      frameSize: { width: 1920, height: 1080 },
+      spanStartSec: 0,
+      spanEndSec: 1,
+      audioMode: 'copy',
+      fpsMode: 'cfr',
+      mastering: 'broadcast'
+    })
+    expect(joined(args)).toContain('-map 0:a? -af loudnorm=I=-23:TP=-1:LRA=7')
   })
 })
 

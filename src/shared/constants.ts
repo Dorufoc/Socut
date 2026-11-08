@@ -1,4 +1,4 @@
-import type { Fps, FontRecord, Resolution, ResolutionPreset, FpsPreset } from './types'
+import type { ExportQuality, Fps, FontRecord, Resolution, ResolutionPreset, FpsPreset } from './types'
 
 export const PROJECT_VERSION = 3
 
@@ -17,6 +17,8 @@ export const USER_DATA_DIRS = {
   strips: 'strips',
   /** v8.1：防抖预览代理（稳定化后的区间 mp4 + .trf 运动数据），按 片段+签名指纹 命名 */
   stabPreview: 'stab-preview',
+  /** v10：4K / MXF 预览代理（整片 720p H.264），按 素材+签名指纹 命名 */
+  proxies: 'proxies',
   /** 启动页工程封面（covers/<entryId>.png），由 focusnews-cover:// 协议只读提供 */
   covers: 'covers'
 } as const
@@ -184,6 +186,52 @@ export const WATERMARK_IMAGE_EXTENSIONS = [
   'tif',
   'tiff'
 ] as const
+
+// ---------------------------------------------------------------------------
+// 交付画布 / 画质 / 转场 / 音频质量 / 预览代理（v10）
+// ---------------------------------------------------------------------------
+
+/** 竖屏与方图的固定画布尺寸；横屏跟随首个可见底层素材（现有行为）。 */
+export const EXPORT_CANVAS_SIZES = {
+  portrait: { '1080': { width: 1080, height: 1920 }, '720': { width: 720, height: 1280 } },
+  square: { '1080': { width: 1080, height: 1080 }, '720': { width: 720, height: 720 } }
+} as const
+
+/** 画质档 → libx264 CRF（high 与现有默认 18 逐字节一致）。 */
+export const EXPORT_QUALITY_CRF: Record<ExportQuality, number> = { high: 18, standard: 23, small: 28 }
+
+/** 转场时长：秒为单位写盘，范围与帧下限是唯一口径。 */
+export const TRANSITION_DURATION = { min: 0.2, max: 1.5, default: 0.5, minFrames: 2 } as const
+
+/** 降噪档位 → afftdn 的 nr/nf 参数。 */
+export const AUDIO_DENOISE_PROFILES = {
+  light: { nr: 6, nf: -30 },
+  standard: { nr: 12, nf: -25 },
+  strong: { nr: 20, nf: -20 }
+} as const
+
+/** BGM 自动压低档位 → sidechaincompress 参数。 */
+export const AUDIO_DUCKING_PROFILES = {
+  light: { threshold: 0.08, ratio: 4, attack: 200, release: 400 },
+  standard: { threshold: 0.05, ratio: 8, attack: 100, release: 300 },
+  strong: { threshold: 0.03, ratio: 12, attack: 50, release: 200 }
+} as const
+
+/** 响度标准化目标（EBU R128 / loudnorm）。 */
+export const AUDIO_MASTERING_TARGETS = {
+  social: { I: -14, TP: -1.5, LRA: 11 },
+  broadcast: { I: -23, TP: -1, LRA: 7 }
+} as const
+
+/** 4K / MXF 预览代理规格（导出永远读原片）。 */
+export const MEDIA_PROXY = { maxShortSide: 720, maxLongSide: 1280, fps: 30, crf: 23, audioBitrateKbps: 128 } as const
+
+/** 素材分组与标签的存储上限（schema 归一与 UI 共用）。 */
+export const MEDIA_BIN_MAX_COUNT = 64
+export const MEDIA_BIN_ID_MAX_LENGTH = 64
+export const MEDIA_BIN_NAME_MAX_LENGTH = 32
+export const MEDIA_TAG_MAX_COUNT = 12
+export const MEDIA_TAG_MAX_LENGTH = 24
 
 // ---------------------------------------------------------------------------
 // 兼容性判定（规格 §6）

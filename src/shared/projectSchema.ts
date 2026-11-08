@@ -9,8 +9,14 @@ import {
   FONT_SCALE_MIN,
   MAX_AUDIO_TRACKS,
   MAX_MEDIA_TRACKS,
+  MEDIA_BIN_ID_MAX_LENGTH,
+  MEDIA_BIN_MAX_COUNT,
+  MEDIA_BIN_NAME_MAX_LENGTH,
+  MEDIA_TAG_MAX_COUNT,
+  MEDIA_TAG_MAX_LENGTH,
   MIN_CLIP_DURATION_SEC,
-  PROJECT_VERSION
+  PROJECT_VERSION,
+  TRANSITION_DURATION
 } from './constants'
 import { DEFAULT_PRESET_ID, PRESET_IDS } from './presets'
 import { EASING_KEYS } from './easing'
@@ -36,6 +42,8 @@ import {
 import type {
   AnimationSpec,
   AudioClip,
+  AudioDuckingLevel,
+  AudioMastering,
   AudioTrack,
   ColorTokens,
   EasingKey,
@@ -43,7 +51,9 @@ import type {
   Fps,
   GradientSpec,
   LeftTabValue,
+  MediaBin,
   MediaClip,
+  MediaClipTransition,
   MediaItem,
   MediaTrack,
   PresetId,
@@ -56,6 +66,7 @@ import type {
   SubtitleClip,
   SubtitleTrack,
   Track,
+  TransitionType,
   VideoMeta,
   WatermarkSettings
 } from './types'
@@ -294,6 +305,42 @@ function normalizeRefVideo(value: unknown): RefVideo | undefined {
   }
 }
 
+/**
+ * v10：素材分组的归一化。
+ * id/name 都做 trim 与限长；id 去重；空分组定义直接丢弃；上限 64 组。
+ * 没有任何合法分组时返回 undefined（工程 JSON 不凭空多出 mediaBins 键）。
+ */
+function normalizeMediaBins(raw: unknown): MediaBin[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const bins: MediaBin[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (bins.length >= MEDIA_BIN_MAX_COUNT) break
+    if (!isRecord(item)) continue
+    const id = typeof item['id'] === 'string' ? item['id'].trim().slice(0, MEDIA_BIN_ID_MAX_LENGTH) : ''
+    if (id.length === 0 || seen.has(id)) continue
+    const name = typeof item['name'] === 'string' ? item['name'].trim().slice(0, MEDIA_BIN_NAME_MAX_LENGTH) : ''
+    if (name.length === 0) continue
+    seen.add(id)
+    bins.push({ id, name })
+  }
+  return bins.length > 0 ? bins : undefined
+}
+
+/** v10：标签归一化：trim、丢空、按原值去重、单条限长、上限 12 个；为空返回 undefined。 */
+export function normalizeMediaTags(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const tags: string[] = []
+  for (const item of raw) {
+    if (tags.length >= MEDIA_TAG_MAX_COUNT) break
+    if (typeof item !== 'string') continue
+    const tag = item.trim().slice(0, MEDIA_TAG_MAX_LENGTH).trim()
+    if (tag.length === 0 || tags.includes(tag)) continue
+    tags.push(tag)
+  }
+  return tags.length > 0 ? tags : undefined
+}
+
 /** v2：一枚参考视频的归一化。无 path/meta 时返回 null 以免向时间轴里注入坏卡。 */
 function normalizeMediaItem(value: unknown): MediaItem | null {
   if (!isRecord(value)) return null
@@ -314,6 +361,9 @@ function normalizeMediaItem(value: unknown): MediaItem | null {
       : meta.width > 0
         ? 'video'
         : 'audio'
+  // v10：分组与标签；缺省一律不写键（旧工程 JSON 逐字节不变）
+  const binId = typeof value['binId'] === 'string' ? value['binId'].trim().slice(0, MEDIA_BIN_ID_MAX_LENGTH) : ''
+  const tags = normalizeMediaTags(value['tags'])
   return {
     id,
     path: value['path'],
@@ -330,7 +380,9 @@ function normalizeMediaItem(value: unknown): MediaItem | null {
         ? compactMode
         : 'auto',
     thumbnailUrl: typeof value['thumbnailUrl'] === 'string' ? value['thumbnailUrl'] : '',
-    importedAt: typeof value['importedAt'] === 'string' ? value['importedAt'] : new Date(0).toISOString()
+    importedAt: typeof value['importedAt'] === 'string' ? value['importedAt'] : new Date(0).toISOString(),
+    ...(binId.length > 0 ? { binId } : {}),
+    ...(tags ? { tags } : {})
   }
 }
 
@@ -438,6 +490,50 @@ function resolveTrackId(
   return tracks[0]!.id
 }
 
+/** v10：19 种成片转场（schema 只认类型，可用性判定留给 Task 5 的 transitions.ts）。 */
+const TRANSITION_TYPES: readonly TransitionType[] = [
+  'dissolve',
+  'fadeBlack',
+  'fadeWhite',
+  'lightFlash',
+  'blurH',
+  'blurV',
+  'windLeft',
+  'windRight',
+  'windUp',
+  'windDown',
+  'pushLeft',
+  'pushRight',
+  'pushUp',
+  'pushDown',
+  'pullLeft',
+  'pullRight',
+  'pullUp',
+  'pullDown',
+  'zoomIn'
+]
+
+/**
+ * v10：转场归一化（只做类型/时长/帧率合法性，不判断手柄与相邻关系）。
+ * 时长先夹到 0.2–1.5s，再吸附帧边界并夹回合法帧数；不足 2 帧视为无效，整键丢弃。
+ */
+export function normalizeTransition(raw: unknown, fps: Fps): MediaClipTransition | undefined {
+  if (!isRecord(raw)) return undefined
+  const type = raw['type']
+  if (typeof type !== 'string' || !(TRANSITION_TYPES as readonly string[]).includes(type)) return undefined
+  const rawDuration = raw['durationSec']
+  if (typeof rawDuration !== 'number' || !Number.isFinite(rawDuration)) return undefined
+  const clamped = Math.min(TRANSITION_DURATION.max, Math.max(TRANSITION_DURATION.min, rawDuration))
+  const snappedSec = snapTimeToFrame(clamped, fps)
+  const snappedFrames = durationSecToFrames(snappedSec, fps, 0)
+  if (snappedFrames < TRANSITION_DURATION.minFrames) return undefined
+  // 非整数帧率下向上吸附可能略超 1.5s，按最大帧数再夹一次，保证时长上限成立
+  const maxFrames = Math.floor((TRANSITION_DURATION.max * fps.num) / fps.den + 1e-9)
+  const frames = Math.min(snappedFrames, maxFrames)
+  if (frames < TRANSITION_DURATION.minFrames) return undefined
+  return { type: type as TransitionType, durationSec: framesToDurationSec(frames, fps) }
+}
+
 /** v2：时间轴上一段媒体。入出点写入前吸附帧边界，时长不足最短时拒收。 */
 function normalizeMediaClip(
   value: unknown,
@@ -461,6 +557,8 @@ function normalizeMediaClip(
   // v9：音频与变速（全默认 → undefined → 整键不落盘）
   const audio = normalizeClipAudio(value['audio'])
   const speed = normalizeClipSpeed(value['speed'])
+  // v10：入场转场（无效时整键丢弃）
+  const transitionIn = normalizeTransition(value['transitionIn'], fps)
   // 时长强制对齐：任何一份手工改写的 JSON 也要保证
   // `sourceOutSec - sourceInSec === (timelineEndSec - timelineStartSec) × 倍速`（1x 时即旧恒等式）
   const sOut = snapTimeToFrame(sIn + duration * speedValueOf(speed), fps)
@@ -478,8 +576,14 @@ function normalizeMediaClip(
     ...(stab ? { stab } : {}),
     // v9：音频参数 / 变速；同上，全默认时整键不存在
     ...(audio ? { audio } : {}),
-    ...(speed ? { speed } : {})
+    ...(speed ? { speed } : {}),
+    // v10：转场；无效/缺省时整键不存在
+    ...(transitionIn ? { transitionIn } : {})
   }
+}
+
+function isDuckingLevel(value: unknown): value is AudioDuckingLevel {
+  return value === 'light' || value === 'standard' || value === 'strong'
 }
 
 /** v7：音频段。与媒体段同一套时间轴口径，但只贡献声音、不参与画面合成。 */
@@ -499,6 +603,9 @@ function normalizeAudioClip(
   const trackId = resolveTrackId(value['trackId'], value['layer'], tracks, AUDIO_TRACK_ID_PREFIX)
   const audio = normalizeClipAudio(value['audio'])
   const speed = normalizeClipSpeed(value['speed'])
+  // v10：voice 是默认角色，不落盘；无效 role 同样丢弃
+  const role = value['role'] === 'bgm' ? 'bgm' : undefined
+  const ducking = isDuckingLevel(value['ducking']) ? value['ducking'] : undefined
   return {
     id,
     mediaId: value['mediaId'],
@@ -509,8 +616,15 @@ function normalizeAudioClip(
     trackId,
     // v9：与媒体段同一套音频/变速口径
     ...(audio ? { audio } : {}),
-    ...(speed ? { speed } : {})
+    ...(speed ? { speed } : {}),
+    ...(role ? { role } : {}),
+    ...(ducking ? { ducking } : {})
   }
+}
+
+/** v10：响度标准化档位；off/未知一律不落盘。 */
+function normalizeAudioMastering(value: unknown): AudioMastering | undefined {
+  return value === 'social' || value === 'broadcast' ? value : undefined
 }
 
 /**
@@ -582,10 +696,21 @@ export function normalizeProject(raw: unknown): Project | null {
         .filter((font): font is FontRecord => font !== null)
     : []
   // 旧工程：migrate() 已将 refVideo 写入 media[0] + 覆盖整段的 mediaClip；新工程直接读 media/mediaClips
+  const mediaBins = normalizeMediaBins(migrated['mediaBins'])
   const mediaRaw = Array.isArray(migrated['media']) ? migrated['media'] : []
-  const media = mediaRaw
+  let media = mediaRaw
     .map((item) => normalizeMediaItem(item))
     .filter((item): item is MediaItem => item !== null)
+  // v10：binId 必须指向存在且通过归一的 mediaBins；否则退回未分组（键删除）
+  if (media.some((item) => item.binId !== undefined)) {
+    const binIds = new Set((mediaBins ?? []).map((bin) => bin.id))
+    media = media.map((item) => {
+      if (item.binId === undefined || binIds.has(item.binId)) return item
+      const next: MediaItem = { ...item }
+      delete next.binId
+      return next
+    })
+  }
   const mediaIds = new Set(media.map((item) => item.id))
   const mediaClipsRaw = Array.isArray(migrated['mediaClips']) ? migrated['mediaClips'] : []
   const audioClipsRaw = Array.isArray(migrated['audioClips']) ? migrated['audioClips'] : []
@@ -603,6 +728,7 @@ export function normalizeProject(raw: unknown): Project | null {
     .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
   const ui = isRecord(migrated['ui']) ? normalizeUi(migrated['ui']) : undefined
   const watermark = normalizeWatermark(migrated['watermark'])
+  const audioMastering = normalizeAudioMastering(migrated['audioMastering'])
   return {
     version: PROJECT_VERSION,
     name: typeof migrated['name'] === 'string' && migrated['name'].length > 0 ? migrated['name'] : '未命名工程',
@@ -618,6 +744,9 @@ export function normalizeProject(raw: unknown): Project | null {
     // v7：没有音频段的工程不写这个键（旧工程 JSON 不变）
     ...(audioClips.length > 0 ? { audioClips } : {}),
     ...(watermark ? { watermark } : {}),
+    // v10：off/空分组不落盘（旧工程 JSON 不变）
+    ...(audioMastering ? { audioMastering } : {}),
+    ...(mediaBins ? { mediaBins } : {}),
     ...(ui ? { ui } : {})
   }
 }

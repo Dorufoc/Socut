@@ -205,5 +205,109 @@ describe('透明出口', () => {
   })
 })
 
+/**
+ * v10：BGM 自动压低与响度标准化。
+ *
+ * 锁四件事：
+ * 1. 没有 BGM 时（包括显式 role=voice）与 v7 基线逐字节一致；
+ * 2. BGM + voice：两条总线各自混，voice split 后做 sidechain，最终再 amix（绝不 normalize=1）；
+ * 3. 只有 BGM：不生成压缩链，最终就是 BGM 总线；
+ * 4. loudnorm 在最终 atrim 之后注入并返回新标签，off 时不出现。
+ */
+describe('v10 BGM ducking 与响度', () => {
+  const planOf = (clips: AudioMixClip[], mastering?: 'off' | 'social' | 'broadcast') =>
+    buildAudioMixPlan({ clips, baseIndex: 1, spanStartSec: 0, spanEndSec: 10, baseLabel: '[ab]', mastering })!
+
+  it('没有 BGM：即使显式 role=voice 也与 v7 基线逐字节一致，label 仍是 amix', () => {
+    const baseline: AudioMixPlanShape = {
+      inputArgs: ['-ss', '0.500000', '-t', '4.000000', '-i', 'C:/audio/bed.mp3'],
+      filter:
+        '[1:a]atrim=duration=4.000000,asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,adelay=delays=2000:all=1[ai0];' +
+        '[ab][ai0]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[mx];' +
+        '[mx]atrim=duration=10.000000,asetpts=PTS-STARTPTS[amix]',
+      label: 'amix'
+    }
+    expect(planOf([clip()])).toEqual(baseline)
+    expect(planOf([clip({ role: 'voice' })])).toEqual(baseline)
+  })
+
+  it('BGM + voice：voice/bgm 两条总线 + sidechaincompress + 最终 amix（normalize=0）', () => {
+    const plan = planOf([
+      clip({ role: 'bgm', ducking: 'standard' }),
+      clip({ path: 'C:/audio/voice.wav', role: 'voice' })
+    ])
+    // voice 总线 = 基座 [ab] + 非 BGM 段 ai1；bgm 总线只有 ai0
+    expect(plan.filter).toContain('[ab][ai1]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[vbus]')
+    expect(plan.filter).toContain('[vbus]asplit=2[vsc][vmix]')
+    expect(plan.filter).toContain(
+      '[ai0][vsc]sidechaincompress=threshold=0.05:ratio=8:attack=100:release=300:makeup=1[bduck]'
+    )
+    expect(plan.filter).toContain(
+      '[vmix][bduck]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[mx]'
+    )
+    expect(plan.filter).toContain('[mx]atrim=duration=10.000000,asetpts=PTS-STARTPTS[amix]')
+    expect(plan.filter).not.toContain('normalize=1')
+    expect(plan.label).toBe('amix')
+  })
+
+  it('只有 BGM（没有 voice/基座原声）：不生成压缩链，最终就是 BGM 总线', () => {
+    const plan = buildAudioMixPlan({
+      clips: [clip({ role: 'bgm', ducking: 'strong' })],
+      baseIndex: 1,
+      spanStartSec: 0,
+      spanEndSec: 10
+    })!
+    expect(plan.filter).not.toContain('sidechaincompress')
+    expect(plan.filter).not.toContain('asplit')
+    expect(plan.filter).toContain('[ai0]atrim=duration=10.000000,asetpts=PTS-STARTPTS[amix]')
+  })
+
+  it('BGM 无 ducking 时仍按两条总线普通 amix（不压缩）', () => {
+    const plan = planOf([clip({ role: 'bgm' }), clip({ path: 'C:/audio/voice.wav', role: 'voice' })])
+    expect(plan.filter).not.toContain('sidechaincompress')
+    expect(plan.filter).toContain(
+      '[vbus][ai0]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[mx]'
+    )
+  })
+
+  it('响度：social / broadcast 在最终 atrim 后注入，返回 aout；off 不出现', () => {
+    const social = planOf([clip()], 'social')
+    expect(social.filter).toContain('[amix]loudnorm=I=-14:TP=-1.5:LRA=11[aout]')
+    expect(social.label).toBe('aout')
+
+    const broadcast = planOf([clip()], 'broadcast')
+    expect(broadcast.filter).toContain('[amix]loudnorm=I=-23:TP=-1:LRA=7[aout]')
+    expect(broadcast.label).toBe('aout')
+
+    const off = planOf([clip()], 'off')
+    expect(off.filter).not.toContain('loudnorm')
+    expect(off.label).toBe('amix')
+  })
+
+  it('BGM + ducking + social：压缩链与响度可以同时存在', () => {
+    const plan = planOf([clip({ role: 'bgm', ducking: 'light' }), clip({ path: 'C:/audio/voice.wav' })], 'social')
+    expect(plan.filter).toContain('sidechaincompress')
+    expect(plan.filter).toContain('[amix]loudnorm=I=-14:TP=-1.5:LRA=11[aout]')
+    expect(plan.label).toBe('aout')
+  })
+
+  it('透明出口同样带响度（audioMastering 走 TransparentAudioOptions）', () => {
+    const args = buildTransparentMovFromPipe(FPS_30, 'C:/out/t.mov', 'raw', undefined, {
+      clips: [clip()],
+      spanStartSec: 0,
+      spanEndSec: 10,
+      mastering: 'broadcast'
+    })
+    expect(args.join(' ')).toContain('loudnorm=I=-23:TP=-1:LRA=7')
+    expect(args.join(' ')).toContain('-map [aout]')
+  })
+})
+
+interface AudioMixPlanShape {
+  inputArgs: string[]
+  filter: string
+  label: string
+}
+
 
 

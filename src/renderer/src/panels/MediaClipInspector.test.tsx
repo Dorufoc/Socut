@@ -466,6 +466,26 @@ describe('音频与变速分区（v9）', () => {
     expect(cleared.timelineEndSec).toBeCloseTo(8, 6)
   })
 
+  it('v10 降噪：默认关闭；选强档写回 audio.denoise；恢复默认整键清掉', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    const denoise = screen.getByLabelText(TEXT.clipAudio.denoise) as HTMLSelectElement
+    expect(denoise.value).toBe('off')
+    fireEvent.change(denoise, { target: { value: 'strong' } })
+    expect(clipOf(mediaClipId).audio).toEqual({
+      volumePercent: 100,
+      fadeInSec: 0,
+      fadeOutSec: 0,
+      denoise: 'strong'
+    })
+    expect(screen.getByText(TEXT.videoEditor.edited)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.videoEditor.reset }))
+    expect('audio' in clipOf(mediaClipId)).toBe(false)
+  })
+
   it('开着主轨对齐时改倍速会重新摆紧时间轴（不会留新间隙）', () => {
     const { mediaClipId } = seed()
     act(() => useUiStore.setState({ timelineTools: { ...useUiStore.getState().timelineTools, snapTogether: true } }))
@@ -645,5 +665,123 @@ describe('视频编辑器 · 定位到这一段（P5）', () => {
 
     expect(useUiStore.getState().playing).toBe(false)
     expect(seek).toHaveBeenCalledWith(4)
+  })
+})
+
+/** v10：检查器「转场（入场）」区块——可用性、类型选择、时长夹取与移除。 */
+describe('转场（入场）区块', () => {
+  const clipOf = (id: string) => useProjectStore.getState().project.mediaClips.find((clip) => clip.id === id)!
+
+  /** A[0,2] 源 0→2；B 从前段末尾起，默认源 2→4（有头部手柄）。gap 控制 B 的落点。 */
+  function seedTransition(options: { gap?: number; sourceInB?: number } = {}): void {
+    const { project } = seed()
+    const gap = options.gap ?? 0
+    const a = {
+      ...project.mediaClips[0]!,
+      id: 'a',
+      timelineStartSec: 0,
+      timelineEndSec: 2,
+      sourceInSec: 0,
+      sourceOutSec: 2
+    }
+    const b = {
+      ...project.mediaClips[0]!,
+      id: 'b',
+      timelineStartSec: 2 + gap,
+      timelineEndSec: 4 + gap,
+      sourceInSec: options.sourceInB ?? 2,
+      sourceOutSec: (options.sourceInB ?? 2) + 2
+    }
+    useProjectStore.setState({
+      project: { ...project, mediaClips: [a, b] },
+      selectedMediaClipId: 'b',
+      selectionKind: 'media'
+    })
+  }
+
+  it('首段：显示禁用原因，不渲染类型网格', () => {
+    seedTransition()
+    act(() => useProjectStore.getState().selectMediaClip('a'))
+    render(<ClipInspector />)
+
+    expect(screen.getByText(TEXT.transition.title)).toBeTruthy()
+    expect(screen.getByText(TEXT.transition.first)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '溶解' })).toBeNull()
+  })
+
+  it('有空隙：显示禁用原因，不渲染类型网格', () => {
+    seedTransition({ gap: 2 })
+    render(<ClipInspector />)
+
+    expect(screen.getByText(TEXT.transition.gap)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '溶解' })).toBeNull()
+  })
+
+  it('手柄不足：显示原因与可用时长，不渲染可写入口', () => {
+    seedTransition({ sourceInB: 0 })
+    render(<ClipInspector />)
+
+    expect(screen.getByText(TEXT.transition.noHead)).toBeTruthy()
+    expect(screen.getByText(TEXT.transition.insufficient('0.00'))).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '溶解' })).toBeNull()
+  })
+
+  it('可用：19 个类型按族分组；点类型写入并同步 aria-pressed', () => {
+    seedTransition()
+    const { container } = render(<ClipInspector />)
+
+    const groups = Array.from(container.querySelectorAll('.transition-family'))
+    expect(groups).toHaveLength(6)
+    expect(container.querySelectorAll('.transition-grid button')).toHaveLength(19)
+
+    const dissolve = screen.getByRole('button', { name: '溶解' })
+    expect(dissolve.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(dissolve)
+
+    expect(clipOf('b').transitionIn).toEqual({ type: 'dissolve', durationSec: 0.5 })
+    expect(dissolve.getAttribute('aria-pressed')).toBe('true')
+    // 分组标签与提示都在
+    expect(screen.getByText(TEXT.transition.hint)).toBeTruthy()
+  })
+
+  it('时长输入：秒为单位、帧步进；超上限夹到 1.5s、低于下限夹到 0.2s', () => {
+    seedTransition()
+    render(<ClipInspector />)
+    fireEvent.click(screen.getByRole('button', { name: '溶解' }))
+
+    const input = screen.getByLabelText(TEXT.transition.duration) as HTMLInputElement
+    expect(Number(input.getAttribute('min'))).toBe(0.2)
+    expect(Number(input.getAttribute('max'))).toBe(1.5)
+    expect(Number(input.getAttribute('step'))).toBeCloseTo(1 / 30, 9)
+
+    fireEvent.change(input, { target: { value: '2' } })
+    expect(clipOf('b').transitionIn?.durationSec).toBe(1.5)
+    fireEvent.change(input, { target: { value: '0.1' } })
+    expect(clipOf('b').transitionIn?.durationSec).toBe(0.2)
+    // 帧读数写在输入框旁边（0.2s @ 30fps = 6 帧）
+    expect(screen.getByText(TEXT.transition.frames(6))).toBeTruthy()
+  })
+
+  it('移除按钮：删掉 transitionIn 整个键', () => {
+    seedTransition()
+    render(<ClipInspector />)
+    fireEvent.click(screen.getByRole('button', { name: '溶解' }))
+    expect(clipOf('b').transitionIn).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.transition.remove }))
+
+    expect('transitionIn' in clipOf('b')).toBe(false)
+    expect(screen.queryByRole('button', { name: TEXT.transition.remove })).toBeNull()
+  })
+
+  it('当前类型在未选中时如实显示 aria-pressed', () => {
+    seedTransition()
+    act(() =>
+      useProjectStore.getState().setMediaClipTransition('b', { type: 'pushLeft', durationSec: 0.5 })
+    )
+    render(<ClipInspector />)
+
+    expect(screen.getByRole('button', { name: '推入左侧' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: '溶解' }).getAttribute('aria-pressed')).toBe('false')
   })
 })

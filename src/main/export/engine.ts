@@ -214,6 +214,7 @@ export class ExportEngine {
         outputPath: transparentOutput,
         codec,
         frameFormat: spec.frameFormat,
+        audioMastering: request.audioMastering,
         isCancelled: () => state.cancelRequested,
         onTick: emit
       }
@@ -228,7 +229,8 @@ export class ExportEngine {
           ? {
               clips: request.audioClips ?? [],
               spanStartSec: frameTimeSec(spec.startFrame, spec.fps),
-              spanEndSec: frameTimeSec(spec.startFrame + framesTotal, spec.fps)
+              spanEndSec: frameTimeSec(spec.startFrame + framesTotal, spec.fps),
+              ...(request.audioMastering ? { mastering: request.audioMastering } : {})
             }
           : undefined
 
@@ -347,6 +349,10 @@ export class ExportEngine {
         watermark: watermarkInputOf(overlay.watermark),
         // v7：音频轨；有它就与参考视频原声 amix（渲染侧已按 span 裁剪）
         audioClips: request.audioClips,
+        // v10：目标画布与画质档（缺省 = 旧行为，argv 逐字节不变）
+        canvas: overlay.canvas,
+        quality: overlay.quality,
+        audioMastering: request.audioMastering,
         // v8：防抖 .trf 落盘与 detect/合成 ffmpeg 的 cwd
         workspaceDir: workspace.dir,
         isCancelled: () => state.cancelRequested,

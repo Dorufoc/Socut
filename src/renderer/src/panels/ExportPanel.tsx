@@ -1,17 +1,76 @@
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { DEFAULT_FPS, fpsToString } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
 import { formatBytes } from '@shared/sizeEstimate'
-import type { ExportKind, RenderJobSpec, SizeEstimate, TransparentCodec } from '@shared/types'
-import { useExportJob } from '../hooks/useExportJob'
+import type {
+  AudioMastering,
+  ExportCanvasKind,
+  ExportCanvasSelection,
+  ExportFit,
+  ExportKind,
+  ExportQuality,
+  ExportResolutionTier,
+  JobPhase,
+  RenderJobSpec,
+  SizeEstimate,
+  TransparentCodec
+} from '@shared/types'
+import { overlayCanvasFor, useExportJob } from '../hooks/useExportJob'
+import { useCoverExport } from '../hooks/useCoverExport'
+import { useExportStore } from '../state/exportStore'
 import { useProjectStore } from '../state/projectStore'
 import { gateBlocked, useUiStore } from '../state/uiStore'
 import { Expander } from '../components/ui/Expander'
 import { InfoBar } from '../components/ui/InfoBar'
 
-/** 导出面板（规格 §2.3 / §3.1）。叠加导出的分辨率/帧率只读显示为「跟随参考视频」。 */
+/** 导出面板（规格 §2.3 / §3.1 / v10 多画布）。叠加 MP4 支持画布多选与批量。 */
 
 const LAST_DIR_KEY = 'focusnews.lastOutputDir'
+const CANVAS_ORDER: ExportCanvasKind[] = ['landscape', 'portrait', 'square']
+const CANVAS_LABELS: Record<ExportCanvasKind, string> = {
+  landscape: '横屏 16:9',
+  portrait: '竖屏 9:16',
+  square: '方形 1:1'
+}
+const PREVIEW_LABELS: Record<ExportCanvasKind, string> = {
+  landscape: '16:9',
+  portrait: '9:16',
+  square: '1:1'
+}
+const TERMINAL: JobPhase[] = ['done', 'failed', 'cancelled']
+type StatusPhase = JobPhase | 'pending'
+const STATUS_LABELS: Record<StatusPhase, string> = {
+  pending: '待开始',
+  queued: TEXT.export.queued,
+  preparing: TEXT.export.preparing,
+  rendering: TEXT.export.rendering,
+  muxing: TEXT.export.muxing,
+  verifying: TEXT.export.verifying,
+  done: TEXT.export.done,
+  failed: TEXT.export.failed,
+  cancelled: TEXT.export.cancelled
+}
+
+interface VersionStatus {
+  key: ExportCanvasKind
+  label: string
+  phase: StatusPhase
+}
+
+function waitForTerminal(jobId: string): Promise<JobPhase> {
+  return new Promise((resolve) => {
+    let unsubscribe = (): void => undefined
+    const check = (): void => {
+      const job = useExportStore.getState().jobs[jobId]
+      if (job && TERMINAL.includes(job.phase)) {
+        unsubscribe()
+        resolve(job.phase)
+      }
+    }
+    unsubscribe = useExportStore.subscribe(check)
+    check()
+  })
+}
 
 export interface ExportPanelProps {
   spec: RenderJobSpec | null
@@ -21,10 +80,17 @@ export interface ExportPanelProps {
 
 export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelProps): ReactElement {
   const project = useProjectStore((state) => state.project)
+  const setAudioMastering = useProjectStore((state) => state.setAudioMastering)
+  const mastering = project.audioMastering ?? 'off'
   const exportScope = useUiStore((state) => state.exportScope)
   const setExportScope = useUiStore((state) => state.setExportScope)
   const setNotice = useUiStore((state) => state.setNotice)
-  const { start } = useExportJob()
+  const previewCanvasKind = useUiStore((state) => state.previewCanvasKind)
+  const previewFit = useUiStore((state) => state.previewFit)
+  const setPreviewCanvas = useUiStore((state) => state.setPreviewCanvas)
+  const setPreviewFit = useUiStore((state) => state.setPreviewFit)
+  const { start, cancel } = useExportJob()
+  const { exportCover, busy: coverBusy } = useCoverExport()
 
   const [outputDir, setOutputDir] = useState<string>('')
   const [frameDelivery, setFrameDelivery] = useState<'pipe' | 'pngSequence'>('pipe')
@@ -36,6 +102,35 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
    * 只在「磁盘不足」或「span > 5 分钟」这两种中间 MOV 真的成问题时才允许勾选。
    */
   const [directPipe, setDirectPipe] = useState(false)
+
+  const [canvasChecked, setCanvasChecked] = useState<Record<ExportCanvasKind, boolean>>({
+    landscape: true,
+    portrait: false,
+    square: false
+  })
+  const [canvasTier, setCanvasTier] = useState<Record<'portrait' | 'square', ExportResolutionTier>>({
+    portrait: '1080',
+    square: '1080'
+  })
+  const [canvasFit, setCanvasFit] = useState<Record<'portrait' | 'square', ExportFit>>({
+    portrait: 'cover',
+    square: 'cover'
+  })
+  const [quality, setQuality] = useState<ExportQuality>('high')
+  const [batchRunning, setBatchRunning] = useState(false)
+  const [statuses, setStatuses] = useState<VersionStatus[]>([])
+  const cancelledRef = useRef<{ value: boolean }>({ value: false })
+  const currentJobIdRef = useRef<string | null>(null)
+
+  const selections = useMemo(
+    (): ExportCanvasSelection[] =>
+      CANVAS_ORDER.filter((kind) => canvasChecked[kind]).map((kind) =>
+        kind === 'landscape'
+          ? { kind, fit: 'contain' }
+          : { kind, tier: canvasTier[kind], fit: canvasFit[kind] }
+      ),
+    [canvasChecked, canvasTier, canvasFit]
+  )
 
   const frames = spec ? Math.max(0, spec.endFrame - spec.startFrame) : 0
   const missingMediaIds = useUiStore((state) => state.missingMediaIds)
@@ -106,6 +201,92 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
       setNotice(error instanceof Error ? error.message : String(error))
     }
   }
+
+  const setStatusPhase = (index: number, phase: StatusPhase): void => {
+    setStatuses((previous) =>
+      previous.map((status, itemIndex) => (itemIndex === index ? { ...status, phase } : status))
+    )
+  }
+
+  const markRemainingCancelled = (from: number): void => {
+    setStatuses((previous) =>
+      previous.map((status, index) => (index >= from ? { ...status, phase: 'cancelled' } : status))
+    )
+  }
+
+  const runOverlay = async (): Promise<void> => {
+    if (batchRunning || selections.length === 0) return
+    const cancelled = { value: false }
+    cancelledRef.current = cancelled
+    setBatchRunning(true)
+    setStatuses(
+      selections.map((selection) => ({
+        key: selection.kind,
+        label: CANVAS_LABELS[selection.kind],
+        phase: 'pending'
+      }))
+    )
+    try {
+      for (const [index, selection] of selections.entries()) {
+        if (cancelled.value) {
+          markRemainingCancelled(index)
+          break
+        }
+        const target = overlayCanvasFor(project, selection)
+        if (!target) {
+          setStatusPhase(index, 'failed')
+          setNotice('叠加导出需要先把素材放入媒体轨')
+          continue
+        }
+        const baseName = `${project.name || 'focusnews'}-overlayMp4-${target.canvas.suffix}-${target.canvas.width}x${target.canvas.height}-${fpsToString(target.fps)}`
+        try {
+          const jobId = await start({
+            kind: 'overlayMp4',
+            outputDir,
+            fileName: `${baseName}.mp4`,
+            frameDelivery,
+            pipeTransport,
+            codec,
+            directPipe: directPipe && directPipeAllowed,
+            // 横屏 contain 与旧行为等价：不传画布，保留「跟随素材 + 工程分支」的旧口径
+            ...(selection.kind === 'landscape' ? {} : { canvas: selection }),
+            quality
+          })
+          currentJobIdRef.current = jobId
+          const phase = await waitForTerminal(jobId)
+          currentJobIdRef.current = null
+          setStatusPhase(index, phase)
+          if (phase === 'failed' || phase === 'cancelled') {
+            setNotice(`${CANVAS_LABELS[selection.kind]}导出${phase === 'failed' ? '失败' : '已取消'}`)
+          }
+        } catch (error) {
+          currentJobIdRef.current = null
+          setStatusPhase(index, 'failed')
+          setNotice(error instanceof Error ? error.message : String(error))
+        }
+        if (cancelled.value) {
+          markRemainingCancelled(index + 1)
+          break
+        }
+      }
+      localStorage.setItem(LAST_DIR_KEY, outputDir)
+    } finally {
+      setBatchRunning(false)
+      currentJobIdRef.current = null
+    }
+  }
+
+  const cancelBatch = async (): Promise<void> => {
+    cancelledRef.current.value = true
+    const jobId = currentJobIdRef.current
+    if (jobId) await cancel(jobId)
+  }
+
+  const exportRunning = batchRunning || coverBusy
+  const canExport =
+    !baseDisabled && !overlayDisabled && !gate.blocked && selections.length > 0 && !exportRunning
+  const coverDisabled = baseDisabled || overlayDisabled || gate.blocked || selections.length === 0 || exportRunning
+  const firstSelection = selections[0]
 
   return (
     <section className="group">
@@ -191,19 +372,92 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
       </div>
 
       <div className="stack stack--tight">
+        <span className="field__label">交付画布（叠加 MP4）</span>
+        {CANVAS_ORDER.map((kind) => (
+          <div key={kind} className="stack stack--tight">
+            <label className="switch">
+              <input
+                type="checkbox"
+                aria-label={CANVAS_LABELS[kind]}
+                checked={canvasChecked[kind]}
+                onChange={(event) =>
+                  setCanvasChecked((previous) => ({ ...previous, [kind]: event.target.checked }))
+                }
+              />
+              <span>{CANVAS_LABELS[kind]}</span>
+            </label>
+            {kind !== 'landscape' && canvasChecked[kind] ? (
+              <div className="stack stack--tight">
+                <label className="field">
+                  <span className="field__label">分辨率</span>
+                  <select
+                    className="select"
+                    aria-label={`${CANVAS_LABELS[kind]}分辨率`}
+                    value={canvasTier[kind]}
+                    onChange={(event) =>
+                      setCanvasTier((previous) => ({
+                        ...previous,
+                        [kind]: event.target.value as ExportResolutionTier
+                      }))
+                    }
+                  >
+                    <option value="1080">1080</option>
+                    <option value="720">720</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span className="field__label">适配</span>
+                  <select
+                    className="select"
+                    aria-label={`${CANVAS_LABELS[kind]}适配`}
+                    value={canvasFit[kind]}
+                    onChange={(event) =>
+                      setCanvasFit((previous) => ({ ...previous, [kind]: event.target.value as ExportFit }))
+                    }
+                  >
+                    <option value="cover">cover（裁切）</option>
+                    <option value="contain">contain（补边）</option>
+                  </select>
+                </label>
+              </div>
+            ) : null}
+          </div>
+        ))}
+        {selections.length === 0 ? <p className="hint">至少勾选一个画布</p> : null}
+
+        <label className="field">
+          <span className="field__label">画质档</span>
+          <select
+            className="select"
+            value={quality}
+            onChange={(event) => setQuality(event.target.value as ExportQuality)}
+          >
+            <option value="high">高（CRF 18）</option>
+            <option value="standard">标准（CRF 23）</option>
+            <option value="small">小体积（CRF 28）</option>
+          </select>
+        </label>
+
+        <label className="field">
+          <span className="field__label">{TEXT.export.mastering}</span>
+          <select
+            className="select"
+            aria-label={TEXT.export.mastering}
+            title={TEXT.export.masteringHint}
+            value={mastering}
+            onChange={(event) => setAudioMastering(event.target.value as AudioMastering)}
+          >
+            <option value="off">{TEXT.export.masteringOff}</option>
+            <option value="social">{TEXT.export.masteringSocial}</option>
+            <option value="broadcast">{TEXT.export.masteringBroadcast}</option>
+          </select>
+          <span className="hint">{TEXT.export.masteringHint}</span>
+        </label>
+
         <button
           type="button"
           className="btn btn--primary btn--block"
-          disabled={baseDisabled || gate.blocked}
-          title={gate.blocked ? gate.reason ?? '' : undefined}
-          onClick={() => void run('transparentMov')}
-        >
-          {TEXT.export.startMov}
-        </button>
-        <button
-          type="button"
-          className="btn btn--block"
-          disabled={baseDisabled || overlayDisabled || gate.blocked}
+          disabled={!canExport}
           title={
             gate.blocked
               ? gate.reason ?? ''
@@ -213,9 +467,106 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
                   ? '叠加导出需要先把素材放入媒体轨'
                   : undefined
           }
-          onClick={() => void run('overlayMp4')}
+          onClick={() => void runOverlay()}
         >
-          {TEXT.export.startMp4}
+          {selections.length > 1
+            ? `开始导出（${selections.length} 个画布）`
+            : firstSelection
+              ? `开始导出（${CANVAS_LABELS[firstSelection.kind]}）`
+              : '开始导出'}
+        </button>
+
+        <button
+          type="button"
+          className="btn btn--block"
+          disabled={coverDisabled}
+          onClick={() => {
+            if (firstSelection) void exportCover({ outputDir, selection: firstSelection })
+          }}
+        >
+          导出封面（{firstSelection ? CANVAS_LABELS[firstSelection.kind] : '当前画布'} · 当前帧）
+        </button>
+
+        {batchRunning ? (
+          <button type="button" className="btn btn--block" onClick={() => void cancelBatch()}>
+            取消全部
+          </button>
+        ) : null}
+
+        <p className="hint">透明 MOV / PNG 序列只按工程分辨率，画布多选只影响叠加 MP4 与封面。</p>
+      </div>
+
+      {statuses.length > 0 ? (
+        <div className="kv" aria-label="批量导出状态">
+          {statuses.map((status) => (
+            <div className="kv__row" key={status.key}>
+              <span>{status.label}</span>
+              <span className={`mono${status.phase === 'failed' ? ' text-danger' : ''}`}>
+                {STATUS_LABELS[status.phase]}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="stack stack--tight">
+        <span className="field__label">预览此画布</span>
+        <div className="segmented" role="group" aria-label="预览画布">
+          <button
+            type="button"
+            className={`segmented__item${previewCanvasKind === null ? ' segmented__item--active' : ''}`}
+            aria-pressed={previewCanvasKind === null}
+            onClick={() => {
+              setPreviewCanvas(null)
+              setPreviewFit('contain')
+            }}
+          >
+            工程画布
+          </button>
+          {(['portrait', 'square'] as const).map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              className={`segmented__item${previewCanvasKind === kind ? ' segmented__item--active' : ''}`}
+              aria-pressed={previewCanvasKind === kind}
+              onClick={() => {
+                setPreviewCanvas(kind)
+                setPreviewFit('cover')
+              }}
+            >
+              {PREVIEW_LABELS[kind]}
+            </button>
+          ))}
+        </div>
+        <div className="segmented" role="group" aria-label="预览适配">
+          {(['contain', 'cover'] as const).map((fit) => (
+            <button
+              key={fit}
+              type="button"
+              className={`segmented__item${previewFit === fit ? ' segmented__item--active' : ''}`}
+              aria-pressed={previewFit === fit}
+              onClick={() => setPreviewFit(fit)}
+            >
+              {fit}
+            </button>
+          ))}
+        </div>
+        {previewCanvasKind ? (
+          <span className="chip chip--ok">
+            预览：{CANVAS_LABELS[previewCanvasKind]} · {previewFit}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="stack stack--tight">
+        <button
+          type="button"
+          className="btn btn--primary btn--block"
+          disabled={baseDisabled || gate.blocked || exportRunning}
+          title={gate.blocked ? gate.reason ?? '' : undefined}
+          onClick={() => void run('transparentMov')}
+        >
+          {TEXT.export.startMov}
         </button>
       </div>
 

@@ -1,6 +1,7 @@
 import type { JobProgress, JobResult } from '@shared/types'
 import { useExportStore } from './exportStore'
 import { useStabPreviewStore } from './stabPreviewStore'
+import { useProxyStore } from './proxyStore'
 
 /**
  * 主进程事件分发（进度 / 结果）。
@@ -17,6 +18,8 @@ export function bindJobEvents(): () => void {
     useExportStore.getState().setResult(result)
     // v8.1：防抖预览代理作业（stab- 前缀）完成后额外记账代理路径，PreviewStage 据此换源
     useStabPreviewStore.getState().handleJobResult(result)
+    // v10：4K / MXF 预览代理作业（proxy- 前缀）完成后记账整片代理路径
+    useProxyStore.getState().handleJobResult(result)
     const resolve = waiters.get(result.jobId)
     if (resolve) {
       waiters.delete(result.jobId)

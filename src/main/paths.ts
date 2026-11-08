@@ -81,6 +81,11 @@ export function userStabPreviewDir(): string {
   return path.join(app.getPath('userData'), USER_DATA_DIRS.stabPreview)
 }
 
+/** v10：4K / MXF 预览代理缓存目录（userData/proxies：整片 720p H.264）。 */
+export function userProxyDir(): string {
+  return path.join(app.getPath('userData'), USER_DATA_DIRS.proxies)
+}
+
 /**
  * v5：某次预览条请求的长图路径。
  * 文件名 = 安全化的 mediaId 前缀 + 缓存令牌：前者让「素材移出池」能按前缀回收它的全部预览条，

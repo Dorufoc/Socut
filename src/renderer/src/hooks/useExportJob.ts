@@ -7,11 +7,14 @@ import { speedValueOf } from '@shared/mediaClipAudio'
 import { createId } from '@shared/projectSchema'
 import { frameTimeSec, rationalToNumber } from '@shared/fps'
 import { nearestFps } from '@shared/constants'
+import { resolveExportCanvas, type ResolvedExportCanvas } from '@shared/exportPresets'
 import { TEXT } from '@shared/i18n'
 import { formatBytes } from '@shared/sizeEstimate'
 import type {
   AudioMixClipRequest,
+  ExportCanvasSelection,
   ExportKind,
+  ExportQuality,
   ExportRequest,
   FrameSpec,
   Fps,
@@ -41,6 +44,10 @@ export interface StartExportInput {
   pipeTransport?: 'raw' | 'png'
   codec?: TransparentCodec
   directPipe?: boolean
+  /** v10：目标画布（缺省 = 现有行为：叠加跟随首个底层素材的横屏） */
+  canvas?: ExportCanvasSelection
+  /** v10：画质档（缺省 = high，CRF 18 与旧版一致） */
+  quality?: ExportQuality
 }
 
 export class GateError extends Error {}
@@ -114,6 +121,9 @@ function buildOverlayBase(project: Project): OverlayBase | null {
         ...(clip.speed ? { speed: clip.speed } : {}),
         // v6：调色/变换参数原样透传，不能在多轨改造里丢掉（导出暂未烧录，见验收文档）
         ...(clip.video ? { video: clip.video } : {}),
+        // v10：转场只在定义时带键（无转场时请求体与旧版逐字节一致）
+        ...(clip.transitionIn ? { transitionIn: clip.transitionIn } : {}),
+        ...(item ? { sourceDurationSec: item.meta.durationSec } : {}),
         isImage: item ? mediaKindOf(item) === 'image' : false,
         meta: item?.meta ?? null,
         vfrRaw: item?.vfrPolicy === 'raw'
@@ -132,6 +142,7 @@ function buildOverlayBase(project: Project): OverlayBase | null {
         sourceOutSec: item.meta.durationSec,
         trackIndex: 0,
         hasAudio: mediaKindOf(item) !== 'image' && item.meta.audioCodec != null,
+        sourceDurationSec: item.meta.durationSec,
         isImage: mediaKindOf(item) === 'image',
         meta: item.meta,
         vfrRaw: item.vfrPolicy === 'raw'
@@ -149,6 +160,7 @@ function buildOverlayBase(project: Project): OverlayBase | null {
         sourceOutSec: ref.meta.durationSec,
         trackIndex: 0,
         hasAudio: ref.meta.audioCodec != null,
+        sourceDurationSec: ref.meta.durationSec,
         isImage: false,
         meta: ref.meta,
         vfrRaw: ref.vfrPolicy === 'raw'
@@ -190,6 +202,28 @@ function buildOverlayBase(project: Project): OverlayBase | null {
     anyVfrRaw: clips.some((clip) => clip.vfrRaw),
     audioTranscodeNeeded: clips.some((clip) => (clip.meta ? detectCompat(clip.meta).audioTranscodeNeeded : false))
   }
+}
+
+/**
+ * 导出/封面共用的目标画布解析：landscape 跟随首个可见底层素材，
+ * portrait/square 用固定档位；帧率沿用首个素材（无素材时工程帧率）。
+ */
+export function overlayCanvasFor(
+  project: Project,
+  selection: ExportCanvasSelection
+): { canvas: ResolvedExportCanvas; fps: Fps } | null {
+  const base = buildOverlayBase(project)
+  if (!base) return null
+  const primaryMeta = base.primaryMeta
+  const canvas = resolveExportCanvas({
+    selection,
+    primaryMeta: { width: primaryMeta.width, height: primaryMeta.height },
+    projectResolution: project.resolution
+  })
+  const fps = nearestFps(
+    rationalToNumber(primaryMeta.avgFrameRate) ?? primaryMeta.rFrameRate.num / primaryMeta.rFrameRate.den
+  )
+  return { canvas, fps }
 }
 
 /** v1 兼容：旧取证脚本写的 refVideo 拉平成一枚虚拟素材，门禁口径与新模型共用（见 assertGate）。*/
@@ -251,8 +285,33 @@ export function useExportJob() {
     /** 跟随基准（规格 §2.3）：v2 取媒体轨首段的源元数据；无媒体轨时退回首枚素材/旧 refVideo（buildOverlayBase 已拉平） */
     const primaryMeta = base?.primaryMeta ?? null
 
-    // 叠加合成强制跟随参考视频参数（规格 §2.3 / §11）
-    const resolution = isOverlay && primaryMeta ? { width: primaryMeta.width, height: primaryMeta.height } : project.resolution
+    /**
+     * v10：可选目标画布。未选时保持旧行为；只有叠加出口吃画布，
+     * 透明 MOV / PNG 序列仍只按工程分辨率。
+     */
+    const resolvedCanvas =
+      isOverlay && input.canvas
+        ? resolveExportCanvas({
+            selection: input.canvas,
+            primaryMeta: primaryMeta ? { width: primaryMeta.width, height: primaryMeta.height } : null,
+            projectResolution: project.resolution
+          })
+        : null
+    /**
+     * 只把「会改变画面几何」的画布下传给主进程：横屏 + contain 与旧行为等价，
+     * 传下去只会凭空多一圈 scale，违背「默认导出 argv 逐字节不变」。
+     */
+    const canvasForRequest =
+      resolvedCanvas && (resolvedCanvas.kind !== 'landscape' || resolvedCanvas.fit !== 'contain')
+        ? { width: resolvedCanvas.width, height: resolvedCanvas.height, fit: resolvedCanvas.fit }
+        : null
+
+    // 叠加合成强制跟随参考视频参数（规格 §2.3 / §11）；显式画布优先
+    const resolution = resolvedCanvas
+      ? { width: resolvedCanvas.width, height: resolvedCanvas.height }
+      : isOverlay && primaryMeta
+        ? { width: primaryMeta.width, height: primaryMeta.height }
+        : project.resolution
     const fps =
       isOverlay && primaryMeta
         ? nearestFps(
@@ -276,6 +335,8 @@ export function useExportJob() {
       fontIndex: fonts,
       resolution,
       fps,
+      // v10：竖屏/方图必须强制对应字幕条分支（不能被枚级 compactMode 覆盖）
+      mode: resolvedCanvas?.mode,
       scope,
       frameFormat: framesToDisk ? 'png' : input.pipeTransport ?? 'raw',
       // 计划 C7：叠加出口只渲染首个入点→末个出点，开头的全透明间隙不进管线
@@ -313,8 +374,11 @@ export function useExportJob() {
      * 音频策略（v2 枚级）：单段且首段从 0s 起才允许直接 copy（与旧单输入一致）；
      * 多段/trim 路径的音频要重编码时间轴，或者任一段无音轨/编码不可 copy → 统一 AAC。
      */
+    // v10：显式画布会强制主进程走多输入（音频随之重编码），这里同口径直接给 aac
     const audioMode: 'copy' | 'aac' =
-      !base || base.multi || base.anyNoAudio || base.audioTranscodeNeeded ? 'aac' : 'copy'
+      !base || base.multi || base.anyNoAudio || base.audioTranscodeNeeded || canvasForRequest !== null
+        ? 'aac'
+        : 'copy'
 
     /**
      * v7：音频轨 → 导出输入。
@@ -351,7 +415,10 @@ export function useExportJob() {
                   sourceInSec: sourceIn,
                   sourceOutSec: sourceIn + (end - start) * speed,
                   ...(clip.audio ? { audio: clip.audio } : {}),
-                  ...(clip.speed ? { speed: clip.speed } : {})
+                  ...(clip.speed ? { speed: clip.speed } : {}),
+                  // v10：角色与 ducking 只对音频段有意义（BGM 段参与自动压低）
+                  ...(clip.role === 'bgm' ? { role: clip.role } : {}),
+                  ...(clip.ducking ? { ducking: clip.ducking } : {})
                 }
               })
               .filter((clip): clip is NonNullable<typeof clip> => clip !== null)
@@ -397,6 +464,10 @@ export function useExportJob() {
       frameSpec,
       frameDelivery,
       codec: input.codec ?? 'prores4444',
+      // v10：响度标准化；off/缺省不落键（argv 与旧版逐字节一致）
+      ...(project.audioMastering === 'social' || project.audioMastering === 'broadcast'
+        ? { audioMastering: project.audioMastering }
+        : {}),
       ...(audioMix.length > 0 ? { audioClips: audioMix } : {}),
       ...(isOverlay && base && primaryMeta
         ? {
@@ -419,7 +490,10 @@ export function useExportJob() {
                       sourceHeight: watermark.sourceHeight
                     }
                   }
-                : {})
+                : {}),
+              // v10：目标画布与画质档（缺省时不落键，argv 与旧版逐字节一致）
+              ...(canvasForRequest ? { canvas: canvasForRequest } : {}),
+              ...(input.quality ? { quality: input.quality } : {})
             }
           }
         : {})

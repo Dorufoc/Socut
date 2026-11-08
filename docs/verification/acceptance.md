@@ -321,3 +321,54 @@ npm run verify:packaged   # 静默安装 → 断网等价冷启动 → 优雅退
 #   FOCUSNEWS_SMOKE=1 [+ _CANCEL / _OVERLAY / _GATE=1 / _KIND / _DELIVERY]、FOCUSNEWS_PIXELCHECK、
 #   FOCUSNEWS_REVIEW_SHEET、FOCUSNEWS_SHOT_ERROR、FOCUSNEWS_SHOT_REFMISSING、FOCUSNEWS_SHOT
 ```
+
+## 多版本交付 / 所见即所得 / 音频质量 / 素材管理 / 转场（v11）的机器化验收
+
+任务 11 的组合真机用例**没有新建测试文件**，落在既有 `tests/ffmpegPipeline.test.ts`：
+`组合交付：9:16 + 转场 + 几何/调色 + ducking + 响度（v11 · 实机 FFmpeg）`。
+它用随包 FFmpeg 生成两段 360×640 纯色夹具、透明层、200Hz BGM 与 3kHz 口播，然后**只通过生产构造函数**
+`buildOverlayMp4MultiInput`（内部装配 `buildMediaBasisFilterComplex` / `buildAudioMixPlan`）跑一次导出：
+9:16 cover（360×640）+ 片段亮度 + 几何缩放/位移 + 0.5s 溶解 + BGM standard ducking + social 响度。
+
+| 能力 | 实现 | 取证入口 / 状态 |
+|---|---|---|
+| 多画布交付（16:9 / 9:16 / 1:1、cover/contain、1080/720、画质档） | `shared/exportPresets` + `ffmpegArgs.buildCanvasNormalizeFilter` + `ExportPanel` 多选 | `tests/exportPresets.test.ts`、`tests/ffmpegArgs.test.ts`、`ExportPanel.test.tsx` + 组合真机 9:16 cover 导出（360×640/30fps）；截图 `v11-ui-editor-export.png`、`v11-ui-editor-portrait.png` | **部分**：单版本 9:16 已真机导出；批量三版本与封面 PNG 仍只有单测/UI 路径，无真机端到端 |
+| 导出所见即所得（缩放/位移/旋转/镜像 + 全部调色/曲线） | `shared/mediaClipVideoFfmpeg` → 单轨/多轨段链，默认值不注入 | `tests/mediaClipVideoFfmpeg.test.ts`、`tests/ffmpegArgs.test.ts`、真机「亮度/对比度/饱和度」「主曲线」「几何」与组合用例；截图 `v11-ui-editor-media.png`（检查器读数） | **通过**（导出侧）：组合用例同时烧录亮度 + 缩放/位移且转场中点仍为混色；预览与成片的逐像素包围盒对照仍需人工 |
+| 节点降噪 / BGM ducking / 社交与广播响度 | `shared/audioQuality` + `ffmpegArgs.buildAudioMixPlan`（voice/bgm 双总线 + sidechain + loudnorm） | 真机「ducking ≥6dB」「降噪底噪下降」「loudnorm social −14 / broadcast −23」+ 组合用例（音轨 6.0s、整片 **−14.7 LUFS**） | **通过** |
+| 素材分组 / 标签 / 搜索 | `projectStore` 分组与标签动作 + `MediaLibraryPanel` 筛选/搜索/归组 | `tests/projectSchema.test.ts`、`MediaLibraryPanel.test.tsx`、`projectStore.test.ts`；截图 `v11-ui-editor-media.png`（`全部 / 未分组(0) / 现场素材(1)`、搜索框、`台风`/`现场` 标签） | **部分**：结构与筛选逻辑由 jsdom 单测锁定，真实拖拽/撤销仍待人工 |
+| 4K / MXF 预览代理 | `src/main/mediaProxy.ts` + `proxyStore` + `buildProxyArgs` | `tests/proxyArgs.test.ts`、`proxyStore.test.ts`、真机「MXF → 720p H.264/AAC 代理（短边≤720、faststart）」 | **部分**：MXF 1920×1080 已真机；4K 原片与真实 MXF 摄像机素材未跑 |
+| 19 种转场 + 时间轴标记 + 检查器 + `xfade` 导出 | `shared/transitions` + `Timeline` + `MediaClipInspector` + `buildSingleTrackTransitionBasis` | `tests/transitions.test.ts`、`ffmpegArgs.test.ts`、`Timeline.test.tsx`、`MediaClipInspector.test.tsx`；真机「0.5s 溶解」「方向性转场」「fadeblack」+ 组合用例；截图 `v11-ui-editor-media.png`（切点 0.5s 标记 + 「转场（入场）」类型网格） | **通过**；预览近似与成片观感差异仍需人工复核 |
+| 组合导出（一次同时开启五类能力） | 同上单一基座 | 组合用例读数：360×640 / 30fps / 6.033s / 181 帧 / 音轨 6.0s / 转场中点红蓝混色 / **−14.7 LUFS** | **通过** |
+
+### 本轮修复（组合用例暴露的真实缺陷）
+
+- **转场路径音频 2× 偏移**：`buildSingleTrackTransitionBasis` 在把各段音频送进 `concat` 之前又做了一次
+  `asetpts=PTS+<时间轴偏移>`。`concat` 会把输入自身的起始 PTS 再累加一次，于是第二段音频被推到 2× 偏移处：
+  实测「两段各 3s」的成片只有前 3s 有声、音轨时长 3.0s、后半段一片静音（容器时长仍被视频盖住，旧用例因只断言
+  「有音轨」而漏掉）。修复：音频按核心区间顺序直接 `concat`（空隙已由 `pushGap` 补静音），删除 concat 前的时间轴平移。
+  修复后音轨 6.0s、末段 BGM 电平可测（`mean_volume` > −60dB）。既有 argv 快照里没有这条字面量。
+- **已修复（v11 验收追加）· 非转场单轨 `trim+concat` 的 PTS 二次偏移**：`buildSingleTrackBasis` 在把段送进
+  `concat` 之前又做了 `setpts/asetpts=PTS+<时间轴偏移>`；`concat` 本身会累加前序段时长，于是偏移被算两次。
+  实测「两段各 0.5s 相邻」的成片修复前为 **1.500000s / 45 帧**（应为 1.0s）。修复：段链视频改为
+  `[pre…]null[vs…]` 透传、音频 `[prea…]` 直连 `concat`，删除 concat 前的时间轴平移；段间空隙仍由 `pushGap`
+  补黑场/静音。回归用例在 `tests/ffmpegPipeline.test.ts`
+  「非转场单轨 concat 时长（v11 验收追加 · 实机 FFmpeg）」：相邻两段修复后 **1.000000s / 30 帧 / 音轨 1.0s**；
+  中段留 0.5s 空隙为 **1.500000s / 45 帧**。转场路径（`buildSingleTrackTransitionBasis`）不在本次改动内。
+
+### 门禁与截图（2026-11-07/08 本机）
+
+| 项 | 结果 |
+|---|---|
+| `npm run verify` | **通过**：check:env + lint + typecheck×3 + vitest，**75 文件 / 1111 用例**（组合用例 1 条 + 非转场 concat 时长 2 条） |
+| `npm run verify:all -- --quick` | **PASS 8/8**：check:env 0.4s / lint 4.6s / typecheck×3 / vitest 75.4s / CLI 透明 MOV 4.3s / CLI 720p 叠加 2.2s → `spikes/verify-all.json` |
+| `npm run visual:check` | **失败（环境）**：180s 超时且未产出 `spikes/artifacts/visual-check/report.json`。本机探针显示 Electron 45.2.1 从仓库启动时 `app.isPackaged === true`（`defaultApp === true` 也成立），而 `FOCUSNEWS_VISUAL_CHECK` / `FOCUSNEWS_USER_DATA` / `FOCUSNEWS_SHOT` 都受 `app.isPackaged` 门控，应用停在启动页。2026-11-06 同一脚本曾出图，属当前 Electron 版本/启动方式的行为变化，不是本轮五个功能的回归 |
+| UI 截图 | 改用 `--user-data-dir=<隔离目录>` + CDP `Page.captureScreenshot` 绕过上述门控；隔离工程为 `spikes/tmp-integration/ui-v11-userdata/projects/autosave.focusnews.json`（640×360/3s 素材、两段相邻媒体段、第二段 `transitionIn: dissolve 0.5s` + 缩放/位移/调色、`mediaBins: 现场素材`、`tags: 台风/现场`） |
+
+截图产物（`.trae/specs/add-news-delivery-pipeline/artifacts/`）：
+
+- `v11-ui-editor-media.png`：左侧素材分组筛选 + 搜索框 + 标签；时间轴切点 0.5s 转场标记；右侧第二段被选中，检查器显示「转场（入场）」的 19 种类型网格（溶解选中）与几何/调色参数。
+- `v11-ui-editor-export.png`：导出面板「交付画布（叠加 MP4）」勾选 横屏 16:9 / 竖屏 9:16 / 方形 1:1，画质档与响度档；右侧转场检查器与时间轴标记仍在。
+- `v11-ui-editor-portrait.png`：预览舞台切到 9:16（`1080×1920 · 30/1 · 紧凑` + `目标画布 9:16` 徽标），导出面板 9:16 分辨率/cover，右侧转场检查器。
+
+仍需人工：预览转场近似与成片逐帧观感对照；批量三画布与封面 PNG 的真机端到端；分组/标签的真实拖拽与 Ctrl+Z。
+

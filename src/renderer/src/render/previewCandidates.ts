@@ -30,6 +30,12 @@ export const PREVIEW_PREROLL_SEC = 0.35
 /** 播放中允许的漂移（秒）；超过才 seek，避免每帧 seek 卡顿。 */
 export const PREVIEW_DRIFT_SEC = 0.25
 
+/** 转场窗口内必须同时存活的一对片段（左 = 前段，右 = 后段）。 */
+export interface PreviewTransitionIds {
+  leftId: string
+  rightId: string
+}
+
 const EPS = 1e-9
 
 /** 候选段的完整播放信息（路径已按防抖代理新鲜度解析过）。 */
@@ -51,11 +57,22 @@ export function isClipActiveAt(
   return atSec >= clip.timelineStartSec - EPS && atSec < clip.timelineEndSec - EPS
 }
 
+function normalizeTransitionIds(
+  input:
+    | PreviewTransitionIds
+    | readonly PreviewTransitionIds[]
+    | undefined
+): PreviewTransitionIds[] {
+  if (!input) return []
+  return Array.isArray(input) ? [...input] : [input as PreviewTransitionIds]
+}
+
 /**
  * 选出当前需要存活的候选段，顺序即 DOM 顺序：
  * 1. **所有当前图层**（按轨道序号升序：底层先画、上层后画）；
  * 2. **刚结束仍在 hold 窗口内的段**（最近结束的优先，用于接缝兜底）；
- * 3. **前瞻窗口内即将开始的段**（按开始时间升序）。
+ * 3. **前瞻窗口内即将开始的段**（按开始时间升序）；
+ * 4. 传入 `transitionIds` 时，转场左右两侧**强制保留**（优先于 2/3 的限流填充）。
  *
  * `trackOrder` = 媒体轨 id → 数组索引（0 = 最底层），由 `tracks.ts / mediaTrackOrder` 生成；
  * 隐藏轨的片段应在调用前剔除。总数不超过 `PREVIEW_MAX_CANDIDATES`，但当前图层永远全部保留——
@@ -64,7 +81,10 @@ export function isClipActiveAt(
 export function selectPreviewCandidates(
   tracks: MediaClip[],
   atSec: number,
-  trackOrder: ReadonlyMap<string, number>
+  trackOrder: ReadonlyMap<string, number>,
+  transitionIds?:
+    | PreviewTransitionIds
+    | readonly PreviewTransitionIds[]
 ): MediaClip[] {
   const rankOf = (clip: MediaClip): number => trackOrder.get(clip.trackId) ?? -1
   const active = tracks
@@ -72,6 +92,15 @@ export function selectPreviewCandidates(
     .sort((a, b) => rankOf(a) - rankOf(b) || a.timelineStartSec - b.timelineStartSec)
 
   const activeIds = new Set(active.map((clip) => clip.id))
+  const forcedIds = new Set<string>()
+  for (const pair of normalizeTransitionIds(transitionIds)) {
+    forcedIds.add(pair.leftId)
+    forcedIds.add(pair.rightId)
+  }
+  // 转场左右两侧必须在窗口内同时挂载：即使一侧还没进入前瞻窗口 / 已超出 hold 窗口
+  // （转场最长 1.5s，半窗 0.75s > hold 0.5s），也不能让画面在切点附近掉回单层。
+  const forced = tracks.filter((clip) => forcedIds.has(clip.id))
+
   const held = tracks
     .filter(
       (clip) =>
@@ -91,6 +120,10 @@ export function selectPreviewCandidates(
     .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
 
   const out = [...active]
+  // 当前图层永远全部保留；转场对优先于 hold/前瞻的限流填充。
+  for (const clip of forced) {
+    if (!out.some((item) => item.id === clip.id)) out.push(clip)
+  }
   for (const clip of [...held, ...upcoming]) {
     if (out.length >= PREVIEW_MAX_CANDIDATES) break
     if (!out.some((item) => item.id === clip.id)) out.push(clip)
@@ -106,6 +139,19 @@ export function previewSourceTimeAt(clip: MediaClip, timelineSec: number, useSta
   const sourceSec = sourceTimeAt(clip, timelineSec)
   if (!useStabProxy || !clip.stab?.enabled) return Math.max(0, sourceSec)
   return stabProxyTimeOf(sourceSec, clip.sourceInSec, clip.sourceOutSec)
+}
+
+/**
+ * 转场预览专用的源坐标：允许 `atSec` 落在片段**时间轴起点之前**（后段头部手柄）或
+ * 终点之后（前段尾部手柄），此时按负/超出的本地时间乘倍速继续读数。
+ *
+ * 与 `sourceTimeAt` 的区别：后者先 `Math.max(0, local)`，会把头部手柄钳回 `sourceIn`，
+ * 转场窗口前半段就会看到后段的第一帧而不是手柄内容。这里只钳最终源秒 >= 0。
+ * 防抖代理只覆盖片段原源区间，转场窗口不用代理（调用方传 `useStabProxy=false`）。
+ */
+export function previewTransitionSourceTime(clip: MediaClip, atSec: number): number {
+  const localSec = atSec - clip.timelineStartSec
+  return Math.max(0, clip.sourceInSec + localSec * speedValueOf(clip.speed))
 }
 
 /** 片段入点对应的源秒（代理坐标从 0 开始）。 */
