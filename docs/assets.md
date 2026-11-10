@@ -3,6 +3,34 @@
 本文件是交付合规与可复现构建的唯一记录点（计划 M4-3）。所有二进制/字体都由脚本按固定来源获取，
 仓库不入库（见 `.gitignore`），因此这里的 URL、版本与校验和就是重建依据。
 
+## 本项目许可证：AGPL-3.0-or-later（2026-11-10 决定）
+
+> 由 `UNLICENSED`（保留所有权利）改为 **GNU Affero General Public License v3.0 or later**。
+> 仓库根 `LICENSE` 是 AGPL-3.0 全文（取自 <https://www.gnu.org/licenses/agpl-3.0.txt>，
+> 34,523 B / 661 行）；`package.json` 与 `package-lock.json` 的 `license` 为 SPDX
+> `AGPL-3.0-or-later`；`electron-builder.yml` 的 `extraFiles` 把 `LICENSE` 放进安装目录根。
+> 这三处由 `scripts/check-env.mjs` 的 `checkLicense()` 互相校验，防「改了 README 忘 LICENSE」。
+
+分发（安装包或源码）时的义务与落地物：
+
+| 义务 | 条款 | 落地物 / 现状 |
+|---|---|---|
+| 随目标代码提供许可全文 | §4、§6 | 安装目录根 `LICENSE`（`extraFiles`，打包后与 `Socut.exe` 同级） |
+| 提供完整对应源码 | §6 | 公开仓库 <https://github.com/Dorufoc/socut>；Release 页自带的 "Source code (zip/tar.gz)" 与安装包同一地点（§6(d)） |
+| 保留版权声明、标注修改 | §5(a)(b) | 仓库保留 Git 历史与 `copyright`；改版者须自行加「已修改 + 日期」声明 |
+| 网络交互时提供源码入口 | §13 | 当前**不触发**：纯本地应用，CLI/MCP 走本机 stdio 与环回地址，不存在「远程网络用户」 |
+| 不得附加进一步限制 | §10 | 无使用量/时间/地域限制；作者本人的商业授权属于另行授予，不限制接收者的 AGPL 权利 |
+
+与其他许可的关系：
+
+- **FFmpeg（GPL-3.0-or-later 构建）**：AGPL §13 末段显式允许与 GPLv3 作品链接并分组合分发，
+  两者兼容；何况本项目与 FFmpeg 只是「独立进程 + 命令行调用」。合规压力仍来自 FFmpeg 一侧
+  （GPL 源码要约，见下一节），与自身协议无关。
+- **第三方资产（MIT / BSD / Apache-2.0 / OFL）**：都能与 AGPL 组合，各自义务不变。
+  其中 whisper.cpp、RNNoise 模型、matte 模型、ONNX Runtime 的许可文本**尚未随安装包交付**，
+  是当前唯一的已知合规缺口（M12 台账「未完成」已记，待补 `THIRD_PARTY_NOTICES`）。
+- **`package.json` 的 `private: true`** 保持不动：只用于阻止 `npm publish` 误发布，与许可无关。
+
 ## FFmpeg（随包，位于 asar 之外）
 
 | 项 | 值 |
@@ -33,8 +61,9 @@ manifest.json 里的 `note` / `versionLine` / `license` 由脚本根据**实际�
 3. 若不愿承担 GPL 义务，可改用 **LGPL 构建**（不含 x264/x265）；MP4 叠加出口需相应改为
    `-c:v h264_mf`（Windows Media Foundation 硬/软编，LGPL 友好），并调整 `ffmpegArgs.ts` 的编码参数集。
    这是交付策略决策点，需产品侧确认后再切换（当前默认 GPL + libx264，CRF 18 质量可控）。
-4. 本应用代码为闭源（`license: UNLICENSED`），与 FFmpeg 仅为「独立进程 + 命令行调用」关系；
-   仍按 GPL 处理是因为分发了 GPL 构建的二进制本体，而非因为链接。
+4. 本应用代码自 2026-11-10 起为 **AGPL-3.0-or-later**（此前为 `UNLICENSED`），与 FFmpeg 仅为
+   「独立进程 + 命令行调用」关系，不构成链接；即便按链接论，AGPL §13 也允许与 GPLv3 组合作品分发。
+   仍按 GPL 处理是因为分发的是 GPL 构建的二进制本体，而不是因为本应用的协议。
 
 ### 体积预算（已实测）
 
@@ -58,7 +87,8 @@ manifest.json 里的 `note` / `versionLine` / `license` 由脚本根据**实际�
 ### 主进程产物里的源码暴露（已修）
 
 `electron.vite.config.ts` 之前无条件 `build.sourcemap: 'inline'`，而 `files` 白名单就是 `out/**`：
-内联地图会把**完整可读源码**随 app.asar 分发（本应用 `license: UNLICENSED`），且白撑体积。
+内联地图会把**完整可读源码**随 app.asar 分发（本应用已是 AGPL-3.0-or-later、源码本就在仓库公开，
+内联地图只剩「白撑体积」这一个后果），故改为只在开发构建保留。
 现改为只在 `command === 'serve'`（开发）内联，生产构建不出地图：
 
 | 项 | 修前 | 修后 |

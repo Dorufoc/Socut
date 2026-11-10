@@ -2,6 +2,12 @@
 
 > 研究日期：2026-11-10 · 范围：只做选型与设计，**未改任何代码/依赖**
 > 证据标记：`[实测]` 本机随包 FFmpeg 9.0.2 跑过；`[代码取证]` 读仓库源码/配置；`[官方]` 模型/运行时官方文档或模型卡；`[二手/估算]` 第三方 benchmark 或推算，需 App 内实测确认。
+>
+> **2026-11-10 协议变更后的修订**：本项目已改为 **AGPL-3.0-or-later**（此前 `UNLICENSED` 闭源），
+> 下文中「必须闭源分发 → 只接受 Apache-2.0/MIT/BSD、排除 GPL 模型」的前提**已不成立**
+> （AGPL §13 明确允许与 GPLv3 作品组合）。**选型结论不变**：仍用 Apache-2.0 的 MediaPipe Selfie
+> Segmenter，理由回到体积（452 KB vs RVM 15 MB）与单人场景精度；RVM（GPL-3.0）从「许可禁用」
+> 降级为「可选、未排期」，将来要更好的发丝边缘可以按需评估。
 
 ---
 
@@ -15,7 +21,7 @@
 | 推理位置 | **主进程（或 `utilityProcess`），`onnxruntime-node`** | 生产环境是 `loadFile`（file://），ORT-web 的 `.wasm` 走 `fetch()` 会被 Chromium 挡；主进程原生 ORT 无此问题，且解码/编码本来就在主进程 |
 | 首选模型 | **MediaPipe Selfie Segmenter（256²，Apache-2.0，ONNX 约 451 KB）** 编译内置；**MODNet（512²，Apache-2.0）** 作质量档 | 体积几乎为 0、许可证可闭源分发、单人场景足够；MODNet 换更好的发丝边缘 |
 | 物体抠像 | 第二阶段起按需下载 **IS-Net（Apache-2.0，178.6 MB）** | 体积太大不适合内置；沿用 whisper 模型的「可选资产 + 明确报错」模式 |
-| 明确排除 | **RVM（GPL-3.0）**、**RMBG-1.4/2.0（非商用）** | 本项目 `package.json` 为 `UNLICENSED`（闭源商业），GPL 传染 + 非商用授权不可接受 |
+| 明确排除（本轮） | **RVM（GPL-3.0）**、**RMBG-1.4/2.0（非商用）** | 本项目 2026-11-10 起为 AGPL-3.0-or-later：RVM 的 GPLv3 已可组合（AGPL §13），本轮仍不采用是**体积/精度取舍**；RMBG 的非商用授权在任何协议下都不可接受 |
 | 体积成本 | 原生运行时 ≈ **+31 MB**（win-x64 `onnxruntime.dll` 30.27 MB + binding 0.34 MB，DirectML 可选再 +17.7 MB），模型 +0.5 MB（selfie）/ +6~25 MB（MODNet，按需） | 走 `extraResources`，`files` 白名单不动 |
 | 耗时量级（1080p、10 s、300 帧） | selfie 档 **≈2–6 s**；MODNet 档 **≈10–25 s**（含解码/编码，待实测） | 推理成本只取决于模型输入尺寸（256/512），与 1080p 无关 |
 | 最大风险 | ①原生依赖打包与 CI；②matte 与 trim/变速/转场手柄的时间对齐；③质量（自拍模型对侧脸/遮挡/多人差） | 用 P0 泛化 + P1 单模型先锁死管线，风险可控 |

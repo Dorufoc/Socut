@@ -49,6 +49,10 @@ extraFiles:
       - 'lib/**/*.mjs'
   - from: cli/socut-root.cmd
     to: socut.cmd
+  # AGPL-3.0-or-later：许可全文必须随目标代码一起交付（AGPL §4/§6）。
+  # 放在安装目录根（与 Socut.exe 同级），卸载后随目录一起删除；源码要约见 README「许可」小节。
+  - from: LICENSE
+    to: LICENSE
 
 extraResources:
   - from: resources/ffmpeg

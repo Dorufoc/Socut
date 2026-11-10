@@ -47,7 +47,7 @@ function tightenCspInProd(): Plugin {
 /**
  * 主进程 sourcemap 只在开发构建保留（行号对排查子进程/帧通道问题真有用）。
  * 之前无条件 `inline`：地图直接内联进 out/main/index.js，而 `files` 白名单会把 out/ 全部打进
- * app.asar——等于把闭源应用（license: UNLICENSED）的可读源码随安装包分发出去，还白白撑大体积。
+ * app.asar——白白撑大安装包体积（源码本来就在仓库里公开，内联地图已没有「藏源码」的意义）。
  * 生产构建（--win x64 / --dir）走 command==='build'，不生成地图。
  */
 export default defineConfig(({ command }) => {

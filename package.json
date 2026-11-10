@@ -4,7 +4,7 @@
   "description": "离线广播级新闻字幕条（Lower Third）生成与透明 MOV / MP4 叠加导出工具",
   "main": "out/main/index.js",
   "author": "Socut",
-  "license": "UNLICENSED",
+  "license": "AGPL-3.0-or-later",
   "private": true,
   "engines": {
     "node": ">=22.19.0"

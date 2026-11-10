@@ -25,7 +25,7 @@
 | 定位 | 免费开源跨平台 **CapCut 替代品**：口播/短视频/教程剪辑 | **离线广播级新闻字幕条（Lower Third）+ 透明 MOV/MP4 叠层导出** | 目标用户完全不同：Concat 打"量大"的 C 端，Socut 打"精度"的 B 端 |
 | 形态 | 原生桌面 App（Win/mac/Linux/Android/iOS 侧载） | Electron 桌面 App（Windows x64） | Concat 跨 5 平台，Socut 只有 Windows |
 | 技术栈 | Rust（13 个 crate）+ Slint + Skia + wgpu GPU 合成 + FFmpeg 链接 | Electron 45 + React 19 + zustand + yoga-layout + FFmpeg 子进程 | 架构代差大，但**不建议重写**（见 §6） |
-| 许可证 | **AGPL-3.0-or-later**（另有商业授权可谈） | UNLICENSED（私有） | ⚠️ **不可复制代码**，只能学思路（见 §7） |
+| 许可证 | **AGPL-3.0-or-later**（另有商业授权可谈） | **AGPL-3.0-or-later**（2026-11-10 起；此前 UNLICENSED） | 许可已同源，但本仓库仍是**自研实现**，不复制代码（见 §7） |
 | 成熟度 | Beta，v0.2.10；2026-08-25 建仓 → 3 个月 9 个 release，累计下载 52 万+ | v0.1.0，内部工程，已有 39 个测试文件 / 1.19 万行测试 | Concat 社区/迭代速度远超，但其功能仍带 beta 棱角 |
 | 语言/文档 | 26 种语言 README + 站点文档，中/繁/日/韩齐全 | 中文单语（`src/shared/i18n.ts` 集中文案，非 key-based） | i18n 是 Concat 的隐性优势，对 Socut 优先级低 |
 | 代码规模 | Rust 工作区（`concat-core/media/project/render/effects/export/api/server/cli/host/speech`） | TS 284 文件 / 7.37 万行（`src`+`cli`+`scripts`+`tests`） | Socut 规模已不小，重心应放在"产品化"而非"重写" |
@@ -156,11 +156,11 @@
 | 项 | 结论 |
 |---|---|
 | Concat 许可证 | **AGPL-3.0-or-later**（`LICENSE` / `LICENSING.md`，另有商业授权可购买） |
-| Socut 现状 | `package.json` 为 `UNLICENSED`（私有/闭源） |
-| 直接复制代码（Rust crate、效果包 WGSL、`packages/` 资源） | ❌ **不可**：AGPL 具有传染性，会要求 Socut 整体开源并对外提供源码 |
+| Socut 现状 | `package.json` 为 `AGPL-3.0-or-later`（2026-11-10 起；此前 `UNLICENSED` 私有） |
+| 直接复制代码（Rust crate、效果包 WGSL、`packages/` 资源） | ⚠️ **不复制**：法律上双方同为 AGPL 已无冲突，但本仓库坚持洁净室自研（且 Rust/Slint 代码无法直接用于 TS/Electron 栈）；若将来真复用，须保留其版权声明并标注修改 |
 | 学习架构 / 产品行为 / 交互范式，用 TS 重新实现 | ✅ 可以（Concat 自己也有 `CLEAN-ROOM.md` 的洁净室规范，说明其同样重视"只学思路不抄代码"） |
 | 引用其 README 的功能描述做对比 | ✅ 可以，注明出处 |
-| 若确实要复用其代码 | 需按其 `LICENSING.md` 购买商业授权，或接受 AGPL 开源 |
+| 若确实要复用其代码 | 需按其 `LICENSING.md` 购买商业授权，或遵守 AGPL 并公开完整源码（Socut 当前已是 AGPL） |
 
 > 建议：把这份对比表作为"能力地图"，落地时全部按 **独立实现 + 自写测试** 推进，并在 PR 描述里注明灵感来源（Concat 的哪一项行为）。
 

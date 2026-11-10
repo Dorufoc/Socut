@@ -1,6 +1,6 @@
 # Socut
 
-[![verify](https://github.com/Dorufoc/socut/actions/workflows/verify.yml/badge.svg)](https://github.com/Dorufoc/socut/actions/workflows/verify.yml)
+[![verify](https://github.com/Dorufoc/socut/actions/workflows/verify.yml/badge.svg)](https://github.com/Dorufoc/socut/actions/workflows/verify.yml) [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 **离线广播级字幕条（Lower Third）与图形包装工作台**：把新闻标题条、人名条、台标、图表包做成可在剪辑软件里直接叠加的**透明 MOV / MP4**。
 
@@ -81,8 +81,20 @@ tests/           vitest（node + jsdom 两套），含 FFmpeg argv 快照与真�
 docs/            验收台账（verification/）、CLI/MCP/资源/预设说明
 ```
 
-## 许可与第三方组件
+## 许可
 
-- 本仓库代码 **UNLICENSED**（保留所有权利，未授予开源许可）。公开仅为可查看，不构成使用/分发授权。
-- 第三方资源各自遵循其许可：FFmpeg（gyan.dev essentials 构建）、whisper.cpp、RNNoise、打包字体、ONNX Runtime（MIT）、MediaPipe Selfie Segmenter 模型（Apache-2.0）。资源清单与来源见 [`docs/assets.md`](docs/assets.md)。
-- 功能面参考了 CapCut / Concat 等剪辑器公开的能力清单，**代码与设计文档全部自研**，未复制任何第三方实现；对比研究见 [`docs/research/concat-vs-socut.md`](docs/research/concat-vs-socut.md)。
+**Socut 以 [GNU AGPL-3.0-or-later](LICENSE) 发布。** 可以自由使用、修改、分发，但分发时必须做到：
+
+1. **保留版权声明与许可全文**，并在修改过的文件里**标注"改了什么"和日期**（AGPL §5(a)(b)）——即"署名 + 改注"；
+2. 以同一许可提供**完整对应源码**（§6）；改版不得移除原版权声明或冒充成完全原创（§5(a)）；
+3. 若把它（含改版）作为网络服务提供给他人，须在界面上提供获取源码的入口（§13）。Socut 目前是**纯本地应用**（CLI/MCP 走本机 stdio 与环回地址），不触发这一条。
+
+安装包根目录随附 `LICENSE` 全文；源码要约（§6(d)）指向本仓库——从本仓库 Release 下载安装包时，同一页面提供的 "Source code (zip)" 即对应源码。
+
+贡献：**不使用 CLA**，提交 PR 即视为同意你的贡献以 AGPL-3.0-or-later 授权。若需要闭源/商业授权（作者本人可另行授权），请联系仓库所有者。
+
+## 第三方组件
+
+第三方资源各自遵循其许可：FFmpeg（gyan.dev essentials，**GPL-3.0-or-later** 构建）、whisper.cpp（MIT）、RNNoise 模型、打包字体（SIL OFL 1.1）、ONNX Runtime（MIT）、MediaPipe Selfie Segmenter 模型（Apache-2.0）。清单、来源与合规判定见 [`docs/assets.md`](docs/assets.md)。
+
+功能面参考了 CapCut / Concat 等剪辑器公开的能力清单，**代码与设计文档全部自研**，未复制任何第三方实现；对比研究见 [`docs/research/concat-vs-socut.md`](docs/research/concat-vs-socut.md)。

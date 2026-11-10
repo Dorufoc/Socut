@@ -228,9 +228,40 @@ async function checkFonts() {
 }
 
 function checkRuntime() {
-  const major = Number(process.versions.node.split('.')[0])
-  if (major < 22) problems.push(`Node ${process.version} 低于要求（Electron 45 需要 >= 22.12）`)
+  const [major, minor] = process.versions.node.split('.').map(Number)
+  if (major < 22 || (major === 22 && minor < 19)) {
+    problems.push(`Node ${process.version} 低于要求（>= 22.19：jsdom 依赖的 undici 8 需要 22.15+ 的 zstd API）`)
+  }
   if (process.platform !== 'win32') warnings.push(`当前平台 ${process.platform}：交付目标是 Windows x64`)
+}
+
+/**
+ * 许可证一致性（2026-11-10 起为 AGPL-3.0-or-later）。
+ * 改协议是最容易「改了 README 忘 LICENSE」的一次性动作，这里三处对账：
+ * LICENSE 全文（AGPL §4 要求随分发提供）→ package.json 的 SPDX → electron-builder 是否把
+ * 许可放进安装包（§6 要求随目标代码交付）。
+ */
+async function checkLicense() {
+  const license = await fs.readFile(path.join(root, 'LICENSE'), 'utf8').catch(() => null)
+  if (license === null) {
+    problems.push('缺少 LICENSE（AGPL-3.0-or-later 要求随分发提供许可全文，跑过 git checkout 或从 gnu.org/licenses/agpl-3.0.txt 取回）')
+  } else {
+    const head = license.slice(0, 200)
+    if (!head.includes('GNU AFFERO GENERAL PUBLIC LICENSE')) problems.push('LICENSE 不是 AGPL 全文（缺少标题行）')
+    if (!head.includes('Version 3, 19 November 2007')) problems.push('LICENSE 不是 AGPL-3.0（缺少版本行）')
+    if (!license.includes('END OF TERMS AND CONDITIONS')) problems.push('LICENSE 不完整（缺少 END OF TERMS AND CONDITIONS）')
+    console.log(`  LICENSE：GNU AGPL v3（${license.length} 字符）`)
+  }
+
+  const pkg = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'))
+  if (pkg.license !== 'AGPL-3.0-or-later') {
+    problems.push(`package.json 的 license 为 ${String(pkg.license)}，应为 AGPL-3.0-or-later`)
+  }
+
+  const builder = await fs.readFile(path.join(root, 'electron-builder.yml'), 'utf8').catch(() => '')
+  if (builder && !/from:\s*LICENSE/.test(builder)) {
+    problems.push('electron-builder.yml 没有把 LICENSE 放进安装包（AGPL §6：随目标代码提供许可全文）')
+  }
 }
 
 /**
@@ -310,6 +341,7 @@ async function main() {
   await checkMatteModelAsset()
   await checkBuiltCsp()
   await checkDeliverables()
+  await checkLicense()
   checkRuntime()
 
   // 资源目录不得被 files 白名单重复打包（electron-builder.yml 已限定 files: out/ + package.json）
