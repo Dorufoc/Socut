@@ -5,9 +5,10 @@
 > **最近一次全绿门禁是否覆盖它**。
 >
 > 执行环境：Windows 11 · Node v24 · Electron 45.2.1 · 随包 FFmpeg 9.0.2（gyan essentials）
+> 仓库：<https://github.com/Dorufoc/socut>（public；push 到 `main` 即触发 `verify` 工作流）
 >
 > 状态口径：`通过` = 本机可复现门禁/真机取证已证；`部分` = 机器可判的一半已证，另一半需外部条件
-> （GitHub Actions 真跑、代码签名、DCC/实拍人工评审）。
+> （代码签名、DCC/实拍人工评审）。
 
 ## 全局门禁（最近一次，2026-11-10）
 
@@ -16,6 +17,7 @@
 | 日常门禁 | `npm run verify` | **通过**：check:env（0 警告）+ eslint + typecheck(node/web/tests) + vitest **139 文件 / 1750 passed + 1 skipped** |
 | CI 等价 | `npm run verify:ci` | **通过**：在 `verify` 之后追加 `electron-vite build`（main/preload/renderer 三份产物均可编译） |
 | 全量验收 | `npm run verify:all` | **通过（20/20 步，2026-11-10）**：`verify:ci` 等价链路 + 两条 CLI 导出冒烟 + MCP stdio 冒烟 + 应用内 10 个场景（1080p30/10s 透明 MOV 300 帧 5.9s、4K60 120 帧 9.49s、取消 MOV/PNG 各 600 帧后产物回收、720p23.976 叠加 120 帧、导入门禁、逐像素一致性 DPR 1.5/1440×810、错误呈现、评审表、字幕视觉检查 24 例 0 失败） |
+| GitHub Actions | push 到 `main` 触发 `.github/workflows/verify.yml` | **通过**（[run #42726427708](https://github.com/Dorufoc/socut/actions/runs/42726427708)，windows-latest + Node 24，2m52s；**139 文件 / 1747 passed + 4 skipped**） |
 
 > 单独跑某个里程碑的用例时以该台账「取证」小节列出的命令为准；
 > 台账里的数字是当时快照，全局数字以本表为准。
@@ -31,7 +33,7 @@
 | M9 | 编码交付：输出尺寸/帧率/像素格式、全范围、软件编码器回退、HDR 留待规格变更 | [M9.md](./M9.md) | **通过**（HDR 明确未排期） |
 | M10 | JSON-RPC 控制面、MCP server、项目锁（窗口 + agent）、取帧 `preview_frame`、事件流 | [M10.md](./M10.md) | **通过**（gRPC 明确不排期） |
 | M11 | Whisper 离线字幕：真实二进制/模型、抽音进度、片段窗口映射、批量编辑 UI | [M11.md](./M11.md) | **通过**（可选增强：模型清单切换） |
-| M12 | CI（verify / package-win 工作流）、资源引导、打包前置检查、MCP 冒烟进 verify:all、原生可选依赖打包与打包后烟测 | [M12.md](./M12.md) | **部分**：本机全绿；真跑 GitHub Actions、代码签名、CI 内安装冒烟需外部条件 |
+| M12 | CI（verify / package-win 工作流）、资源引导、打包前置检查、MCP 冒烟进 verify:all、原生可选依赖打包与打包后烟测、真跑 GitHub Actions | [M12.md](./M12.md) | **通过**（M12-G：Actions 真跑已绿；余项：代码签名、CI 内安装冒烟需外部条件） |
 
 ## 与计划的一处明确偏差
 
