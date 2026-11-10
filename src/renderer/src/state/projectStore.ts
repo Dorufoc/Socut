@@ -1879,6 +1879,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (clip.id !== id) return clip
       const next: MediaClip = { ...clip }
       delete next.video
+      // 「恢复默认」现在覆盖画面关键帧（滑条上的动画也一并清掉）
+      delete next.keyframes
       // v8：「恢复默认」语义覆盖防抖（画面与稳定都回到不做任何处理）
       delete next.stab
       // v9：音频与变速也是“这一条的处理”，一并回到默认（时间轴长度回到源窗口长度）

@@ -10,7 +10,13 @@ import {
 import { frameIntervalSec } from '@shared/fps'
 import { clipTimelineDurationSec, previewGainAt, previewPlaybackRate, previewPreservesPitch } from '@shared/mediaClipAudio'
 import { mediaVideoFilter, mediaVideoTransform, curveTableValues, needsChannelTable } from '@shared/mediaClipVideo'
-import { mediaKeyframeCssAt } from '@shared/mediaClipKeyframes'
+import {
+  mediaChannelKeyframesActive,
+  mediaGradeKeyframesActive,
+  mediaKeyframeCssAt,
+  mediaVideoAt
+} from '@shared/mediaClipKeyframes'
+import { clipProgressAt } from '@shared/keyframes'
 import { transitionProgressAt } from '@shared/transitions'
 import type { Fps, MediaClip } from '@shared/types'
 import { attachPreviewAudio, setElementLevel, setPreservesPitch } from '../audio/previewAudioGraph'
@@ -151,10 +157,21 @@ const EPS = 1e-9
  */
 const PREROLL_OPACITY = '0.004'
 
-function mediaStyleOf(clip: MediaClip): CSSProperties {
+function mediaStyleOf(clip: MediaClip, atSec?: number): CSSProperties {
   const transform = mediaVideoTransform(clip.video)
+  // 调色挂了关键帧时，滤镜值随帧变化：元素上先给该帧的值（渲染期没有播放头就用入点值，
+  // 下一帧 `syncKeyframeStyles` 会按实时进度改写）。
+  const video = mediaGradeKeyframesActive(clip.keyframes)
+    ? mediaVideoAt(
+        clip.video,
+        clip.keyframes,
+        atSec === undefined
+          ? 0
+          : clipProgressAt(atSec, clip.timelineStartSec, clip.timelineEndSec)
+      )
+    : clip.video
   // 每段用自己的曲线表 id：候选池里可能同时挂着调色不同的几段
-  const filter = mediaVideoFilter(clip.video, previewGradeFilterId(clip.id))
+  const filter = mediaVideoFilter(video, previewGradeFilterId(clip.id))
   // M6-E：挂了关键帧的段，几何完全由外层包裹层按帧给出；元素自己不能再套静态 transform
   // （否则被关键帧覆盖的参数会与静态值重复应用，位置/缩放会翻倍）。
   const geometryFromKeyframes = clip.keyframes !== undefined && clip.keyframes.length > 0
@@ -253,6 +270,18 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
      */
     const keyframeLayerRef = useRef(new Map<string, HTMLDivElement>())
     const keyframeCallbacksRef = useRef(new Map<string, (element: HTMLDivElement | null) => void>())
+    /**
+     * 媒体段关键帧：调色用的 SVG 曲线表节点。曝光/冷暖/光感是通道查找表，没法用 CSS 函数表达，
+     * 只能按帧改写 `<feFuncR/G/B>` 的 `tableValues`（与导出 `curves` 同一张表）。
+     */
+    const gradeFuncRef = useRef(
+      new Map<
+        string,
+        { r: SVGFEFuncRElement | null; g: SVGFEFuncGElement | null; b: SVGFEFuncBElement | null }
+      >()
+    )
+    /** 上一帧被调色关键帧接管过 filter 的 clipId（轨道删掉时要把 filter 还原成静态值）。 */
+    const gradeStyledRef = useRef(new Set<string>())
     const failedRef = useRef(new Set<string>())
     const pendingSeekRef = useRef(new Set<string>())
     /** 已做过「进入活动段首帧强制对齐」的 clipId：再次进入活动段（含回绕）要重新对齐 */
@@ -656,31 +685,57 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
      */
     const syncKeyframeStyles = (atSec: number): void => {
       for (const candidate of candidatesRef.current) {
-        const layer = keyframeLayerRef.current.get(candidate.clip.id)
-        if (!layer) continue
         const clip = candidate.clip
         const tracks = clip.keyframes
-        if (!tracks || tracks.length === 0) {
-          if (layer.style.transform !== '') layer.style.transform = ''
-          if (layer.style.opacity !== '1') layer.style.opacity = '1'
-          continue
-        }
         const span = clip.timelineEndSec - clip.timelineStartSec
         const progress = span > 1e-9 ? (atSec - clip.timelineStartSec) / span : 0
-        const css = mediaKeyframeCssAt(clip.video, tracks, progress)
-        const transform = css.transform === 'none' ? '' : css.transform
-        if (layer.style.transform !== transform) layer.style.transform = transform
-        const opacity = String(Math.round(css.opacity * 1000) / 1000)
-        if (layer.style.opacity !== opacity) layer.style.opacity = opacity
+        const layer = keyframeLayerRef.current.get(clip.id)
+        if (layer) {
+          if (!tracks || tracks.length === 0) {
+            if (layer.style.transform !== '') layer.style.transform = ''
+            if (layer.style.opacity !== '1') layer.style.opacity = '1'
+          } else {
+            const css = mediaKeyframeCssAt(clip.video, tracks, progress)
+            const transform = css.transform === 'none' ? '' : css.transform
+            if (layer.style.transform !== transform) layer.style.transform = transform
+            const opacity = String(Math.round(css.opacity * 1000) / 1000)
+            if (layer.style.opacity !== opacity) layer.style.opacity = opacity
+          }
+        }
+
+        const element = elementsRef.current.get(clip.id)
+        if (!element) continue
+        if (!mediaGradeKeyframesActive(tracks)) {
+          // 轨道刚被删掉：把 filter 从"逐帧值"还原成静态值（React 可能已经写过，这里兜底）
+          if (gradeStyledRef.current.delete(clip.id)) {
+            const filter = mediaVideoFilter(clip.video, previewGradeFilterId(clip.id))
+            element.style.filter = filter === 'none' ? '' : filter
+          }
+          continue
+        }
+        gradeStyledRef.current.add(clip.id)
+        const video = mediaVideoAt(clip.video, tracks, progress)
+        const filter = mediaVideoFilter(video, previewGradeFilterId(clip.id))
+        const filterValue = filter === 'none' ? '' : filter
+        if (element.style.filter !== filterValue) element.style.filter = filterValue
+        const funcs = gradeFuncRef.current.get(clip.id)
+        if (funcs && video) {
+          funcs.r?.setAttribute('tableValues', curveTableValues(video, 'r'))
+          funcs.g?.setAttribute('tableValues', curveTableValues(video, 'g'))
+          funcs.b?.setAttribute('tableValues', curveTableValues(video, 'b'))
+        }
       }
     }
 
     /** 转场增量 + 片段基座样式：只改 DOM style，不触发 React state。 */
-    const applyTransitionElementStyle = (      candidate: PreviewCandidate,
+    const applyTransitionElementStyle = (
+      candidate: PreviewCandidate,
       element: HTMLVideoElement | HTMLImageElement,
-      style: CSSProperties
+      style: CSSProperties,
+      atSec: number
     ): void => {
-      const base = mediaStyleOf(candidate.clip)
+      // 调色关键帧的基座滤镜也要用当前帧的值，否则转场期间会跳回入点调色
+      const base = mediaStyleOf(candidate.clip, atSec)
       const baseTransform =
         typeof base.transform === 'string' && base.transform !== 'none' ? base.transform : ''
       const transitionTransform =
@@ -697,7 +752,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     }
 
     /** 退出转场 / 转场未就绪：把 transform/filter/zIndex 还原到片段基座。 */
-    const restoreTransitionStyles = (list: PreviewCandidate[]): void => {
+    const restoreTransitionStyles = (list: PreviewCandidate[], atSec?: number): void => {
       for (const clipId of transitionStyledRef.current) {
         const candidate = list.find((item) => item.clip.id === clipId)
         const element = elementsRef.current.get(clipId)
@@ -705,7 +760,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
           transitionStyledRef.current.delete(clipId)
           continue
         }
-        const base = mediaStyleOf(candidate.clip)
+        const base = mediaStyleOf(candidate.clip, atSec)
         element.style.transform =
           typeof base.transform === 'string' && base.transform !== 'none' ? base.transform : ''
         element.style.filter =
@@ -743,8 +798,8 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
         tr.type,
         transitionProgressAt(atSec, tr.cutSec, tr.durationSec)
       )
-      applyTransitionElementStyle(left, leftElement, styles.left)
-      applyTransitionElementStyle(right, rightElement, styles.right)
+      applyTransitionElementStyle(left, leftElement, styles.left, atSec)
+      applyTransitionElementStyle(right, rightElement, styles.right, atSec)
       if (flashRef.current) {
         flashRef.current.style.background = styles.flash?.color ?? '#000'
         flashRef.current.style.opacity = String(styles.flash?.opacity ?? 0)
@@ -832,7 +887,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       const resolver = transitionResolverRef.current
       const tr = resolver ? resolver(atSec) : transitionPropRef.current
       if (tr && applyTransition(list, tr, atSec, playing, halfFrame)) return
-      restoreTransitionStyles(list)
+      restoreTransitionStyles(list, atSec)
 
       // 1. 该显示哪一段：上层 ready 优先；上层没就绪时回落到下层 ready；
       //    都没有时，**只有剪辑缝口**（刚结束这段的终点处紧贴下一段）才保留最后一帧兜底。
@@ -1100,21 +1155,43 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       <>
         {/* 每段自己的曲线查找表：候选池可能同时有调色不同的几段，不能共用全局 id */}
         {orderedCandidates.map((candidate) => {
+          const clipId = candidate.clip.id
           const video = candidate.clip.video
-          if (!video || !needsChannelTable(video)) return null
+          // 调色关键帧里的曝光/冷暖/光感会逐帧改写通道表，所以即使静态值不需要也要挂上
+          const channelKeyed = mediaChannelKeyframesActive(candidate.clip.keyframes)
+          if ((!video || !needsChannelTable(video)) && !channelKeyed) return null
+          const setFunc = (
+            channel: 'r' | 'g' | 'b',
+            element: SVGFEFuncRElement | SVGFEFuncGElement | SVGFEFuncBElement | null
+          ): void => {
+            const entry = gradeFuncRef.current.get(clipId) ?? { r: null, g: null, b: null }
+            gradeFuncRef.current.set(clipId, { ...entry, [channel]: element })
+          }
           return (
             <svg
-              key={`grade-${candidate.clip.id}`}
+              key={`grade-${clipId}`}
               className="stage__filters"
               aria-hidden="true"
               focusable="false"
             >
               <defs>
-                <filter id={previewGradeFilterId(candidate.clip.id)} colorInterpolationFilters="sRGB">
+                <filter id={previewGradeFilterId(clipId)} colorInterpolationFilters="sRGB">
                   <feComponentTransfer>
-                    <feFuncR type="table" tableValues={curveTableValues(video, 'r')} />
-                    <feFuncG type="table" tableValues={curveTableValues(video, 'g')} />
-                    <feFuncB type="table" tableValues={curveTableValues(video, 'b')} />
+                    <feFuncR
+                      ref={(element) => setFunc('r', element)}
+                      type="table"
+                      tableValues={video ? curveTableValues(video, 'r') : '0 1'}
+                    />
+                    <feFuncG
+                      ref={(element) => setFunc('g', element)}
+                      type="table"
+                      tableValues={video ? curveTableValues(video, 'g') : '0 1'}
+                    />
+                    <feFuncB
+                      ref={(element) => setFunc('b', element)}
+                      type="table"
+                      tableValues={video ? curveTableValues(video, 'b') : '0 1'}
+                    />
                   </feComponentTransfer>
                 </filter>
               </defs>

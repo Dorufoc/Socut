@@ -551,7 +551,13 @@ export const TEXT = {
       offsetXPct: '水平位移 %',
       offsetYPct: '垂直位移 %',
       scalePct: '缩放 %',
-      rotationDeg: '旋转 °'
+      rotationDeg: '旋转 °',
+      brightness: '亮度',
+      exposure: '曝光',
+      contrast: '对比度',
+      saturation: '饱和度',
+      warmth: '冷暖',
+      vibrance: '光感'
     }
   },
 

@@ -1247,6 +1247,58 @@ input[type='color']:disabled {
   color: var(--text-secondary);
 }
 
+/* 画面滑条内联关键帧：行尾菱形按钮 + 轨道存在时的清空按钮 */
+.slider-row--keyed {
+  grid-template-columns: 92px minmax(0, 1fr) 44px 30px;
+}
+
+.slider-row__keys {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.keyframe-toggle {
+  width: 14px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  opacity: 0.55;
+  transition: color 120ms ease, opacity 120ms ease;
+}
+
+.keyframe-toggle:hover {
+  opacity: 1;
+  color: var(--text-secondary);
+}
+
+/* 有轨道（空心菱形，提示"该参数已动画"） */
+.keyframe-toggle.is-track {
+  opacity: 0.9;
+  color: var(--accent);
+}
+
+/* 播放头正好落在关键点上（实心菱形） */
+.keyframe-toggle.is-key {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.keyframe-toggle--clear {
+  font-size: 12px;
+  opacity: 0.4;
+}
+
+.keyframe-toggle--clear:hover {
+  color: var(--text-secondary);
+}
+
 /* 展开器（WinUI Expander） */
 
 .expander {

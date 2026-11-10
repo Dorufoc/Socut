@@ -19,9 +19,16 @@ import { useExportStore } from '../state/exportStore'
 import { waitForResult } from '../state/jobEvents'
 import { stabSignatureFor, useStabPreviewStore } from '../state/stabPreviewStore'
 import { CurveEditor } from './CurveEditor'
-import { Slider } from './Slider'
+import { Slider, type SliderKeyframeProps } from './Slider'
 import { ClipAudioSection, ClipEffectsSection, ClipKeySection, ClipSpeedSection } from './ClipFxSections'
-import { KeyframePanel } from './KeyframePanel'
+import {
+  clipProgressAt,
+  keyframeValueAt,
+  removeKeyframePoint,
+  upsertKeyframePoint,
+  type ClipParamId,
+  type KeyframeTrack
+} from '@shared/keyframes'
 
 /**
  * 右侧「视频片段」编辑器（v6）：选中媒体段时替换字幕检查器。
@@ -79,7 +86,11 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
   const video = clip.video ?? defaultMediaVideo()
   const stab = clip.stab
   const stabOn = stab?.enabled === true
-  const edited = !isDefaultMediaVideo(clip.video) || stabOn || clipAudioEdited(clip.audio, clip.speed)
+  const edited =
+    !isDefaultMediaVideo(clip.video) ||
+    (clip.keyframes?.length ?? 0) > 0 ||
+    stabOn ||
+    clipAudioEdited(clip.audio, clip.speed)
 
   // v8.1：防抖预览代理——当前签名与记账一致才算「已就绪」；参数一动自动回落原片。
   const mediaItem = useProjectStore((state) => state.project.media.find((m) => m.id === clip.mediaId) ?? null)
@@ -105,6 +116,72 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
   const proxyDuration = stabProxyTimeOf(clip.sourceOutSec, clip.sourceInSec, clip.sourceOutSec)
 
   const set = (patch: Partial<MediaClipVideo>): void => updateVideo(clip.id, patch)
+
+  // ---- 画面滑条内联关键帧（几何 + 调色，全部参数同一套交互） ----
+  // 播放头 → 片段内进度（0..1），与预览/导出的求值口径一致；圆到 0.1% 让"同一位置"可判定。
+  const displayTimeSec = useUiStore((state) => state.displayTimeSec)
+  const progress =
+    Math.round(clipProgressAt(displayTimeSec, clip.timelineStartSec, clip.timelineEndSec) * 1000) / 1000
+  const keyframeTracks = clip.keyframes
+  /** 判定"播放头处正好有这个点"的容差（0.1%） */
+  const KEY_AT_PLAYHEAD_EPS = 1e-3
+
+  const trackOf = (param: ClipParamId): KeyframeTrack | undefined =>
+    keyframeTracks?.find((track) => track.param === param)
+
+  /** 滑条读数：有轨道时显示该帧求值，否则显示静态值（拖动即在播放头写/改关键点）。 */
+  const sliderValue = (param: ClipParamId, staticValue: number): number => {
+    const track = trackOf(param)
+    return track ? keyframeValueAt(track, progress) : staticValue
+  }
+
+  const commitPoint = (param: ClipParamId, value: number): void => {
+    setMediaClipKeyframes(
+      clip.id,
+      upsertKeyframePoint(keyframeTracks, param, { t: progress, value, easing: 'linear' })
+    )
+  }
+
+  /** 滑条写回：有轨道 → 在播放头打/改关键点；无轨道 → 仍写静态字段（旧行为）。 */
+  const sliderChange =
+    (param: ClipParamId, applyStatic: (value: number) => void) =>
+    (value: number): void => {
+      if (trackOf(param)) commitPoint(param, value)
+      else applyStatic(value)
+    }
+
+  const toggleKeyframe = (param: ClipParamId, staticValue: number): void => {
+    const track = trackOf(param)
+    const index = track?.points.findIndex((point) => Math.abs(point.t - progress) < KEY_AT_PLAYHEAD_EPS) ?? -1
+    if (track && index >= 0) {
+      setMediaClipKeyframes(clip.id, removeKeyframePoint(keyframeTracks, param, index))
+      return
+    }
+    // 已有轨道但当前不在点上：以该帧求值打点，避免"打点即跳变"
+    commitPoint(param, track ? keyframeValueAt(track, progress) : staticValue)
+  }
+
+  const clearKeyframeTrack = (param: ClipParamId): void => {
+    const next = keyframeTracks?.filter((track) => track.param !== param)
+    setMediaClipKeyframes(clip.id, next && next.length > 0 ? next : undefined)
+  }
+
+  const keyframeOf = (param: ClipParamId, staticValue: number): SliderKeyframeProps => {
+    const track = trackOf(param)
+    return {
+      active: track !== undefined && track.points.length > 0,
+      atPlayhead:
+        track?.points.some((point) => Math.abs(point.t - progress) < KEY_AT_PLAYHEAD_EPS) ?? false,
+      onToggle: () => toggleKeyframe(param, staticValue),
+      onClear: () => clearKeyframeTrack(param),
+      labels: {
+        add: TEXT.keyframes.addPoint,
+        remove: TEXT.keyframes.deletePoint,
+        clear: TEXT.keyframes.clearTrack
+      }
+    }
+  }
+
   const setStab = (patch: Partial<MediaClipStab>): void => {
     updateStab(clip.id, patch)
     // 关掉防抖：代理对它不再有语义，连磁盘缓存一起回收
@@ -317,36 +394,40 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
         </div>
         <Slider
           label={TEXT.videoEditor.scale}
-          value={video.scalePercent}
+          value={sliderValue('scalePct', video.scalePercent)}
           min={MEDIA_VIDEO_RANGE.scale.min}
           max={MEDIA_VIDEO_RANGE.scale.max}
           unit="%"
           title={TEXT.videoEditor.interactHint}
-          onChange={(value) => set({ scalePercent: value })}
+          keyframe={keyframeOf('scalePct', video.scalePercent)}
+          onChange={sliderChange('scalePct', (value) => set({ scalePercent: value }))}
         />
         <Slider
           label={TEXT.videoEditor.offsetX}
-          value={video.offsetXPercent}
+          value={sliderValue('offsetXPct', video.offsetXPercent)}
           min={MEDIA_VIDEO_RANGE.offset.min}
           max={MEDIA_VIDEO_RANGE.offset.max}
           unit="%"
-          onChange={(value) => set({ offsetXPercent: value })}
+          keyframe={keyframeOf('offsetXPct', video.offsetXPercent)}
+          onChange={sliderChange('offsetXPct', (value) => set({ offsetXPercent: value }))}
         />
         <Slider
           label={TEXT.videoEditor.offsetY}
-          value={video.offsetYPercent}
+          value={sliderValue('offsetYPct', video.offsetYPercent)}
           min={MEDIA_VIDEO_RANGE.offset.min}
           max={MEDIA_VIDEO_RANGE.offset.max}
           unit="%"
-          onChange={(value) => set({ offsetYPercent: value })}
+          keyframe={keyframeOf('offsetYPct', video.offsetYPercent)}
+          onChange={sliderChange('offsetYPct', (value) => set({ offsetYPercent: value }))}
         />
         <Slider
           label={TEXT.videoEditor.rotation}
-          value={video.rotationDeg}
+          value={sliderValue('rotationDeg', video.rotationDeg)}
           min={MEDIA_VIDEO_RANGE.rotation.min}
           max={MEDIA_VIDEO_RANGE.rotation.max}
           unit="°"
-          onChange={(value) => set({ rotationDeg: value })}
+          keyframe={keyframeOf('rotationDeg', video.rotationDeg)}
+          onChange={sliderChange('rotationDeg', (value) => set({ rotationDeg: value }))}
         />
       </section>
 
@@ -382,48 +463,54 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
         <div className="facet-label">{TEXT.videoEditor.basics}</div>
         <Slider
           label={TEXT.videoEditor.brightness}
-          value={video.brightness}
+          value={sliderValue('brightness', video.brightness)}
           min={MEDIA_VIDEO_RANGE.grade.min}
           max={MEDIA_VIDEO_RANGE.grade.max}
-          onChange={(value) => set({ brightness: value })}
+          keyframe={keyframeOf('brightness', video.brightness)}
+          onChange={sliderChange('brightness', (value) => set({ brightness: value }))}
         />
         <Slider
           label={TEXT.videoEditor.exposure}
-          value={video.exposure}
+          value={sliderValue('exposure', video.exposure)}
           min={MEDIA_VIDEO_RANGE.grade.min}
           max={MEDIA_VIDEO_RANGE.grade.max}
-          onChange={(value) => set({ exposure: value })}
+          keyframe={keyframeOf('exposure', video.exposure)}
+          onChange={sliderChange('exposure', (value) => set({ exposure: value }))}
         />
 
         <div className="facet-label">{TEXT.videoEditor.colorGroup}</div>
         <Slider
           label={TEXT.videoEditor.contrast}
-          value={video.contrast}
+          value={sliderValue('contrast', video.contrast)}
           min={MEDIA_VIDEO_RANGE.grade.min}
           max={MEDIA_VIDEO_RANGE.grade.max}
-          onChange={(value) => set({ contrast: value })}
+          keyframe={keyframeOf('contrast', video.contrast)}
+          onChange={sliderChange('contrast', (value) => set({ contrast: value }))}
         />
         <Slider
           label={TEXT.videoEditor.saturation}
-          value={video.saturation}
+          value={sliderValue('saturation', video.saturation)}
           min={MEDIA_VIDEO_RANGE.grade.min}
           max={MEDIA_VIDEO_RANGE.grade.max}
-          onChange={(value) => set({ saturation: value })}
+          keyframe={keyframeOf('saturation', video.saturation)}
+          onChange={sliderChange('saturation', (value) => set({ saturation: value }))}
         />
         <Slider
           label={TEXT.videoEditor.warmth}
-          value={video.warmth}
+          value={sliderValue('warmth', video.warmth)}
           min={MEDIA_VIDEO_RANGE.grade.min}
           max={MEDIA_VIDEO_RANGE.grade.max}
-          onChange={(value) => set({ warmth: value })}
+          keyframe={keyframeOf('warmth', video.warmth)}
+          onChange={sliderChange('warmth', (value) => set({ warmth: value }))}
         />
         <Slider
           label={TEXT.videoEditor.vibrance}
-          value={video.vibrance}
+          value={sliderValue('vibrance', video.vibrance)}
           min={MEDIA_VIDEO_RANGE.grade.min}
           max={MEDIA_VIDEO_RANGE.grade.max}
           title={TEXT.videoEditor.vibranceHint}
-          onChange={(value) => set({ vibrance: value })}
+          keyframe={keyframeOf('vibrance', video.vibrance)}
+          onChange={sliderChange('vibrance', (value) => set({ vibrance: value }))}
         />
 
         <div className="facet-label">{TEXT.videoEditor.curves}</div>
@@ -439,28 +526,6 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
         onChange={setAudio}
       />
       <ClipSpeedSection speed={clip.speed} onChange={setSpeed} />
-
-      {/* M6-E：媒体段关键帧（与字幕条同一套面板；打点初始值取当前静态几何，避免"打点即跳变"） */}
-      <section className="group">
-        <div className="group__head">
-          <span className="group__title">{TEXT.keyframes.title}</span>
-        </div>
-        <KeyframePanel
-          clip={{
-            id: clip.id,
-            startTime: clip.timelineStartSec,
-            endTime: clip.timelineEndSec,
-            ...(clip.keyframes ? { keyframes: clip.keyframes } : {})
-          }}
-          onCommit={setMediaClipKeyframes}
-          defaults={{
-            scalePct: video.scalePercent,
-            offsetXPct: video.offsetXPercent,
-            offsetYPct: video.offsetYPercent,
-            rotationDeg: video.rotationDeg
-          }}
-        />
-      </section>
 
       {/* M8：手绘遮罩（预览 CSS mask + 预览上的画笔层；坐标归一化，与画幅/缩放无关） */}
       <section className="group">

@@ -121,7 +121,7 @@ describe('projectStore.setMediaClipKeyframes', () => {
     useProjectStore.getState().setMediaClipKeyframes(clipId, [])
     expect('keyframes' in clipOf(clipId)).toBe(false)
     useProjectStore.getState().setMediaClipKeyframes(clipId, [
-      { param: 'brightness' as never, points: [{ t: 0, value: 1, easing: 'linear' }] }
+      { param: 'maskFeather' as never, points: [{ t: 0, value: 1, easing: 'linear' }] }
     ])
     expect('keyframes' in clipOf(clipId)).toBe(false)
   })

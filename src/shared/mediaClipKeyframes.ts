@@ -1,4 +1,5 @@
 import { CLIP_PARAM_LIMITS, keyframeValueAt, type KeyframeTrack } from './keyframes'
+import { defaultMediaVideo } from './mediaClipVideo'
 import type { MediaClipVideo } from './types'
 
 /**
@@ -16,8 +17,37 @@ import type { MediaClipVideo } from './types'
  */
 
 /** 媒体段可关键帧化的参数（与 `MediaClipVideo` 的静态字段同名对应）。 */
-export const MEDIA_KEYFRAME_PARAMS = ['opacity', 'offsetXPct', 'offsetYPct', 'scalePct', 'rotationDeg'] as const
+export const MEDIA_KEYFRAME_PARAMS = [
+  'opacity',
+  'offsetXPct',
+  'offsetYPct',
+  'scalePct',
+  'rotationDeg',
+  'brightness',
+  'exposure',
+  'contrast',
+  'saturation',
+  'warmth',
+  'vibrance'
+] as const
 export type MediaKeyframeParam = (typeof MEDIA_KEYFRAME_PARAMS)[number]
+
+/** 媒体段调色参数（预览用 CSS 滤镜、导出用逐帧分段滤镜）。 */
+export const MEDIA_GRADE_KEYFRAME_PARAMS = [
+  'brightness',
+  'exposure',
+  'contrast',
+  'saturation',
+  'warmth',
+  'vibrance'
+] as const satisfies readonly MediaKeyframeParam[]
+
+/** 需要走曲线查找表（SVG / FFmpeg `curves`）的调色参数。 */
+export const MEDIA_CHANNEL_KEYFRAME_PARAMS = [
+  'exposure',
+  'warmth',
+  'vibrance'
+] as const satisfies readonly MediaKeyframeParam[]
 
 /** 媒体段没有静态"不透明度"字段：无轨道时恒为 1（不生效）。 */
 export const MEDIA_STATIC_OPACITY = 1
@@ -28,6 +58,12 @@ export interface MediaFrameParams {
   offsetYPct: number
   scalePct: number
   rotationDeg: number
+  brightness: number
+  exposure: number
+  contrast: number
+  saturation: number
+  warmth: number
+  vibrance: number
   /** 是否真的挂了关键帧（没有则渲染/导出走旧静态路径，逐字节不变） */
   hasKeyframes: boolean
 }
@@ -45,6 +81,12 @@ export function mediaFrameParamsAt(
     offsetYPct: video?.offsetYPercent ?? 0,
     scalePct: video?.scalePercent ?? 100,
     rotationDeg: video?.rotationDeg ?? 0,
+    brightness: video?.brightness ?? 0,
+    exposure: video?.exposure ?? 0,
+    contrast: video?.contrast ?? 0,
+    saturation: video?.saturation ?? 0,
+    warmth: video?.warmth ?? 0,
+    vibrance: video?.vibrance ?? 0,
     hasKeyframes: false
   }
   if (!keyframes || keyframes.length === 0) return params
@@ -68,9 +110,72 @@ export function mediaFrameParamsAt(
       case 'rotationDeg':
         params.rotationDeg = keyframeValueAt(track, p)
         break
+      case 'brightness':
+        params.brightness = keyframeValueAt(track, p)
+        break
+      case 'exposure':
+        params.exposure = keyframeValueAt(track, p)
+        break
+      case 'contrast':
+        params.contrast = keyframeValueAt(track, p)
+        break
+      case 'saturation':
+        params.saturation = keyframeValueAt(track, p)
+        break
+      case 'warmth':
+        params.warmth = keyframeValueAt(track, p)
+        break
+      case 'vibrance':
+        params.vibrance = keyframeValueAt(track, p)
+        break
     }
   }
   return params
+}
+
+/** 调色参数是否有轨道（决定预览是否逐帧重算 CSS 滤镜、导出是否走分段滤镜）。 */
+export function mediaGradeKeyframesActive(keyframes: readonly KeyframeTrack[] | undefined): boolean {
+  if (!keyframes || keyframes.length === 0) return false
+  return keyframes.some(
+    (track) =>
+      track.points.length > 0 && (MEDIA_GRADE_KEYFRAME_PARAMS as readonly string[]).includes(track.param)
+  )
+}
+
+/** 是否有需要曲线查找表的调色轨道（曝光/冷暖/光感：预览要逐帧刷新 SVG 表）。 */
+export function mediaChannelKeyframesActive(keyframes: readonly KeyframeTrack[] | undefined): boolean {
+  if (!keyframes || keyframes.length === 0) return false
+  return keyframes.some(
+    (track) =>
+      track.points.length > 0 && (MEDIA_CHANNEL_KEYFRAME_PARAMS as readonly string[]).includes(track.param)
+  )
+}
+
+/**
+ * 该帧的**有效 `MediaClipVideo`**：几何/调色字段被轨道覆盖，其余字段（镜像/曲线/特效）保持静态。
+ * 预览用它算 CSS 滤镜与 SVG 曲线表，导出用它算每一时间窗的静态滤镜串 —— 同源口径。
+ */
+export function mediaVideoAt(
+  video: MediaClipVideo | undefined,
+  keyframes: readonly KeyframeTrack[] | undefined,
+  progress: number
+): MediaClipVideo | undefined {
+  const params = mediaFrameParamsAt(video, keyframes, progress)
+  if (!params.hasKeyframes) return video
+  const base = video ?? defaultMediaVideo()
+  return {
+    ...base,
+    scalePercent: params.scalePct,
+    offsetXPercent: params.offsetXPct,
+    offsetYPercent: params.offsetYPct,
+    rotationDeg: params.rotationDeg,
+    brightness: params.brightness,
+    exposure: params.exposure,
+    contrast: params.contrast,
+    saturation: params.saturation,
+    warmth: params.warmth,
+    vibrance: params.vibrance
+  }
 }
 
 /** 浮点数压缩写法（CSS 与滤镜串共用；避免 `1.0000000000000002` 这种噪声）。 */

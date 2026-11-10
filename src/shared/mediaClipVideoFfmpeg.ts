@@ -1,5 +1,6 @@
 import {
   curveTableValues,
+  CURVE_LUT_STEPS,
   isDefaultMediaVideo,
   isStraightCurves,
   lightToneSaturate,
@@ -8,9 +9,11 @@ import {
 import { buildEffectFilters } from './effectPackages'
 import { defaultMediaVideo } from './mediaClipVideo'
 import {
+  mediaGradeKeyframesActive,
   mediaKeyframesActive,
   mediaParamExpr,
   mediaTrackOf,
+  mediaVideoAt,
   MEDIA_KEYFRAME_EXPR_SAMPLES
 } from './mediaClipKeyframes'
 import { keyframeValueAt, type KeyframeTrack } from './keyframes'
@@ -89,7 +92,7 @@ function geometryChanged(video: MediaClipVideo): boolean {
 }
 
 /** 调色滤镜串（不含首尾逗号）；顺序：亮度 → 对比度/饱和度 → 曲线。 */
-function gradeFilters(video: MediaClipVideo): string[] {
+function gradeFilters(video: MediaClipVideo, lutSteps: number = CURVE_LUT_STEPS): string[] {
   const filters: string[] = []
   if (Math.abs(video.brightness) > 1e-6) {
     const gain = 1 + video.brightness / 100
@@ -111,15 +114,71 @@ function gradeFilters(video: MediaClipVideo): string[] {
     Math.abs(video.vibrance) > 1e-6
   if (needsCurves) {
     filters.push(
-      `curves=r='${curvePoints(video, 'r')}':g='${curvePoints(video, 'g')}':b='${curvePoints(video, 'b')}'`
+      `curves=r='${curvePoints(video, 'r', lutSteps)}':g='${curvePoints(video, 'g', lutSteps)}':b='${curvePoints(
+        video,
+        'b',
+        lutSteps
+      )}'`
     )
   }
   return filters
 }
 
+/** 调色关键帧的逐帧分段数：几何/亮度类（很小）可以切细；带曲线表（很占体积）切粗。 */
+const GRADE_KEYFRAME_STEPS = 24
+const GRADE_KEYFRAME_CURVE_STEPS = 12
+/** 分段路径的曲线采样数：控制 filter_complex 体积（静态路径仍用完整 32 段）。 */
+const GRADE_KEYFRAME_LUT_STEPS = 16
+
+/**
+ * 调色关键帧 → 一串「时间窗静态滤镜」：
+ * 把整段按 `[t₀,t₁)` 切片，每个时间窗内用**窗口中点求值**的静态调色串，靠 `enable` 只在该窗生效。
+ *
+ * 为什么不用 `eq` 表达式：亮度/曝光/冷暖/光感的 CSS 语义是**乘性通道增益/曲线查表**，
+ * FFmpeg 的 `eq` 只能做加性亮度与对比度/饱和度，`colorchannelmixer`/`curves` 又不接受表达式；
+ * 所以逐帧数值只能落到「分段静态参数 + 时间窗」上（分段常量近似，并非逐帧精确）。
+ */
+function steppedGradeFilters(
+  video: MediaClipVideo,
+  keyframes: readonly KeyframeTrack[] | undefined,
+  durationSec: number
+): string[] {
+  const duration = Math.max(1e-6, Number.isFinite(durationSec) ? durationSec : 0)
+  // 曲线表（曝光/冷暖/光感/弯曲曲线）体积大，切粗一点；纯亮度/对比度/饱和度切细保证平顺
+  const needsCurves =
+    !isStraightCurves(video.curves) ||
+    Math.abs(video.exposure) > 1e-6 ||
+    Math.abs(video.warmth) > 1e-6 ||
+    Math.abs(video.vibrance) > 1e-6 ||
+    (keyframes ?? []).some(
+      (track) =>
+        track.points.length > 0 && ['exposure', 'warmth', 'vibrance'].includes(track.param)
+    )
+  const steps = needsCurves ? GRADE_KEYFRAME_CURVE_STEPS : GRADE_KEYFRAME_STEPS
+  const lutSteps = needsCurves ? GRADE_KEYFRAME_LUT_STEPS : CURVE_LUT_STEPS
+  const filters: string[] = []
+  for (let index = 0; index < steps; index += 1) {
+    const start = (index / steps) * duration
+    const end = ((index + 1) / steps) * duration
+    // 中点取值：窗口内保持常量的近似值（端点由首/末窗各覆盖一次，不会漏帧）
+    const frameVideo = mediaVideoAt(video, keyframes, (index + 0.5) / steps) ?? video
+    // 首窗不设下界（t 可能因上游 setpts 从非 0 开始）；末窗不设上界（覆盖到尾帧）
+    const enable =
+      index === 0
+        ? `lt(t,${num(end, 6)})`
+        : index === steps - 1
+          ? `gte(t,${num(start, 6)})`
+          : `gte(t,${num(start, 6)})*lt(t,${num(end, 6)})`
+    for (const filter of gradeFilters(frameVideo, lutSteps)) {
+      filters.push(`${filter}:enable='${enable}'`)
+    }
+  }
+  return filters
+}
+
 /** `"0.0000 0.0313 ..."` → `0/0.0000 0.031/0.0313 ... 1/1.0000`（曲线控制点）。 */
-function curvePoints(video: MediaClipVideo, channel: 'r' | 'g' | 'b'): string {
-  const values = curveTableValues(video, channel).split(' ')
+function curvePoints(video: MediaClipVideo, channel: 'r' | 'g' | 'b', lutSteps: number = CURVE_LUT_STEPS): string {
+  const values = curveTableValues(video, channel, lutSteps).split(' ')
   return values
     .map((y, index) => {
       const x = index / (values.length - 1)
@@ -148,7 +207,10 @@ export function buildMediaClipVideoFx(input: MediaClipVideoFxInput): MediaClipVi
 
   const { frame, fps, transparentBackground, durationSec } = input
   const finalFormat = transparentBackground ? 'rgba' : 'yuv420p'
-  const grade = gradeFilters(video)
+  // 调色关键帧：逐帧数值 → 时间窗静态滤镜；否则保持原来的单串静态滤镜（逐字节不变）
+  const grade = mediaGradeKeyframesActive(keyframes)
+    ? steppedGradeFilters(video, keyframes, durationSec)
+    : gradeFilters(video)
   const geometry = geometryChanged(video)
   // M7-E：特效包滤镜挂在调色之后（vignette/颗粒等作用在最终画面上）；
   // 无特效时 effects=[]，下面的语句与旧版逐字节一致。

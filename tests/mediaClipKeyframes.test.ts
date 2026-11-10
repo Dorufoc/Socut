@@ -189,6 +189,26 @@ describe('媒体段关键帧 · 导出滤镜图', () => {
     expect(overlay).toContain('vignette')
   })
 
+  it('调色关键帧：静态调色串按时间窗分段（enable 各自生效），无调色轨道仍是单串', () => {
+    const staticFx = buildMediaClipVideoFx({
+      ...base,
+      video: { ...defaultMediaVideo(), brightness: 20 }
+    })
+    expect(staticFx.statements.join(';')).not.toContain('enable=')
+    expect(staticFx.statements.join(';')).toContain('colorchannelmixer=rr=1.2')
+
+    const keyed = buildMediaClipVideoFx({
+      ...base,
+      video: { ...defaultMediaVideo(), brightness: 20 },
+      keyframes: [rampTrack('brightness', 0, 40)]
+    })
+    const joined = keyed.statements.join(';')
+    // 每个时间窗一份静态调色串：数量远多于 1，且首窗/末窗用半开/闭区间覆盖整段
+    expect((joined.match(/colorchannelmixer/g) ?? []).length).toBeGreaterThan(10)
+    expect(joined).toContain("enable='lt(t,")
+    expect(joined).toContain("enable='gte(t,")
+  })
+
   it('导出 argv 接线：媒体段关键帧进入 filter_complex（不是只在 fx 层可用）', () => {
     const argv = buildOverlayMp4MultiInputDirectPipe({
       segments: [
@@ -288,6 +308,82 @@ describe('媒体段关键帧 · 导出滤镜图', () => {
       await fsp.rm(dir, { recursive: true, force: true })
     }
   }, 120_000)
+
+  it.skipIf(!hasFfmpeg)('真机：调色关键帧分段滤镜可解，且亮度随时间单调抬升', async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'socut-mkf-grade-'))
+    try {
+      // 纯灰源：避免素材自身运动干扰"亮度是否真的变了"的判断
+      const source = path.join(dir, 'gray.mp4')
+      const made = await run(ffmpeg, [
+        '-y',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        'color=c=gray:s=320x180:r=30:d=0.6',
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',
+        source
+      ])
+      expect(made.code, made.stderr.slice(0, 300)).toBe(0)
+
+      const fx = buildMediaClipVideoFx({
+        ...base,
+        keyframes: [rampTrack('brightness', 0, 80)]
+      })
+      const target = path.join(dir, 'out.mp4')
+      const rendered = await run(ffmpeg, [
+        '-y',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-i',
+        source,
+        '-filter_complex',
+        fx.statements.join(';'),
+        '-map',
+        '[v]',
+        '-r',
+        '30',
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',
+        target
+      ])
+      expect(rendered.code, rendered.stderr.slice(0, 800)).toBe(0)
+
+      const lumaAt = async (at: string): Promise<number> => {
+        const probe = await run(ffmpeg, [
+          '-hide_banner',
+          '-ss',
+          at,
+          '-i',
+          target,
+          '-frames:v',
+          '1',
+          '-vf',
+          'signalstats,metadata=print',
+          '-f',
+          'null',
+          '-'
+        ])
+        const match = probe.stderr.match(/lavfi\.signalstats\.YAVG=([\d.]+)/)
+        expect(match, probe.stderr.slice(0, 400)).toBeTruthy()
+        return Number(match![1])
+      }
+      const first = await lumaAt('0.05')
+      const last = await lumaAt('0.55')
+      // 亮度 -100..100 映射成 0..2 倍增益：尾帧应明显亮于首帧
+      expect(last - first).toBeGreaterThan(10)
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true })
+    }
+  }, 120_000)
 })
 
 describe('媒体段关键帧 · 工程 JSON', () => {
@@ -342,8 +438,10 @@ describe('媒体段关键帧 · 工程 JSON', () => {
             keyframes: [
               { param: 'scalePct', points: [{ t: 0, value: 100, easing: 'linear' }, { t: 1, value: 200, easing: 'linear' }] },
               { param: 'opacity', points: [{ t: 0, value: 0.5, easing: 'linear' }] },
-              // 非法：未知参数、空轨道、非法点
+              // 合法：媒体段调色参数（M7 起可打点）
               { param: 'brightness', points: [{ t: 0, value: 50, easing: 'linear' }] },
+              // 非法：未知参数、非法点
+              { param: 'maskFeather', points: [{ t: 0, value: 5, easing: 'linear' }] },
               { param: 'offsetXPct', points: [{ t: 'x', value: 10 }] }
             ]
           }
@@ -353,8 +451,9 @@ describe('媒体段关键帧 · 工程 JSON', () => {
     const normalized = normalizeProject(raw)
     expect(normalized).toBeTruthy()
     const clip = normalized!.mediaClips[0]!
-    // 顺序由 CLIP_PARAM_IDS 决定（opacity 在最前），与工程 JSON 稳定性口径一致
-    expect(clip.keyframes!.map((track) => track.param)).toEqual(['opacity', 'scalePct'])
+    // 顺序由 ALL_CLIP_PARAM_IDS 决定（基础参数在前、调色参数在后），与工程 JSON 稳定性口径一致
+    expect(clip.keyframes!.map((track) => track.param)).toEqual(['opacity', 'scalePct', 'brightness'])
     expect(clip.keyframes![1]!.points.map((point) => point.value)).toEqual([100, 200])
+    expect(clip.keyframes![2]!.points.map((point) => point.value)).toEqual([50])
   })
 })

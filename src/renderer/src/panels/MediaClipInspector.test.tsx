@@ -723,25 +723,52 @@ describe('转场入口不再挂在片段检查器（v11）', () => {
   })
 })
 
-describe('媒体段关键帧（M6-E）', () => {
-  it('媒体段检查器里有「关键帧」分区；打点写入该段 keyframes，初始值取静态几何', () => {
+describe('媒体段关键帧（内联到画面滑条）', () => {
+  it('每个画面滑条行尾都有打点按钮；打点写入该段 keyframes，初始值取当前滑条值', () => {
     const { mediaClipId } = seed()
+    act(() => useUiStore.setState({ displayTimeSec: 0 }))
     act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
-    // 先把静态缩放改成 150%：打点应按"当前静态值"起手，而不是通用默认 100%
+    // 先把静态缩放改成 150%：打点应按"当前值"起手，而不是通用默认 100%
     act(() => useProjectStore.getState().updateMediaClipVideo(mediaClipId, { scalePercent: 150 }))
     render(<ClipInspector />)
 
-    expect(screen.getByText(TEXT.keyframes.title)).toBeTruthy()
-    // 参数行顺序 = CLIP_PARAM_IDS（opacity / offsetXPct / offsetYPct / scalePct / rotationDeg）
-    const addButtons = screen.getAllByTitle(TEXT.keyframes.addPoint)
-    expect(addButtons).toHaveLength(5)
-    fireEvent.click(addButtons[3]!)
+    // 旧的关键帧分区已并入滑条，不再单独出现
+    expect(screen.queryByText(TEXT.keyframes.title)).toBeNull()
+    // 几何 4 项 + 调色 6 项，每行一个菱形
+    expect(screen.getAllByTitle(TEXT.keyframes.addPoint)).toHaveLength(10)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: `${TEXT.videoEditor.scale}：${TEXT.keyframes.addPoint}` })
+    )
 
     const clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === mediaClipId)!
     expect(clip.keyframes).toHaveLength(1)
     expect(clip.keyframes![0]!.param).toBe('scalePct')
     expect(clip.keyframes![0]!.points).toHaveLength(1)
     expect(clip.keyframes![0]!.points[0]!.value).toBe(150)
+    expect(clip.keyframes![0]!.points[0]!.t).toBe(0)
+  })
+
+  it('调色滑条同样可打点；有轨道后拖滑杆改的是播放头关键点，不写静态字段', () => {
+    const { mediaClipId } = seed()
+    act(() => useUiStore.setState({ displayTimeSec: 0 }))
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    render(<ClipInspector />)
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: `${TEXT.videoEditor.brightness}：${TEXT.keyframes.addPoint}`
+      })
+    )
+    let clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === mediaClipId)!
+    expect(clip.keyframes![0]!.param).toBe('brightness')
+
+    fireEvent.change(screen.getByRole('slider', { name: TEXT.videoEditor.brightness }), {
+      target: { value: '40' }
+    })
+    clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === mediaClipId)!
+    expect(clip.keyframes![0]!.points[0]!.value).toBe(40)
+    expect(clip.video?.brightness ?? 0).toBe(0)
   })
 
   it('清空轨道：关键帧整键删除（不把空数组写进工程）', () => {
@@ -749,14 +776,14 @@ describe('媒体段关键帧（M6-E）', () => {
     act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
     act(() =>
       useProjectStore.getState().setMediaClipKeyframes(mediaClipId, [
-        { param: 'opacity', points: [{ t: 0, value: 0.5, easing: 'linear' }] }
+        { param: 'scalePct', points: [{ t: 0, value: 120, easing: 'linear' }] }
       ])
     )
     render(<ClipInspector />)
 
     // 有轨道时才出现「清空该参数轨道」按钮
     const clear = screen.getAllByTitle(TEXT.keyframes.clearTrack)
-    expect(clear.length).toBeGreaterThan(0)
+    expect(clear).toHaveLength(1)
     fireEvent.click(clear[0]!)
     const clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === mediaClipId)!
     expect('keyframes' in clip).toBe(false)

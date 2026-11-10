@@ -21,7 +21,19 @@ import type { EasingKey } from './types'
 
 /** 字幕条/图形元素可关键帧化的参数（媒体段的同名参数在 M7 接入渲染）。 */
 export const CLIP_PARAM_IDS = ['opacity', 'offsetXPct', 'offsetYPct', 'scalePct', 'rotationDeg'] as const
-export type ClipParamId = (typeof CLIP_PARAM_IDS)[number]
+export type BaseClipParamId = (typeof CLIP_PARAM_IDS)[number]
+
+/**
+ * 媒体段专属的调色参数（字幕条/文本元素没有这些字段，`resolveClipParams` 会跳过它们）。
+ * 只参与媒体段的预览/导出求值，以及工程 JSON 的归一化顺序。
+ */
+export const MEDIA_GRADE_PARAM_IDS = ['brightness', 'exposure', 'contrast', 'saturation', 'warmth', 'vibrance'] as const
+export type MediaGradeParamId = (typeof MEDIA_GRADE_PARAM_IDS)[number]
+
+export type ClipParamId = BaseClipParamId | MediaGradeParamId
+
+/** 全部合法参数（归一化排序 / 合法性校验共用）。 */
+export const ALL_CLIP_PARAM_IDS: readonly ClipParamId[] = [...CLIP_PARAM_IDS, ...MEDIA_GRADE_PARAM_IDS]
 
 export interface ClipParamLimit {
   min: number
@@ -38,11 +50,24 @@ export const CLIP_PARAM_LIMITS: Record<ClipParamId, ClipParamLimit> = {
   offsetXPct: { min: -100, max: 100, defaultValue: 0, step: 1 },
   offsetYPct: { min: -100, max: 100, defaultValue: 0, step: 1 },
   scalePct: { min: 10, max: 400, defaultValue: 100, step: 1 },
-  rotationDeg: { min: -180, max: 180, defaultValue: 0, step: 1 }
+  // 媒体段的旋转滑条是 0..360（`MEDIA_VIDEO_RANGE.rotation`），关键点必须能落在同一区间，
+  // 否则 270° 打点会被夹到 180° 产生跳变；这里放宽到 ±360（两者在 360° 周期下等价）。
+  rotationDeg: { min: -360, max: 360, defaultValue: 0, step: 1 },
+  brightness: { min: -100, max: 100, defaultValue: 0, step: 1 },
+  exposure: { min: -100, max: 100, defaultValue: 0, step: 1 },
+  contrast: { min: -100, max: 100, defaultValue: 0, step: 1 },
+  saturation: { min: -100, max: 100, defaultValue: 0, step: 1 },
+  warmth: { min: -100, max: 100, defaultValue: 0, step: 1 },
+  vibrance: { min: -100, max: 100, defaultValue: 0, step: 1 }
 }
 
 export function isClipParamId(value: unknown): value is ClipParamId {
-  return typeof value === 'string' && (CLIP_PARAM_IDS as readonly string[]).includes(value)
+  return typeof value === 'string' && (ALL_CLIP_PARAM_IDS as readonly string[]).includes(value)
+}
+
+/** 是否是字幕条/文本元素可用的基础参数（调色参数只属于媒体段）。 */
+export function isBaseClipParamId(value: ClipParamId): value is BaseClipParamId {
+  return (CLIP_PARAM_IDS as readonly string[]).includes(value)
 }
 
 /** 具名缓动或自定义贝塞尔。 */
@@ -128,8 +153,8 @@ export function normalizeKeyframeTracks(raw: unknown): KeyframeTrack[] | undefin
     byParam.set(param, sorted)
   }
   if (byParam.size === 0) return undefined
-  // 参数顺序固定（与 CLIP_PARAM_IDS 一致），保证工程 JSON 稳定
-  return CLIP_PARAM_IDS.filter((param) => byParam.has(param)).map((param) => ({
+  // 参数顺序固定（与 ALL_CLIP_PARAM_IDS 一致），保证工程 JSON 稳定
+  return ALL_CLIP_PARAM_IDS.filter((param) => byParam.has(param)).map((param) => ({
     param,
     points: byParam.get(param)!
   }))
@@ -185,6 +210,8 @@ export function resolveClipParams(
   const progress = clamp(t, 0, 1)
   for (const track of tracks) {
     if (track.points.length === 0) continue
+    // 调色参数只属于媒体段：字幕条/文本元素没有对应字段，直接跳过
+    if (!isBaseClipParamId(track.param)) continue
     params[track.param] = keyframeValueAt(track, progress)
     params.hasAny = true
   }
