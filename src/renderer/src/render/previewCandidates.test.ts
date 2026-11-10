@@ -5,11 +5,12 @@ import {
   PREVIEW_LOOKAHEAD_SEC,
   PREVIEW_MAX_CANDIDATES,
   PREVIEW_PREROLL_SEC,
+  PREVIEW_ROLL_IN_SEC,
   hasSeamSuccessor,
   isClipActiveAt,
   latestEndedClip,
   previewClipStartSourceTime,
-  previewPrerollTarget,
+  previewPrerollPlan,
   previewSourceTimeAt,
   previewTransitionSourceTime,
   selectPreviewCandidates
@@ -274,23 +275,44 @@ describe('latestEndedClip / hasSeamSuccessor（最后一帧兜底的边界）', 
   })
 })
 
-describe('previewPrerollTarget', () => {
+describe('previewPrerollPlan', () => {
   it('进入预卷窗口后从入点前 remaining×speed 起播，切点正好落在入点', () => {
     const c = clip('a', 10, 20, { sourceInSec: 5 })
 
-    expect(previewPrerollTarget(c, 10 - PREVIEW_PREROLL_SEC, false)).toBeCloseTo(5 - PREVIEW_PREROLL_SEC, 6)
+    expect(previewPrerollPlan(c, 10 - PREVIEW_PREROLL_SEC, false)).toEqual({
+      target: 5 - PREVIEW_PREROLL_SEC,
+      // 起播窗口之前只暂停摆位：位置固定在「切点前 ROLL_IN 秒」对应的源坐标
+      park: 5 - PREVIEW_ROLL_IN_SEC,
+      warmup: false
+    })
+  })
+
+  it('起播窗口内 park 不再前移（暂停摆位只认起播那一刻的位置）', () => {
+    const c = clip('a', 10, 20, { sourceInSec: 5 })
+
+    expect(previewPrerollPlan(c, 10 - 0.15, false)).toEqual({
+      target: 5 - 0.15,
+      park: 5 - PREVIEW_ROLL_IN_SEC,
+      warmup: false
+    })
   })
 
   it('窗口外不预卷', () => {
     const c = clip('a', 10, 20, { sourceInSec: 5 })
 
-    expect(previewPrerollTarget(c, 10 - PREVIEW_PREROLL_SEC - 0.01, false)).toBeNull()
-    expect(previewPrerollTarget(c, 10, false)).toBeNull()
+    expect(previewPrerollPlan(c, 10 - PREVIEW_PREROLL_SEC - 0.01, false)).toBeNull()
+    expect(previewPrerollPlan(c, 10, false)).toBeNull()
   })
 
-  it('源入点太靠前时不预卷（从 0 起播到切点仍会超前）', () => {
-    const c = clip('a', 10, 20, { sourceInSec: 0.1 })
+  it('源入点太靠前时不倒退预卷；给了热身窗口才原地起播（warmup）', () => {
+    const c = clip('a', 10, 20, { sourceInSec: 0.02 })
 
-    expect(previewPrerollTarget(c, 10 - PREVIEW_PREROLL_SEC, false)).toBeNull()
+    expect(previewPrerollPlan(c, 10 - PREVIEW_PREROLL_SEC, false)).toBeNull()
+    // 切点前 2 帧：原地起播，target 钳到 0，且明确标记 warmup（不能再往回纠偏）
+    expect(previewPrerollPlan(c, 10 - 0.05, false, 0.1)).toEqual({
+      target: 0,
+      park: 0,
+      warmup: true
+    })
   })
 })

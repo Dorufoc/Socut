@@ -15,14 +15,18 @@ import { transitionProgressAt } from '@shared/transitions'
 import type { Fps, MediaClip } from '@shared/types'
 import { attachPreviewAudio, setElementLevel, setPreservesPitch } from '../audio/previewAudioGraph'
 import {
+  PREVIEW_CUT_DRIFT_SEC,
   PREVIEW_DRIFT_SEC,
   PREVIEW_LOOKAHEAD_SEC,
+  PREVIEW_PREROLL_LOCK_SEC,
+  PREVIEW_PREROLL_STEER_SEC,
+  PREVIEW_ROLL_IN_SEC,
   hasSeamSuccessor,
   isClipActiveAt,
   latestEndedClip,
   previewClipStartSourceTime,
   previewGradeFilterId,
-  previewPrerollTarget,
+  previewPrerollPlan,
   previewSourceTimeAt,
   previewTransitionSourceTime,
   type PreviewCandidate
@@ -137,6 +141,16 @@ export function shouldRefreshPreviewUrl(
 
 const EPS = 1e-9
 
+/**
+ * 预卷中的下一段用「近零」不透明度，而不是 0。
+ *
+ * Chromium 会把完全透明（opacity: 0）的 `<video>` 当成不可见：不再向合成器提交新帧
+ * （实测预卷期间 `totalVideoFrames` 一帧不涨）。切点翻成 1 时才一次性补帧，
+ * 补不上的直接记进 `droppedVideoFrames`（实测每次硬切 +3~4 帧），观感就是切点抽一下。
+ * 留 0.4% 不透明度：合成器仍按可见处理、持续出帧；画面上只多 1/255 的灰度，看不出来。
+ */
+const PREROLL_OPACITY = '0.004'
+
 function mediaStyleOf(clip: MediaClip): CSSProperties {
   const transform = mediaVideoTransform(clip.video)
   // 每段用自己的曲线表 id：候选池里可能同时挂着调色不同的几段
@@ -241,9 +255,14 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     const keyframeCallbacksRef = useRef(new Map<string, (element: HTMLDivElement | null) => void>())
     const failedRef = useRef(new Set<string>())
     const pendingSeekRef = useRef(new Set<string>())
-    const prerolledRef = useRef(new Set<string>())
     /** 已做过「进入活动段首帧强制对齐」的 clipId：再次进入活动段（含回绕）要重新对齐 */
     const alignedRef = useRef(new Set<string>())
+    /**
+     * 切点从预卷接过来的「合法起点偏差」（秒）：`play()` 起播晚了几十毫秒，
+     * 画面内容就比播放头慢同样的量。这个偏差**不能**在切点那一帧用 seek 补
+     * （seek 会冻住解码器 = 「第一帧卡一下」），登记下来后只对**增量**漂移纠偏。
+     */
+    const entryOffsetRef = useRef(new Map<string, number>())
     /** 每元素 seek 合并状态：在飞期间只换目标，避免悬停逐帧拖动把 seek 排成风暴 */
     const seekStateRef = useRef(new Map<string, SeekState>())
 
@@ -517,8 +536,8 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       readyRef.current.delete(clipId)
       failedRef.current.delete(clipId)
       pendingSeekRef.current.delete(clipId)
-      prerolledRef.current.delete(clipId)
       alignedRef.current.delete(clipId)
+      entryOffsetRef.current.delete(clipId)
       seekStateRef.current.delete(clipId)
       if (element) {
         element.style.opacity = '0'
@@ -542,7 +561,6 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       const clipId = candidate.clip.id
       readyRef.current.delete(clipId)
       failedRef.current.delete(clipId)
-      prerolledRef.current.delete(clipId)
       const target = previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
       // 首次 seek 完成前不算就绪：pending 语义不变，只是写入走合并器
       const outcome = requestSeek(clipId, video, target)
@@ -747,6 +765,9 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       for (const candidate of [left, right]) {
         const element = elementsRef.current.get(candidate.clip.id)
         if (!element || !(element instanceof HTMLVideoElement)) continue
+        // 两侧都提前把音频图挂好：切点那一帧才 createMediaElementSource 会重配音频管线，
+        // 正好卡在画面切换上（单层路径靠预卷提前挂图，转场窗口在这里自己兜住）。
+        if (audioEnabledRef.current && candidate.hasAudio) attachPreviewAudio(element, 0)
         const rate = previewPlaybackRate(candidate.clip.speed)
         if (Math.abs(element.playbackRate - rate) > 1e-3) {
           element.playbackRate = rate
@@ -854,7 +875,13 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       for (const candidate of list) {
         const element = elementsRef.current.get(candidate.clip.id)
         if (!element) continue
-        const next = candidate.clip.id === visibleId ? '1' : '0'
+        const isVisible = candidate.clip.id === visibleId
+        /**
+         * 预卷中的元素（普通切点的起播窗口 / 回绕前的滚入）：让合成器继续给它出帧。
+         * 不限定「起点在未来」——回绕候选的 `timelineStartSec` 在当前圈已经过去了。
+         */
+        const prerolling = !isVisible && element instanceof HTMLVideoElement && !element.paused
+        const next = isVisible ? '1' : prerolling ? PREROLL_OPACITY : '0'
         if (element.style.opacity !== next) element.style.opacity = next
       }
       publishVisible(visibleId !== null)
@@ -881,7 +908,10 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
         const clipId = candidate.clip.id
         const active = isClipActiveAt(candidate.clip, atSec)
         // 非活动段退出「已对齐」状态：下次进入活动段（含回绕）要重新强制对齐首帧
-        if (!active) alignedRef.current.delete(clipId)
+        if (!active) {
+          alignedRef.current.delete(clipId)
+          entryOffsetRef.current.delete(clipId)
+        }
         const ready = readyRef.current.has(clipId)
         if (!ready) {
           element.pause()
@@ -898,21 +928,36 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
 
         if (active) {
           const target = previewSourceTimeAt(candidate.clip, atSec, candidate.useStabProxy)
-          // 首帧强制对齐：预卷点 / 暂停点可能停在别处，刚进入活动段的第一帧必须落在播放头；
-          // 之后才回到漂移判定，避免每帧都 seek。
+          // 「已对齐」标记只决定容差口径：切点这一帧要不要 seek。
           const firstEnter = !alignedRef.current.has(clipId)
           if (firstEnter) alignedRef.current.add(clipId)
-          // 先落位再起播：起播早于 seek 落地时，解码器会从元素**当前**位置继续出画，
-          // 而媒体刚加载完/刚被重新挂载时那个位置就是源片第一帧。
-          if (firstEnter) requestSeek(clipId, element, target)
           if (playing) {
-            if (element.paused) void element.play().catch(() => undefined)
-            if (!firstEnter && Math.abs(element.currentTime - target) > PREVIEW_DRIFT_SEC) {
-              requestSeek(clipId, element, target)
+            // 已经在预卷里播放的元素：切点这一帧绝不能 seek。seek 会让解码器停在
+            // `seeked` 之前，用户看到的就是「新段第一帧卡一下才继续」。
+            const wasPlaying = !element.paused
+            if (firstEnter) {
+              const offset = element.currentTime - target
+              if (wasPlaying && Math.abs(offset) <= PREVIEW_CUT_DRIFT_SEC) {
+                // 起播晚了几十毫秒：登记成本段的合法起点偏差，之后只纠增量
+                entryOffsetRef.current.set(clipId, offset)
+              } else {
+                // 冷启动（元素还停着）或偏差大到不是起播延迟：按半帧口径精确对齐
+                entryOffsetRef.current.delete(clipId)
+                if (Math.abs(offset) > halfFrame) requestSeek(clipId, element, target)
+              }
+            } else {
+              const anchor = entryOffsetRef.current.get(clipId) ?? 0
+              if (Math.abs(element.currentTime - (target + anchor)) > PREVIEW_DRIFT_SEC) {
+                // 不是起播延迟，而是真的跑偏了（丢帧/卡顿累积）：重新对齐并丢掉旧偏差
+                entryOffsetRef.current.delete(clipId)
+                requestSeek(clipId, element, target)
+              }
             }
+            if (element.paused) void element.play().catch(() => undefined)
           } else {
+            entryOffsetRef.current.delete(clipId)
             element.pause()
-            if (!firstEnter && Math.abs(element.currentTime - target) > halfFrame) {
+            if (firstEnter || Math.abs(element.currentTime - target) > halfFrame) {
               requestSeek(clipId, element, target)
             }
           }
@@ -935,31 +980,6 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
           continue
         }
 
-        if (candidate.clip.timelineStartSec > atSec + EPS) {
-          // 即将开始：进入预卷窗口就静音起播，切点正好落在入点
-          if (playing) {
-            const prerollTarget = previewPrerollTarget(candidate.clip, atSec, candidate.useStabProxy)
-            if (prerollTarget !== null && !prerolledRef.current.has(clipId)) {
-              prerolledRef.current.add(clipId)
-              requestSeek(clipId, element, prerollTarget)
-              if (element.paused) void element.play().catch(() => undefined)
-            }
-          } else {
-            element.pause()
-            // 暂停期间清掉预卷标记：恢复播放时要重新预卷，否则会停在旧预卷点等切点
-            prerolledRef.current.delete(clipId)
-            const start = previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
-            if (Math.abs(element.currentTime - start) > halfFrame) {
-              requestSeek(clipId, element, start)
-            }
-          }
-          element.muted = true
-          setElementLevel(element, 0)
-          continue
-        }
-
-        // 回绕前瞻预对齐：头部片段在本轮已经「结束」，回绕后才能进入活动段。
-        // 提前送回入点，回绕瞬间直接出首帧，不用等一次异步 seek。
         const loopDuration = loopDurationRef.current
         const wrapStart = candidate.clip.timelineStartSec + loopDuration
         const inWrapLookahead =
@@ -967,14 +987,78 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
           atSec >= loopDuration - PREVIEW_LOOKAHEAD_SEC - EPS &&
           wrapStart > atSec + EPS &&
           wrapStart <= atSec + PREVIEW_LOOKAHEAD_SEC + EPS
-        if (inWrapLookahead) {
-          element.pause()
-          element.muted = true
-          setElementLevel(element, 0)
-          const start = previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
-          if (Math.abs(element.currentTime - start) > halfFrame) {
-            requestSeek(clipId, element, start)
+        const upcoming = candidate.clip.timelineStartSec > atSec + EPS
+
+        if (upcoming || inWrapLookahead) {
+          // 即将开始：进预卷窗口先暂停摆位，临近切点才静音起播。
+          // 回绕候选（本圈末尾、下一圈开头）把 atSec 平移到上一圈，复用同一套预卷/起播规划：
+          // 否则它一直停在入点、回绕那一帧才 play()，解码器冷启动会让循环边界抽一下。
+          const planAtSec = upcoming ? atSec : atSec - loopDuration
+          /** 预卷期已经接上音频图：此时元素不必再 muted，增益 0 就是无声 */
+          let prerollAudioReady = false
+          if (playing) {
+            /**
+             * 预卷要**持续**纠偏，不能只摆一次：
+             * `play()` 真正开始出帧通常晚于 seek 落地，只摆一次会把这段延迟原样留到切点，
+             * 切点那一帧再补 seek 就变成「第一帧卡一下」。窗口内元素不可见，纠偏的 seek
+             * 不会被看到；临近切点则停手（LOCK），避免 seek 正好跨在切点上冻住解码器。
+             */
+            const plan = previewPrerollPlan(
+              candidate.clip,
+              planAtSec,
+              candidate.useStabProxy,
+              // 热身窗口按 2 帧给：入点太靠前时只能原地起播，切点处至多超前 2 帧
+              halfFrame * 4
+            )
+            if (plan) {
+              // 音频图提前在预卷期挂好、并把音频渲染器跑起来（初始增益 0 = 无声）：
+              // 切点才 unmute 或才 createMediaElementSource，都会让 Chromium 重配音频管线
+              // 并重对媒体时钟——实测切点会一次性补跳约 2 帧（画面顿一下）。
+              if (audioEnabledRef.current && candidate.hasAudio) {
+                prerollAudioReady = attachPreviewAudio(element, 0) !== null
+              }
+              const remaining = candidate.clip.timelineStartSec - planAtSec
+              /**
+               * 只在起播窗口内真的播放：更早的整段时间元素已经就绪、摆好了入点，
+               * 让它一直播会与可见段抢解码/合成资源（切点附近帧率抖动的来源）。
+               * `warmup`（入点太靠前、退不到预卷位置）除外：只能原地起播。
+               */
+              if (plan.warmup || remaining <= PREVIEW_ROLL_IN_SEC + EPS) {
+                if (element.paused) void element.play().catch(() => undefined)
+                if (remaining <= PREVIEW_PREROLL_LOCK_SEC + EPS) {
+                  // 切点前停手：连排队目标也清掉，免得它正好在切点上落地把解码器冻住
+                  seekStateFor(clipId).wanted = null
+                } else if (
+                  // 热身态不能按 target 纠偏（会在 0 附近来回拉锯，反而一直起播不了）
+                  !plan.warmup &&
+                  Math.abs(element.currentTime - plan.target) > PREVIEW_PREROLL_STEER_SEC
+                ) {
+                  requestSeek(clipId, element, plan.target)
+                }
+              } else {
+                // 起播窗口之前：保持暂停，只把元素摆到起播位置（暂停态 seek 不占解码/合成）
+                if (!element.paused) element.pause()
+                if (!plan.warmup && Math.abs(element.currentTime - plan.park) > PREVIEW_PREROLL_STEER_SEC) {
+                  requestSeek(clipId, element, plan.park)
+                }
+              }
+            } else if (!upcoming) {
+              // 回绕前瞻但还没进预卷窗口：停在入点，等起播窗口
+              if (!element.paused) element.pause()
+              const start = previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
+              if (Math.abs(element.currentTime - start) > halfFrame) {
+                requestSeek(clipId, element, start)
+              }
+            }
+          } else {
+            element.pause()
+            const start = previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
+            if (Math.abs(element.currentTime - start) > halfFrame) {
+              requestSeek(clipId, element, start)
+            }
           }
+          element.muted = !prerollAudioReady
+          setElementLevel(element, 0)
           continue
         }
 
@@ -988,24 +1072,25 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     /**
      * 回绕复位（由 `usePreviewLoop` 的 `onLoop` 在 rAF 内直接调用，不依赖 React 渲染）：
      * 1. 还原被转场改写的 style 与色块，回到「单层、无转场」基线；
-     * 2. 清预卷/已对齐标记，下一帧进入活动段时重新强制对齐；
-     * 3. 每个元素送回自己的入点。**不 pause**：播放状态交给同一帧的 tick 决定。
+     * 2. 清「已对齐」标记，下一帧进入活动段时重新按播放头对齐；
+     * 3. 每个元素送回自己的入点（已在入点容差内的跳过：正在滚入的头部片段不能被 seek 打断）。
+     *    **不 pause**：播放状态交给同一帧的 tick 决定。
      *
      * `visibleRef` 刻意保持原值：回绕瞬间上报 false 会让 Canvas 画棋盘格闪一下。
      */
     const restart = (): void => {
       const list = candidatesRef.current
       restoreTransitionStyles(list)
-      prerolledRef.current.clear()
       alignedRef.current.clear()
+      entryOffsetRef.current.clear()
       for (const candidate of list) {
         const element = elementsRef.current.get(candidate.clip.id)
         if (!(element instanceof HTMLVideoElement)) continue
-        requestSeek(
-          candidate.clip.id,
-          element,
-          previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
-        )
+        const start = previewClipStartSourceTime(candidate.clip, candidate.useStabProxy)
+        // 回绕瞬间正在滚入的头部片段已经贴着入点（roll-in 让 currentTime 略超前）：
+        // 这时再 seek 一次会把解码器冻在切点上，等于把刚修好的冷启动又做回来一遍。
+        if (Math.abs(element.currentTime - start) <= PREVIEW_CUT_DRIFT_SEC) continue
+        requestSeek(candidate.clip.id, element, start)
       }
     }
 
@@ -1065,6 +1150,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
               <video
                 ref={refCallbackFor(clipId)}
                 className="stage__ref-video"
+                data-clip-id={clipId}
                 src={url}
                 style={style}
                 playsInline

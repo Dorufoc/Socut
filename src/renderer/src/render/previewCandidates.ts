@@ -24,8 +24,27 @@ export const PREVIEW_HOLD_SEC = 0.5
 /** 同时存活的候选上限（含当前所有图层）。视频解码器很贵，不能无限挂。 */
 export const PREVIEW_MAX_CANDIDATES = 4
 
-/** 预卷时长（时间轴秒）：切点前多久开始静音播放，抵消解码器起播延迟。 */
-export const PREVIEW_PREROLL_SEC = 0.35
+/**
+ * 预卷时长（时间轴秒）：切点前多久开始静音播放，抵消解码器起播延迟。
+ * 不能太短：`play()` 真正出帧往往晚于 seek 落地，窗口内还要留出二次纠偏的余量，
+ * 否则这点延迟会原样留到切点（观感就是「新段第一帧卡一下」）。
+ */
+export const PREVIEW_PREROLL_SEC = 0.5
+
+/**
+ * 预卷停手时间（时间轴秒）：切点前这段时间只播不 seek。
+ * 跨在切点上的 seek 会让解码器停止出帧，正好把「新段第一帧」冻住。
+ */
+export const PREVIEW_PREROLL_LOCK_SEC = 0.1
+
+/**
+ * 预卷纠偏容差（时间轴秒）。
+ *
+ * 必须比「切点漂移容差」松：预卷期的 seek 虽然不可见，但每次 seek 都会清解码队列，
+ * 按半帧容差纠偏会在窗口内反复 seek，既抢可见段的解码带宽，也会在切点留下抖动。
+ * 0.1s 足够吸收 play() 起播延迟，同时保证切点落点仍在 `PREVIEW_DRIFT_SEC` 以内。
+ */
+export const PREVIEW_PREROLL_STEER_SEC = 0.1
 
 /**
  * 播放中允许的漂移（秒）；超过才 seek，避免每帧 seek 卡顿。
@@ -33,6 +52,27 @@ export const PREVIEW_PREROLL_SEC = 0.35
  * 切点后的第一帧就已经能看出「画面慢半拍」。0.12s（约 3–4 帧）是观感与 seek 次数的折中。
  */
 export const PREVIEW_DRIFT_SEC = 0.12
+
+/**
+ * 起播窗口（时间轴秒）：切点前多久才真的开始播放。
+ *
+ * 预卷窗口（`PREVIEW_PREROLL_SEC`）负责「挂载 + 对齐 + 出好首帧」，但整段都播的话，
+ * 切点前 0.5s 里有两路视频同时解码、同时上屏，可见那一路会被抢解码/合成资源，
+ * 观感就是切点附近帧率一抖。真正需要提前播的只有「起播延迟」那一小段：
+ * 0.2s 足够吸收从暂停态起播的 1～2 帧延迟，又把双路解码的重叠压到最短。
+ */
+export const PREVIEW_ROLL_IN_SEC = 0.2
+
+/**
+ * 切点允许继承的起播偏差（秒）。
+ *
+ * 预卷在切点前开始播放，`play()` 真正出帧可能晚几十毫秒；这点落后如果按
+ * `PREVIEW_DRIFT_SEC` 在切点那一帧补 seek，解码器会冻在 `seeked` 之前 ——
+ * 又变回「新段第一帧卡一下」。所以切点接管这一帧不 seek，而是把这个偏差登记成
+ * 本段的合法起点，之后只在**相对偏差**超过 `PREVIEW_DRIFT_SEC` 时才重新对齐。
+ * 上限 0.25s（30fps 下约 7 帧）：再大就不是起播延迟，而是真的跑偏了，必须 seek。
+ */
+export const PREVIEW_CUT_DRIFT_SEC = 0.25
 
 /** 转场窗口内必须同时存活的一对片段（左 = 前段，右 = 后段）。 */
 export interface PreviewTransitionIds {
@@ -231,27 +271,48 @@ export function hasSeamSuccessor(clip: MediaClip, clips: readonly MediaClip[]): 
   )
 }
 
+/** 预卷规划（见 `previewPrerollPlan`）。 */
+export interface PreviewPrerollPlan {
+  /** 元素此刻应当处于的源坐标（已钳到 0）：起播窗口内按它持续纠偏 */
+  target: number
+  /**
+   * 起播前应当**停**在的源坐标：起播窗口（`PREVIEW_ROLL_IN_SEC`）之前元素保持暂停，
+   * 只摆到这个位置。窗口内 `target` 一直在往前走，暂停态跟着它走会反复 seek。
+   */
+  park: number
+  /** true = 只是热身起播：入点太靠前、无法倒退预卷，不能再按 target 往回纠偏 */
+  warmup: boolean
+}
+
 /**
- * 预卷目标：切点前 `remaining` 秒开始，从 `start - remaining × speed` 静音播放，
- * 到切点时 `currentTime` 正好等于入点。
+ * 预卷规划：切点前该把元素摆到源上的哪个坐标。
  *
- * 返回 `null` 表示**不该预卷**：
- * - 还没进入预卷窗口（remaining > PREVIEW_PREROLL_SEC）；
- * - 已经过了切点；
- * - 源入点太靠前（`start < remaining × speed`），从 0 起播到切点仍会超前，
- *   不如停在入点，等切点那一帧直接 play。
+ * - 常规情形（`入点 >= 剩余时长 × 倍速`）：切点前 `PREVIEW_PREROLL_SEC` 就进窗口，
+ *   先把元素**暂停**摆到 `park`（起播位置），到 `PREVIEW_ROLL_IN_SEC` 才静音起播，
+ *   切点时 `currentTime` 正好落在入点，切点只做 opacity 翻转；
+ * - 入点太靠前（典型：`sourceInSec = 0`）时无法倒退预卷，这时只在切点前
+ *   `warmupSec` 秒内**原地热身起播**，让解码器提前进入播放态。切点处至多超前
+ *   `warmupSec`（时间轴口径，调用方按 1~2 帧传入），交给漂移容差吸收，
+ *   换来切点不再等解码器冷启动。
+ *
+ * 返回 `null` 表示这一帧不该动：还没进入预卷窗口 / 热身窗口，或已经过了切点。
  */
-export function previewPrerollTarget(
+export function previewPrerollPlan(
   clip: MediaClip,
   atSec: number,
-  useStabProxy: boolean
-): number | null {
+  useStabProxy: boolean,
+  warmupSec = 0
+): PreviewPrerollPlan | null {
   const remaining = clip.timelineStartSec - atSec
   if (remaining <= EPS || remaining > PREVIEW_PREROLL_SEC + EPS) return null
-  const lead = remaining * speedValueOf(clip.speed)
+  const speed = speedValueOf(clip.speed)
   const start = previewClipStartSourceTime(clip, useStabProxy)
-  if (start < lead - EPS) return null
-  return start - lead
+  const lead = remaining * speed
+  /** 起播那一刻该在的位置：此时 remaining 恰好等于 PREVIEW_ROLL_IN_SEC */
+  const park = Math.max(0, start - PREVIEW_ROLL_IN_SEC * speed)
+  if (start >= lead - EPS) return { target: Math.max(0, start - lead), park, warmup: false }
+  if (warmupSec <= EPS || remaining > warmupSec + EPS) return null
+  return { target: Math.max(0, start - lead), park, warmup: true }
 }
 
 /**

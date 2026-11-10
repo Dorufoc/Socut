@@ -429,6 +429,41 @@ describe('MediaPreviewLayer 切点与循环重启（Task 4）', () => {
   })
 })
 
+describe('段落切换无缝（预卷 → 起播窗口 → 切点）', () => {
+  it('预卷先把元素摆到起播位置，起播窗口内不 seek，切点也不 seek', async () => {
+    const { container, ref } = await renderLayer(null)
+    const leftVideo = videoAt(container, 0)
+    const rightVideo = videoAt(container, 1)
+
+    // 切点（2s）前 0.4s：预卷窗口已开但还没到起播窗口 —— 只暂停摆到「切点前 0.2s」的源坐标
+    act(() => ref.current?.tick(1.6, true))
+    expect(rightVideo.currentTime).toBeCloseTo(0.8, 2)
+
+    // 模拟可见段自己走到了 1.85s 该在的位置，避免左右两段的 seek 计数互相干扰
+    leftVideo.currentTime = 2.35
+    const base = previewPerf.seekRequests
+    // 切点前 0.15s：进入起播窗口，位置已经对好（差 50ms 在纠偏容差内），只起播不 seek
+    act(() => ref.current?.tick(1.85, true))
+    expect(previewPerf.seekRequests).toBe(base)
+    expect(rightVideo.currentTime).toBeCloseTo(0.8, 2)
+
+    // 模拟预卷真的播到了入点附近（差 150ms：起播晚于 seek 落地的典型偏差）
+    rightVideo.currentTime = 0.85
+    Object.defineProperty(rightVideo, 'paused', { configurable: true, get: () => false })
+
+    // 切点这一帧：偏差被登记成本段合法起点，不 seek（旧实现会在这里冻住解码器）
+    act(() => ref.current?.tick(2, true))
+    expect(previewPerf.seekRequests).toBe(base)
+    expect(rightVideo.style.opacity).toBe('1')
+    expect(leftVideo.style.opacity).toBe('0')
+
+    // 切点之后：只按「增量」判漂移，不会因为起点偏差迟一步补一个 seek
+    rightVideo.currentTime = 0.95
+    act(() => ref.current?.tick(2.1, true))
+    expect(previewPerf.seekRequests).toBe(base)
+  })
+})
+
 describe('MediaPreviewLayer 回绕预对齐（Task 8）', () => {
   const head = clip({
     id: 'head',
@@ -482,6 +517,26 @@ describe('MediaPreviewLayer 回绕预对齐（Task 8）', () => {
 
     act(() => ref.current?.tick(11.5, false))
     expect(video.currentTime).toBe(2)
+  })
+
+  it('回绕前 0.2s 滚入起播（不冷启动），restart() 不打断已贴入点的元素', async () => {
+    const { ref, video } = await renderHead(12)
+    const playMock = HTMLMediaElement.prototype.play as unknown as ReturnType<typeof vi.fn>
+    playMock.mockClear()
+    // 模拟本轮已经播到片段末尾
+    video.currentTime = 2
+
+    // 回绕前 0.1s = 起播窗口内：直接开播，不再等到回绕那一帧才 play()
+    act(() => ref.current?.tick(11.9, true))
+    expect(playMock).toHaveBeenCalledTimes(1)
+
+    // 滚入后 currentTime 贴着入点（0.5 + 0.1）；restart 不能再 seek，否则解码器正好冻在回绕点
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => false })
+    video.currentTime = 0.6
+    const base = previewPerf.seekRequests
+    act(() => ref.current?.restart())
+    expect(previewPerf.seekRequests).toBe(base)
+    expect(video.currentTime).toBeCloseTo(0.6, 2)
   })
 })
 
