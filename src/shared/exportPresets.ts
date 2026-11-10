@@ -1,6 +1,14 @@
 import { classifyAspect, displayAspectRatio } from './aspect'
-import { EXPORT_CANVAS_SIZES, EXPORT_QUALITY_CRF } from './constants'
-import type { AspectMode, ExportCanvasKind, ExportCanvasSelection, ExportFit, ExportQuality } from './types'
+import { EXPORT_BITRATE_BASE_KBPS, EXPORT_QUALITY_CRF, EXPORT_RESOLUTION_SHORT_SIDE } from './constants'
+import type {
+  AspectMode,
+  ExportBitrateTier,
+  ExportCanvasKind,
+  ExportCanvasSelection,
+  ExportFit,
+  ExportQuality,
+  ExportResolutionTier
+} from './types'
 
 /**
  * 交付画布预设（v10）：把用户选择解析成唯一的「尺寸 + 适配 + 宽高比分支 + 文件名后缀」口径。
@@ -34,11 +42,53 @@ function isValidSize(size: { width: number; height: number } | null | undefined)
   return !!size && Number.isFinite(size.width) && size.width > 0 && Number.isFinite(size.height) && size.height > 0
 }
 
+/** 分辨率档位对应的目标短边像素。 */
+export function resolutionShortSide(tier: ExportResolutionTier): number {
+  return EXPORT_RESOLUTION_SHORT_SIDE[tier]
+}
+
+/**
+ * 按短边缩放画布，保持宽高比；宽高都取偶数（H.264/HEVC 要求）。
+ * 短边 = min(width, height)：横屏看高度、竖屏/方图看宽度。
+ */
+export function scaleCanvasToShortSide(
+  base: { width: number; height: number },
+  shortSide: number
+): { width: number; height: number } {
+  const baseShort = Math.min(base.width, base.height)
+  const factor = baseShort > 0 ? shortSide / baseShort : 1
+  const even = (value: number): number => Math.max(2, Math.round(value / 2) * 2)
+  return { width: even(base.width * factor), height: even(base.height * factor) }
+}
+
+/** 按像素数把 1080p 基准码率缩放到目标画布（四舍五入到 100 kbps，下限 100）。 */
+export function scaledBitrateKbps(baseKbps: number, width: number, height: number): number {
+  const scaled = (baseKbps * width * height) / (1920 * 1080)
+  return Math.max(100, Math.round(scaled / 100) * 100)
+}
+
+/**
+ * 码率档位换算成目标画布的实际 kbps。
+ * 自定义码率是绝对值（不随分辨率缩放），夹在 100..100000 之间。
+ */
+export function videoBitrateKbpsOf(
+  tier: ExportBitrateTier,
+  customKbps: number,
+  size: { width: number; height: number }
+): number {
+  if (tier === 'custom') {
+    const value = Number.isFinite(customKbps) ? Math.round(customKbps) : 2000
+    return Math.max(100, Math.min(100000, value))
+  }
+  return scaledBitrateKbps(EXPORT_BITRATE_BASE_KBPS[tier], size.width, size.height)
+}
+
 /**
  * 目标画布解析。
  *
  * - `landscape`：跟随首个可见底层素材（`primaryMeta`），无媒体时跟随工程分辨率；
- * - `portrait` / `square`：按档位取固定尺寸（缺省 1080），与源素材无关。
+ *   `resolution` 为具体档位时按短边缩放（保持素材宽高比）；
+ * - `portrait` / `square`：9:16 / 1:1 固定宽高比，缺省 1080 短边，具体档位按短边缩放。
  *
  * fit 缺省：横屏 `contain`（旧行为：完整画面补边），竖屏/方图 `cover`（满构图不拉伸）。
  */
@@ -48,9 +98,13 @@ export function resolveExportCanvas(input: {
   projectResolution: { width: number; height: number }
 }): ResolvedExportCanvas {
   const meta = CANVAS_META[input.selection.kind]
+  const choice = input.selection.resolution ?? input.selection.tier ?? (input.selection.kind === 'landscape' ? 'source' : '1080')
   if (input.selection.kind === 'landscape') {
     const source = isValidSize(input.primaryMeta) ? input.primaryMeta : input.projectResolution
-    const size = { width: source.width, height: source.height }
+    const size =
+      choice === 'source'
+        ? { width: source.width, height: source.height }
+        : scaleCanvasToShortSide(source, resolutionShortSide(choice))
     return {
       kind: 'landscape',
       width: size.width,
@@ -60,9 +114,9 @@ export function resolveExportCanvas(input: {
       ...meta
     }
   }
-  const tier = input.selection.tier ?? '1080'
-  const size =
-    input.selection.kind === 'portrait' ? EXPORT_CANVAS_SIZES.portrait[tier] : EXPORT_CANVAS_SIZES.square[tier]
+  const shortSide = choice === 'source' ? resolutionShortSide('1080') : resolutionShortSide(choice)
+  const base = input.selection.kind === 'portrait' ? { width: 9, height: 16 } : { width: 1, height: 1 }
+  const size = scaleCanvasToShortSide(base, shortSide)
   return {
     kind: input.selection.kind,
     width: size.width,

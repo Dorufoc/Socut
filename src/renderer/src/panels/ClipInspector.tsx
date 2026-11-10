@@ -13,8 +13,11 @@ import { TextPanel } from './TextPanel'
 import { ColorPanel } from './ColorPanel'
 import { FontPanel } from './FontPanel'
 import { AnimationPanel } from './AnimationPanel'
+import { KeyframePanel } from './KeyframePanel'
+import { TextElementInspector } from './TextElementInspector'
 import { MediaClipInspector } from './MediaClipInspector'
 import { AudioClipInspector } from './AudioClipInspector'
+import { TransitionInspector } from './TransitionInspector'
 import { ClipLocateButton } from './ClipLocateButton'
 import type { AudioClip } from '@shared/types'
 
@@ -60,7 +63,13 @@ export function ClipInspector(): ReactElement {
     )
   }
 
-  if (selectionKind !== 'media') return <SubtitleClipInspector />
+  if (selectionKind !== 'media') {
+    // v11：时间轴缝隙上的转场图标选中时，右侧整块换成转场检查器（时长 / 删除）
+    if (selectionKind === 'transition') return <TransitionInspector />
+    // M7：文本元素选中时换成文本元素编辑器（与包装字幕条是两套体系）
+    if (selectionKind === 'text') return <TextElementInspector />
+    return <SubtitleClipInspector />
+  }
 
   const clip = mediaClips.find((item) => item.id === selectedMediaClipId) ?? null
   if (!clip) {
@@ -194,6 +203,11 @@ function SubtitleClipInspector(): ReactElement {
           <Expander title={TEXT.inspector.animation}>
             <AnimationPanel />
           </Expander>
+          {clip ? (
+            <Expander title={TEXT.keyframes.title}>
+              <KeyframePanel clip={clip} />
+            </Expander>
+          ) : null}
         </>
       ) : (
         <button type="button" className="more-styles" onClick={() => setUiMode('advanced')}>

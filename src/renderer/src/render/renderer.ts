@@ -1,12 +1,17 @@
 import { ACTION_SAFE_RATIO, TITLE_SAFE_RATIO } from '@shared/constants'
+import { resolveClipParams } from '@shared/keyframes'
 import type { LayoutBox, RenderJobSpec } from '@shared/types'
 import { motionAt } from './animation'
-import { drawBar, drawRule, drawText, contentBoundsOf, sweepOf, type DrawContext, type WipeSweep } from './layers'
+import { drawBar, drawRule, drawText, contentAnchorOf, contentBoundsOf, sweepOf, type DrawContext, type WipeSweep } from './layers'
+import { drawTextElements } from './textElement'
 
 /**
  * 唯一像素生产者（规格 §4.3 / §11 纪律 6）。
  * 预览与导出都调用本函数：预览只是把结果缩放到显示 Canvas，
  * 任何坐标计算都不感知显示尺寸，因此「所见即所导出」。
+ *
+ * M6：片段级关键帧在这里生效（不透明度 / 位移 / 缩放 / 旋转）。
+ * 没有 `keyframes` 的片段走原路径（不产生额外变换与状态切换），逐像素与旧版一致。
  */
 
 export interface RenderOptions {
@@ -16,17 +21,27 @@ export interface RenderOptions {
   isolateClipId?: string | null
 }
 
-function drawBox(ctx: DrawContext, box: LayoutBox, sweep: WipeSweep, ruleReveal: number, textStaggerChars: number): void {
+// 锚点计算已移到 layers（命中测试也要用同一份口径），这里保留 re-export 兼容旧引用。
+export { contentAnchorOf }
+
+function drawBox(
+  ctx: DrawContext,
+  box: LayoutBox,
+  sweep: WipeSweep,
+  ruleReveal: number,
+  textStaggerChars: number,
+  alphaMul: number
+): void {
   switch (box.kind) {
     case 'text':
-      drawText(ctx, box, sweep, textStaggerChars)
+      drawText(ctx, box, sweep, textStaggerChars, alphaMul)
       break
     case 'rule':
-      drawRule(ctx, box, sweep, ruleReveal)
+      drawRule(ctx, box, sweep, ruleReveal, alphaMul)
       break
     case 'bar':
     case 'block':
-      drawBar(ctx, box, sweep)
+      drawBar(ctx, box, sweep, alphaMul)
       break
     default:
       // row / col / spacer：纯布局容器，不落地像素
@@ -45,6 +60,11 @@ export function renderFrame(
   ctx.globalAlpha = 1
   ctx.clearRect(0, 0, job.width, job.height)
 
+  // M7：文本元素先画（在字幕条之下）；没有文本元素时零开销
+  if (job.textClips && job.textClips.length > 0) {
+    drawTextElements(ctx, job.textClips, globalFrame, job.width, job.height)
+  }
+
   for (const clip of job.clips) {
     if (!clip.selected) continue
     if (options.isolateClipId && clip.id !== options.isolateClipId) continue
@@ -55,10 +75,32 @@ export function renderFrame(
     // 条宽现在随文字自适应；若仍用 root（画宽减边距）当擦除跨度，窄条会在入场 20% 时
     // 就已整条显露，看起来像“瞬间弹出”。用内容并集才能让擦除速度与条宽成正比。
     const sweep: WipeSweep = sweepOf(motion, contentBoundsOf(clip.boxes))
+    // M6：片段内进度 0..1（与帧率无关）；无关键帧时 params.hasAny=false，直接走旧路径
+    const span = clip.endFrame - clip.startFrame
+    const progress = span > 0 ? (globalFrame - clip.startFrame) / span : 0
+    const params = resolveClipParams(clip.keyframes, progress)
+    let transformed = false
+    if (params.hasAny && (params.offsetXPct !== 0 || params.offsetYPct !== 0 || params.scalePct !== 100 || params.rotationDeg !== 0)) {
+      const anchor = contentAnchorOf(clip.boxes)
+      if (anchor) {
+        ctx.save()
+        transformed = true
+        // 位移单位 = 画宽/画高的百分比；缩放与旋转绕内容中心
+        ctx.translate(
+          anchor.cx + (job.width * params.offsetXPct) / 100,
+          anchor.cy + (job.height * params.offsetYPct) / 100
+        )
+        ctx.rotate((params.rotationDeg * Math.PI) / 180)
+        const scale = params.scalePct / 100
+        ctx.scale(scale, scale)
+        ctx.translate(-anchor.cx, -anchor.cy)
+      }
+    }
     // boxes 已是前序遍历结果 = 规格 §7 的分层绘制顺序
     for (const box of clip.boxes) {
-      drawBox(ctx, box, sweep, motion.ruleReveal, motion.textStaggerChars)
+      drawBox(ctx, box, sweep, motion.ruleReveal, motion.textStaggerChars, params.opacity)
     }
+    if (transformed) ctx.restore()
   }
 
   if (options.safeArea) drawSafeArea(ctx, job.width, job.height)

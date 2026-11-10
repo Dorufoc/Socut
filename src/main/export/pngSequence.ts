@@ -1,28 +1,21 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { buildTransparentMovFromSeq, buildTransparentMovQtrleFromSeq } from '../../shared/ffmpegArgs'
-import type { TransparentAudioOptions } from '../../shared/ffmpegArgs'
-import type { Fps, TransparentCodec } from '../../shared/types'
-import { spawnJob, terminateJob } from '../procRegistry'
-import type { FfmpegBinaries } from '../paths'
-import { frameFileName } from '../tempWorkspace'
-import { ProgressParser } from '../progressParser'
+import type { Fps } from '../../shared/types'
 import type { FrameChannelHandle } from './frameChannel'
 import type { JobState } from './jobs'
+import { frameFileName } from '../tempWorkspace'
 import { pumpFrames } from './framePump'
-import { assertNoAlphaDrop } from './verify'
-import { FFmpegExitError, waitForClose } from './transparentMov'
 
 /**
- * PNG 序列（规格 §2.3 可选出口 + §5.1 image2pipe 失败时的回退）。
- * 两条用途共用同一个帧泵：
- *  - 出口=PNG：帧直接落到输出目录，不做二次编码（Canvas 产物已是 RGBA PNG）；
- *  - 出口=MOV 且回退：帧落到临时工作区，再由 FFmpeg 编成 ProRes 4444。
+ * PNG 序列出口（规格 §2.3 可选的**交付格式**）。
+ *
+ * 注意与「中间缓存」的区别：这里的 PNG 就是用户要的产物，直接落到输出目录，
+ * 不做二次编码；导出流程内部不再产生任何 PNG 中间帧（v11 起叠加/透明出口都走内存直送）。
  */
 
 export interface PngWriteCtx {
   state: JobState
-  /** 帧文件目录（工作区或输出目录） */
+  /** 帧文件目录（PNG 出口 = 输出目录） */
   dir: string
   fps: Fps
   startFrame: number
@@ -68,64 +61,4 @@ export async function writePngSequence(ctx: PngWriteCtx, channel: FrameChannelHa
   if (result === 'cancelled') channel.cancel('cancelled')
   channel.close()
   return result
-}
-
-export interface EncodeCtx {
-  state: JobState
-  binaries: FfmpegBinaries
-  dir: string
-  outputPath: string
-  fps: Fps
-  framesTotal: number
-  codec: TransparentCodec
-  /** v7：音频轨（不传 = 保持 `-an`） */
-  audio?: TransparentAudioOptions
-  isCancelled: () => boolean
-  onTick: () => void
-}
-
-export async function encodePngToMov(ctx: EncodeCtx): Promise<void> {
-  const pattern = path.join(ctx.dir, 'frame_%06d.png')
-  const args =
-    ctx.codec === 'qtrle'
-      ? buildTransparentMovQtrleFromSeq(ctx.fps, pattern, ctx.outputPath, 0, ctx.audio)
-      : buildTransparentMovFromSeq(ctx.fps, pattern, ctx.outputPath, 0, ctx.audio)
-
-  const parser = new ProgressParser()
-  const job = spawnJob({
-    jobId: ctx.state.id,
-    label: 'PNG 序列 → MOV',
-    binary: ctx.binaries.ffmpeg,
-    args,
-    stdin: false,
-    onStdoutChunk: (chunk) => {
-      const snapshot = parser.feed(chunk)
-      if (snapshot) {
-        ctx.state.outTimeUs = snapshot.outTimeUs
-        ctx.onTick()
-      }
-    }
-  })
-
-  if (ctx.isCancelled()) {
-    await terminateJob(ctx.state.id)
-    throw new Error('任务已取消')
-  }
-
-  const closeWatch = setInterval(() => {
-    if (ctx.isCancelled()) {
-      void terminateJob(ctx.state.id)
-      clearInterval(closeWatch)
-    }
-  }, 200)
-
-  try {
-    const code = await waitForClose(job)
-    assertNoAlphaDrop(job.stderr.tail())
-    if (code !== 0) {
-      throw new FFmpegExitError(code, job.stderr.tail(4096), job.argv)
-    }
-  } finally {
-    clearInterval(closeWatch)
-  }
 }

@@ -668,14 +668,14 @@ describe('视频编辑器 · 定位到这一段（P5）', () => {
   })
 })
 
-/** v10：检查器「转场（入场）」区块——可用性、类型选择、时长夹取与移除。 */
-describe('转场（入场）区块', () => {
-  const clipOf = (id: string) => useProjectStore.getState().project.mediaClips.find((clip) => clip.id === id)!
-
-  /** A[0,2] 源 0→2；B 从前段末尾起，默认源 2→4（有头部手柄）。gap 控制 B 的落点。 */
-  function seedTransition(options: { gap?: number; sourceInB?: number } = {}): void {
+/**
+ * v11：转场入口从「片段检查器」整体搬到左侧「转场」Tab + 右侧独立转场检查器。
+ * 这里锁住「点单个片段不再出现转场区块」，防止以后又把入口塞回片段面板
+ * （用户明确反馈：转场不应该在点击片段后对单个片段生效）。
+ */
+describe('转场入口不再挂在片段检查器（v11）', () => {
+  function seedTwoClips(): void {
     const { project } = seed()
-    const gap = options.gap ?? 0
     const a = {
       ...project.mediaClips[0]!,
       id: 'a',
@@ -687,10 +687,10 @@ describe('转场（入场）区块', () => {
     const b = {
       ...project.mediaClips[0]!,
       id: 'b',
-      timelineStartSec: 2 + gap,
-      timelineEndSec: 4 + gap,
-      sourceInSec: options.sourceInB ?? 2,
-      sourceOutSec: (options.sourceInB ?? 2) + 2
+      timelineStartSec: 2,
+      timelineEndSec: 4,
+      sourceInSec: 2,
+      sourceOutSec: 4
     }
     useProjectStore.setState({
       project: { ...project, mediaClips: [a, b] },
@@ -699,89 +699,300 @@ describe('转场（入场）区块', () => {
     })
   }
 
-  it('首段：显示禁用原因，不渲染类型网格', () => {
-    seedTransition()
-    act(() => useProjectStore.getState().selectMediaClip('a'))
-    render(<ClipInspector />)
-
-    expect(screen.getByText(TEXT.transition.title)).toBeTruthy()
-    expect(screen.getByText(TEXT.transition.first)).toBeTruthy()
-    expect(screen.queryByRole('button', { name: '溶解' })).toBeNull()
-  })
-
-  it('有空隙：显示禁用原因，不渲染类型网格', () => {
-    seedTransition({ gap: 2 })
-    render(<ClipInspector />)
-
-    expect(screen.getByText(TEXT.transition.gap)).toBeTruthy()
-    expect(screen.queryByRole('button', { name: '溶解' })).toBeNull()
-  })
-
-  it('手柄不足：显示原因与可用时长，不渲染可写入口', () => {
-    seedTransition({ sourceInB: 0 })
-    render(<ClipInspector />)
-
-    expect(screen.getByText(TEXT.transition.noHead)).toBeTruthy()
-    expect(screen.getByText(TEXT.transition.insufficient('0.00'))).toBeTruthy()
-    expect(screen.queryByRole('button', { name: '溶解' })).toBeNull()
-  })
-
-  it('可用：19 个类型按族分组；点类型写入并同步 aria-pressed', () => {
-    seedTransition()
+  it('选中媒体片段时没有转场类型网格与删除按钮', () => {
+    seedTwoClips()
     const { container } = render(<ClipInspector />)
 
-    const groups = Array.from(container.querySelectorAll('.transition-family'))
-    expect(groups).toHaveLength(6)
-    expect(container.querySelectorAll('.transition-grid button')).toHaveLength(19)
-
-    const dissolve = screen.getByRole('button', { name: '溶解' })
-    expect(dissolve.getAttribute('aria-pressed')).toBe('false')
-    fireEvent.click(dissolve)
-
-    expect(clipOf('b').transitionIn).toEqual({ type: 'dissolve', durationSec: 0.5 })
-    expect(dissolve.getAttribute('aria-pressed')).toBe('true')
-    // 分组标签与提示都在
-    expect(screen.getByText(TEXT.transition.hint)).toBeTruthy()
-  })
-
-  it('时长输入：秒为单位、帧步进；超上限夹到 1.5s、低于下限夹到 0.2s', () => {
-    seedTransition()
-    render(<ClipInspector />)
-    fireEvent.click(screen.getByRole('button', { name: '溶解' }))
-
-    const input = screen.getByLabelText(TEXT.transition.duration) as HTMLInputElement
-    expect(Number(input.getAttribute('min'))).toBe(0.2)
-    expect(Number(input.getAttribute('max'))).toBe(1.5)
-    expect(Number(input.getAttribute('step'))).toBeCloseTo(1 / 30, 9)
-
-    fireEvent.change(input, { target: { value: '2' } })
-    expect(clipOf('b').transitionIn?.durationSec).toBe(1.5)
-    fireEvent.change(input, { target: { value: '0.1' } })
-    expect(clipOf('b').transitionIn?.durationSec).toBe(0.2)
-    // 帧读数写在输入框旁边（0.2s @ 30fps = 6 帧）
-    expect(screen.getByText(TEXT.transition.frames(6))).toBeTruthy()
-  })
-
-  it('移除按钮：删掉 transitionIn 整个键', () => {
-    seedTransition()
-    render(<ClipInspector />)
-    fireEvent.click(screen.getByRole('button', { name: '溶解' }))
-    expect(clipOf('b').transitionIn).toBeDefined()
-
-    fireEvent.click(screen.getByRole('button', { name: TEXT.transition.remove }))
-
-    expect('transitionIn' in clipOf('b')).toBe(false)
+    expect(container.querySelector('.transition-grid')).toBeNull()
+    expect(container.querySelector('.transition-panel')).toBeNull()
+    expect(screen.queryByRole('button', { name: '溶解' })).toBeNull()
     expect(screen.queryByRole('button', { name: TEXT.transition.remove })).toBeNull()
   })
 
-  it('当前类型在未选中时如实显示 aria-pressed', () => {
-    seedTransition()
+  it('选中转场时右侧切到转场检查器（不再显示片段面板）', () => {
+    seedTwoClips()
     act(() =>
-      useProjectStore.getState().setMediaClipTransition('b', { type: 'pushLeft', durationSec: 0.5 })
+      useProjectStore.getState().setMediaClipTransition('b', { type: 'dissolve', durationSec: 0.5 })
+    )
+    act(() => useProjectStore.getState().selectTransition('b'))
+    render(<ClipInspector />)
+
+    expect(screen.getByText(TEXT.transition.inspectorTitle)).toBeTruthy()
+    expect(screen.getByRole('button', { name: TEXT.transition.remove })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: TEXT.videoEditor.interact })).toBeNull()
+  })
+})
+
+describe('媒体段关键帧（M6-E）', () => {
+  it('媒体段检查器里有「关键帧」分区；打点写入该段 keyframes，初始值取静态几何', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    // 先把静态缩放改成 150%：打点应按"当前静态值"起手，而不是通用默认 100%
+    act(() => useProjectStore.getState().updateMediaClipVideo(mediaClipId, { scalePercent: 150 }))
+    render(<ClipInspector />)
+
+    expect(screen.getByText(TEXT.keyframes.title)).toBeTruthy()
+    // 参数行顺序 = CLIP_PARAM_IDS（opacity / offsetXPct / offsetYPct / scalePct / rotationDeg）
+    const addButtons = screen.getAllByTitle(TEXT.keyframes.addPoint)
+    expect(addButtons).toHaveLength(5)
+    fireEvent.click(addButtons[3]!)
+
+    const clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === mediaClipId)!
+    expect(clip.keyframes).toHaveLength(1)
+    expect(clip.keyframes![0]!.param).toBe('scalePct')
+    expect(clip.keyframes![0]!.points).toHaveLength(1)
+    expect(clip.keyframes![0]!.points[0]!.value).toBe(150)
+  })
+
+  it('清空轨道：关键帧整键删除（不把空数组写进工程）', () => {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    act(() =>
+      useProjectStore.getState().setMediaClipKeyframes(mediaClipId, [
+        { param: 'opacity', points: [{ t: 0, value: 0.5, easing: 'linear' }] }
+      ])
     )
     render(<ClipInspector />)
 
-    expect(screen.getByRole('button', { name: '推入左侧' }).getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByRole('button', { name: '溶解' }).getAttribute('aria-pressed')).toBe('false')
+    // 有轨道时才出现「清空该参数轨道」按钮
+    const clear = screen.getAllByTitle(TEXT.keyframes.clearTrack)
+    expect(clear.length).toBeGreaterThan(0)
+    fireEvent.click(clear[0]!)
+    const clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === mediaClipId)!
+    expect('keyframes' in clip).toBe(false)
+  })
+})
+
+describe('手绘遮罩分区（M8）', () => {
+  afterEach(() => {
+    // 组件可能还挂着：在 act 里复位，避免「afterEach 改 store → 组件重渲染」的告警
+    act(() => {
+      useUiStore.setState({ maskPaint: { clipId: null, mode: 'hide', radiusPct: 4 } })
+    })
+  })
+
+  function selectMedia(): string {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    return mediaClipId
+  }
+
+  it('选中媒体段后出现「遮罩」入口：无笔画时清空按钮禁用、不显示笔刷参数', () => {
+    selectMedia()
+    render(<ClipInspector />)
+
+    expect(screen.getByText(TEXT.mask.title)).toBeTruthy()
+    expect(screen.getByText(TEXT.mask.strokes(0))).toBeTruthy()
+    const clear = screen.getByRole('button', { name: TEXT.mask.clear }) as HTMLButtonElement
+    expect(clear.disabled).toBe(true)
+    expect(screen.getByText(TEXT.mask.empty)).toBeTruthy()
+    // 未进入画笔：笔刷/模式控件不占位
+    expect(screen.queryByLabelText(TEXT.mask.brush)).toBeNull()
+  })
+
+  it('未选中媒体段（字幕检查器）时没有遮罩分区', () => {
+    const { subtitleClipId } = seed()
+    act(() => useProjectStore.getState().selectClip(subtitleClipId))
+    render(<ClipInspector />)
+
+    expect(screen.queryByText(TEXT.mask.title)).toBeNull()
+  })
+
+  it('进入画笔：写 uiStore、暂停播放、跳到该段中点，按钮变「退出画笔」并出现笔刷控件', () => {
+    const id = selectMedia()
+    const seek = vi.fn()
+    act(() => {
+      useUiStore.setState({ playing: true })
+      useUiStore.getState().setSeekHandler(seek)
+    })
+    render(<ClipInspector />)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.mask.enter }))
+
+    expect(useUiStore.getState().maskPaint.clipId).toBe(id)
+    expect(useUiStore.getState().playing).toBe(false)
+    // 片段 0→8s：跳到中点 4s，保证预览里真的显示这一段
+    expect(seek).toHaveBeenCalledWith(4)
+    expect(screen.getByRole('button', { name: TEXT.mask.exit })).toBeTruthy()
+    const brush = screen.getByLabelText(TEXT.mask.brush) as HTMLInputElement
+    expect(brush.value).toBe('4')
+    // 默认模式是「抹掉」
+    expect(screen.getByRole('button', { name: TEXT.mask.hide }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('笔刷滑杆写回 uiStore 并夹到 0.5..20；模式切换抹掉/擦回', () => {
+    selectMedia()
+    render(<ClipInspector />)
+    fireEvent.click(screen.getByRole('button', { name: TEXT.mask.enter }))
+
+    fireEvent.change(screen.getByLabelText(TEXT.mask.brush), { target: { value: '8' } })
+    expect(useUiStore.getState().maskPaint.radiusPct).toBe(8)
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.mask.restore }))
+    expect(useUiStore.getState().maskPaint.mode).toBe('restore')
+    fireEvent.click(screen.getByRole('button', { name: TEXT.mask.hide }))
+    expect(useUiStore.getState().maskPaint.mode).toBe('hide')
+
+    // 退出后笔刷大小保留（同一会话），再进入继续用
+    const radius = useUiStore.getState().maskPaint.radiusPct
+    fireEvent.click(screen.getByRole('button', { name: TEXT.mask.exit }))
+    expect(useUiStore.getState().maskPaint.clipId).toBeNull()
+    expect(useUiStore.getState().maskPaint.radiusPct).toBe(radius)
+  })
+
+  it('清空遮罩：调 setMediaClipMask(id, undefined)，整键删除并回到「无笔画」', () => {
+    const id = selectMedia()
+    act(() => {
+      useProjectStore.getState().setMediaClipMask(id, {
+        strokes: [{ mode: 'hide', radiusPct: 4, points: [{ x: 0.2, y: 0.2 }] }]
+      })
+    })
+    render(<ClipInspector />)
+
+    expect(screen.getByText(TEXT.mask.strokes(1))).toBeTruthy()
+    const clear = screen.getByRole('button', { name: TEXT.mask.clear }) as HTMLButtonElement
+    expect(clear.disabled).toBe(false)
+    fireEvent.click(clear)
+
+    const clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === id)!
+    expect('mask' in clip).toBe(false)
+    expect(screen.getByText(TEXT.mask.strokes(0))).toBeTruthy()
+  })
+
+  it('切走选中段时自动退出画笔（画笔层不会留在别的画面上）', () => {
+    const id = selectMedia()
+    const subtitleClipId = useProjectStore.getState().project.clips[0]!.id
+    render(<ClipInspector />)
+    fireEvent.click(screen.getByRole('button', { name: TEXT.mask.enter }))
+    expect(useUiStore.getState().maskPaint.clipId).toBe(id)
+
+    act(() => {
+      useProjectStore.getState().selectClip(subtitleClipId)
+    })
+
+    expect(useUiStore.getState().maskPaint.clipId).toBeNull()
+  })
+
+  it('羽化：有笔画时出现滑杆，改值写 mask.featherPct 且保留笔画；拉回 0 删键', () => {
+    const id = selectMedia()
+    act(() => {
+      useProjectStore.getState().setMediaClipMask(id, {
+        strokes: [{ mode: 'hide', radiusPct: 4, points: [{ x: 0.2, y: 0.2 }] }]
+      })
+    })
+    render(<ClipInspector />)
+
+    const feather = screen.getByLabelText(TEXT.mask.feather) as HTMLInputElement
+    expect(feather.value).toBe('0')
+    fireEvent.change(feather, { target: { value: '6' } })
+
+    let clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === id)!
+    expect(clip.mask?.featherPct).toBe(6)
+    expect(clip.mask?.strokes).toHaveLength(1)
+
+    // 拉回 0 = 硬边：只删 featherPct，不把笔画一起丢掉
+    fireEvent.change(screen.getByLabelText(TEXT.mask.feather), { target: { value: '0' } })
+    clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === id)!
+    expect(clip.mask?.featherPct).toBeUndefined()
+    expect(clip.mask?.strokes).toHaveLength(1)
+  })
+
+  it('反向遮罩：勾选写 mask.invert 并保留笔画/羽化；改羽化不丢反向；取消勾选删键', () => {
+    const id = selectMedia()
+    act(() => {
+      useProjectStore.getState().setMediaClipMask(id, {
+        strokes: [{ mode: 'hide', radiusPct: 4, points: [{ x: 0.2, y: 0.2 }] }],
+        featherPct: 5
+      })
+    })
+    render(<ClipInspector />)
+
+    const invert = screen.getByLabelText(TEXT.mask.invert) as HTMLInputElement
+    expect(invert.checked).toBe(false)
+    fireEvent.click(invert)
+
+    let clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === id)!
+    expect(clip.mask?.invert).toBe(true)
+    expect(clip.mask?.featherPct).toBe(5)
+    expect(clip.mask?.strokes).toHaveLength(1)
+
+    // 两个开关互相保留：改羽化不把反向丢掉
+    fireEvent.change(screen.getByLabelText(TEXT.mask.feather), { target: { value: '8' } })
+    clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === id)!
+    expect(clip.mask?.invert).toBe(true)
+    expect(clip.mask?.featherPct).toBe(8)
+
+    // 取消勾选只删 invert，羽化与笔画都还在
+    fireEvent.click(screen.getByLabelText(TEXT.mask.invert))
+    clip = useProjectStore.getState().project.mediaClips.find((item) => item.id === id)!
+    expect(clip.mask?.invert).toBeUndefined()
+    expect(clip.mask?.featherPct).toBe(8)
+    expect(clip.mask?.strokes).toHaveLength(1)
+  })
+})
+
+/**
+ * M8-P1：AI 抠像（AI matte）分区的降级契约。
+ *
+ * 老版本 preload（以及渲染层测试桩）可能没有 `aiMatte` 通道：分区必须显示
+ * 「运行时未就绪」并禁用生成按钮，绝不能抛异常（曾经 `window.socut.aiMatte.status`
+ * 让 43 个渲染用例一起崩掉）。
+ */
+describe('AI 抠像分区（M8-P1）', () => {
+  afterEach(() => {
+    delete (window as unknown as { socut?: unknown }).socut
+  })
+
+  function stubSocut(aiMatte: unknown): void {
+    ;(window as unknown as { socut: unknown }).socut = {
+      aiMatte,
+      export: { cancel: vi.fn(async () => undefined) }
+    }
+  }
+
+  function selectMedia(): string {
+    const { mediaClipId } = seed()
+    act(() => useProjectStore.getState().selectMediaClip(mediaClipId))
+    return mediaClipId
+  }
+
+  it('preload 缺 aiMatte 通道：显示运行时未就绪、生成按钮禁用、不抛异常', () => {
+    stubSocut(undefined)
+    selectMedia()
+    render(<ClipInspector />)
+    expect(screen.getByText(TEXT.aiMatte.title)).toBeTruthy()
+    expect(screen.getByText(TEXT.aiMatte.runtimeMissing)).toBeTruthy()
+    expect(
+      (screen.getByRole('button', { name: TEXT.aiMatte.generate }) as HTMLButtonElement).disabled
+    ).toBe(true)
+  })
+
+  it('status 就绪 → 生成按钮可用；status 拒绝 → 降级为未就绪', async () => {
+    stubSocut({
+      status: vi.fn(async () => ({ ready: true, runtime: { ok: true }, model: { ok: true, path: 'C:/models/selfie.onnx' } })),
+      generate: vi.fn(),
+      cancel: vi.fn()
+    })
+    selectMedia()
+    render(<ClipInspector />)
+    await waitFor(() => expect(screen.getByText(TEXT.aiMatte.ready)).toBeTruthy())
+    expect(
+      (screen.getByRole('button', { name: TEXT.aiMatte.generate }) as HTMLButtonElement).disabled
+    ).toBe(false)
+
+    cleanup()
+    stubSocut({
+      status: vi.fn(async () => {
+        throw new Error('boom')
+      }),
+      generate: vi.fn(),
+      cancel: vi.fn()
+    })
+    selectMedia()
+    render(<ClipInspector />)
+    await waitFor(() => expect(screen.getByText(TEXT.aiMatte.runtimeMissing)).toBeTruthy())
+    expect(
+      (screen.getByRole('button', { name: TEXT.aiMatte.generate }) as HTMLButtonElement).disabled
+    ).toBe(true)
   })
 })

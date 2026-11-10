@@ -2,78 +2,34 @@ import { TRANSITION_DURATION } from './constants'
 import { durationSecToFrames, frameIntervalSec, framesToDurationSec, snapTimeToFrame } from './fps'
 import { inferMediaKind } from './audioClips'
 import { speedValueOf } from './mediaClipAudio'
-import type {
-  Fps,
-  MediaClip,
-  MediaKind,
-  Project,
-  TransitionDirection,
-  TransitionFamily,
-  TransitionType
-} from './types'
+import type { Fps, MediaClip, MediaKind, Project, TransitionFamily, TransitionType } from './types'
+import {
+  TRANSITION_CATALOG,
+  TRANSITION_FAMILIES as CATALOG_FAMILIES,
+  TRANSITION_FAMILY_LABELS
+} from './transitionCatalog'
+
+import type { TransitionMeta } from './transitionCatalog'
+export type { TransitionMeta } from './transitionCatalog'
 
 /**
- * 转场（v10）纯口径：19 种成片转场 → `xfade` 原语、中文名、族与方向。
+ * 转场（v10 / M7-E）纯口径：58 种 xfade 成片转场 → `xfade` 原语、中文名、族与方向。
  *
  * 设计纪律：
- * - **类型/时长只在这里定义**；UI、时间轴标记与导出计划都读同一份元数据。
+ * - **类型/元数据真值在 `transitionCatalog.ts`**；UI、时间轴标记与导出计划都读同一份。
  * - 数据落在切点**右侧片段**的 `transitionIn` 上；左侧 = 同轨、时间上紧邻的前一段。
  * - 时长居中跨切点（切点两侧各 T/2），吸附帧；手柄不足时按「前段尾 / 后段头 × 各自倍速」
  *   夹取，夹后不足 2 帧就不生效。
  * - 本文件不 import Node / Electron / DOM，主进程、渲染进程与测试共用。
  */
 
-export interface TransitionMeta {
-  type: TransitionType
-  family: TransitionFamily
-  direction: TransitionDirection
-  /** 中文短名（检查器按钮与时间轴 tooltip 共用） */
-  label: string
-  /** FFmpeg `xfade` 的 transition 值（导出计划在 Task 7 使用） */
-  xfade: string
-}
+/** 族顺序 = 检查器网格的分组顺序（来自目录文件，保证唯一真值）。 */
+export const TRANSITION_FAMILIES: readonly TransitionFamily[] = CATALOG_FAMILIES
 
-/** 族顺序 = 检查器网格的分组顺序。 */
-export const TRANSITION_FAMILIES: readonly TransitionFamily[] = [
-  'basic',
-  'blur',
-  'wind',
-  'push',
-  'pull',
-  'camera'
-] as const
+export { TRANSITION_FAMILY_LABELS }
 
-export const TRANSITION_FAMILY_LABELS: Record<TransitionFamily, string> = {
-  basic: '基础',
-  blur: '模糊',
-  wind: '运动模糊平移',
-  push: '推入',
-  pull: '拉出',
-  camera: '运镜'
-}
-
-/** 19 种转场（顺序与 `TransitionType` 声明一致，便于 UI 稳定排布）。 */
-export const TRANSITIONS: TransitionMeta[] = [
-  { type: 'dissolve', family: 'basic', direction: 'none', label: '溶解', xfade: 'fade' },
-  { type: 'fadeBlack', family: 'basic', direction: 'none', label: '黑场', xfade: 'fadeblack' },
-  { type: 'fadeWhite', family: 'basic', direction: 'none', label: '白场', xfade: 'fadewhite' },
-  { type: 'lightFlash', family: 'basic', direction: 'none', label: '光效闪灰', xfade: 'fadegrays' },
-  { type: 'blurH', family: 'blur', direction: 'none', label: '横向模糊', xfade: 'hblur' },
-  { type: 'blurV', family: 'blur', direction: 'none', label: '纵向模糊', xfade: 'vblur' },
-  { type: 'windLeft', family: 'wind', direction: 'left', label: '风感左移', xfade: 'hlwind' },
-  { type: 'windRight', family: 'wind', direction: 'right', label: '风感右移', xfade: 'hrwind' },
-  { type: 'windUp', family: 'wind', direction: 'up', label: '风感上移', xfade: 'vuwind' },
-  { type: 'windDown', family: 'wind', direction: 'down', label: '风感下移', xfade: 'vdwind' },
-  { type: 'pushLeft', family: 'push', direction: 'left', label: '推入左侧', xfade: 'coverleft' },
-  { type: 'pushRight', family: 'push', direction: 'right', label: '推入右侧', xfade: 'coverright' },
-  { type: 'pushUp', family: 'push', direction: 'up', label: '推入上方', xfade: 'coverup' },
-  { type: 'pushDown', family: 'push', direction: 'down', label: '推入下方', xfade: 'coverdown' },
-  { type: 'pullLeft', family: 'pull', direction: 'left', label: '拉出左侧', xfade: 'revealleft' },
-  { type: 'pullRight', family: 'pull', direction: 'right', label: '拉出右侧', xfade: 'revealright' },
-  { type: 'pullUp', family: 'pull', direction: 'up', label: '拉出上方', xfade: 'revealup' },
-  { type: 'pullDown', family: 'pull', direction: 'down', label: '拉出下方', xfade: 'revealdown' },
-  { type: 'zoomIn', family: 'camera', direction: 'none', label: '运镜推近', xfade: 'zoomin' }
-]
+/** 59 条目录：58 个唯一 xfade + `blurV` 旧工程别名（顺序与目录声明一致）。 */
+export const TRANSITIONS: TransitionMeta[] = [...TRANSITION_CATALOG]
 
 export const TRANSITION_MAP: Record<TransitionType, TransitionMeta> = Object.fromEntries(
   TRANSITIONS.map((meta) => [meta.type, meta])

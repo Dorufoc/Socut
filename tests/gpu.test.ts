@@ -314,6 +314,115 @@ describe('videoEncodeArgs', () => {
   })
 })
 
+describe('HEVC 选择与码率模式', () => {
+  const available = parseHardwareEncoders(FFMPEG_ENCODERS)
+
+  it('codec=hevc 选 HEVC 硬件编码器；缺省仍是 h264', () => {
+    expect(pickHardwareEncoder(available, { mode: 'auto', codec: 'hevc' })?.name).toBe('hevc_nvenc')
+    expect(pickHardwareEncoder(available, { mode: 'auto', preferredVendor: 'nvidia', codec: 'hevc' })?.name).toBe(
+      'hevc_nvenc'
+    )
+    expect(pickHardwareEncoder(available, { mode: 'auto' })?.name).toBe('h264_nvenc')
+    expect(pickHardwareEncoder(available, { mode: 'software', codec: 'hevc' })).toBeNull()
+  })
+
+  it('软件编码 HEVC 使用 libx265；CRF 模式保留 -crf/-preset', () => {
+    expect(softwareVideoEncodeArgs(18, 'medium', { codec: 'hevc' })).toEqual([
+      '-c:v',
+      'libx265',
+      '-crf',
+      '18',
+      '-preset',
+      'medium'
+    ])
+    expect(videoEncodeArgs({ encoder: null, quality: 18, preset: 'medium', codec: 'hevc' })).toEqual(
+      softwareVideoEncodeArgs(18, 'medium', { codec: 'hevc' })
+    )
+  })
+
+  it('动态码率模式：软件编码只输出目标 -b:v，不带 -maxrate/-bufsize/-crf', () => {
+    const args = softwareVideoEncodeArgs(18, 'medium', { codec: 'hevc', bitrateKbps: 2000 })
+    expect(args).toEqual(['-c:v', 'libx265', '-b:v', '2000k'])
+    expect(args).not.toContain('-crf')
+    expect(args).not.toContain('-maxrate')
+    expect(args).not.toContain('-bufsize')
+  })
+
+  it('NVENC 动态码率：VBR + 目标码率，无硬上限/-crf/-cq', () => {
+    const args = hardwareVideoEncodeArgs('h264_nvenc', 18, 2000) ?? []
+    expect(args.slice(0, 2)).toEqual(['-c:v', 'h264_nvenc'])
+    expect(args).toContain('-rc')
+    expect(args[args.indexOf('-b:v') + 1]).toBe('2000k')
+    expect(args).not.toContain('-maxrate')
+    expect(args).not.toContain('-bufsize')
+    expect(args).not.toContain('-crf')
+    expect(args).not.toContain('-cq')
+  })
+
+  it('QSV / AMF 动态码率参数域正确', () => {
+    expect(hardwareVideoEncodeArgs('hevc_qsv', 18, 2000)).toEqual([
+      '-c:v',
+      'hevc_qsv',
+      '-preset',
+      'medium',
+      '-b:v',
+      '2000k'
+    ])
+    const amf = hardwareVideoEncodeArgs('hevc_amf', 18, 2000) ?? []
+    expect(amf.slice(0, 6)).toEqual(['-c:v', 'hevc_amf', '-quality', 'balanced', '-rc', 'vbr_peak'])
+    expect(amf[amf.indexOf('-b:v') + 1]).toBe('2000k')
+    expect(amf).not.toContain('-maxrate')
+    expect(amf).not.toContain('-bufsize')
+  })
+
+  it('HEVC CRF/CQ 模式镜像 H.264', () => {
+    const nvenc = hardwareVideoEncodeArgs('hevc_nvenc', 18) ?? []
+    expect(nvenc).toEqual([
+      '-c:v',
+      'hevc_nvenc',
+      '-preset',
+      'p5',
+      '-tune',
+      'hq',
+      '-rc',
+      'vbr',
+      '-cq',
+      '18',
+      '-b:v',
+      '0'
+    ])
+    expect(hardwareVideoEncodeArgs('hevc_qsv', 18)).toEqual([
+      '-c:v',
+      'hevc_qsv',
+      '-preset',
+      'medium',
+      '-global_quality',
+      '18'
+    ])
+    expect((hardwareVideoEncodeArgs('hevc_amf', 18) ?? []).slice(0, 6)).toEqual([
+      '-c:v',
+      'hevc_amf',
+      '-quality',
+      'balanced',
+      '-rc',
+      'cqp'
+    ])
+  })
+
+  it('编码器族与请求 codec 不一致时回退软件编码，绝不产出错配 -c:v', () => {
+    const args = videoEncodeArgs({
+      encoder: 'h264_nvenc',
+      quality: 18,
+      preset: 'medium',
+      codec: 'hevc',
+      bitrateKbps: 2000
+    })
+    expect(args[0]).toBe('-c:v')
+    expect(args[1]).toBe('libx265')
+    expect(args).not.toContain('h264_nvenc')
+  })
+})
+
 describe('normalizeRenderSettings', () => {
   it('脏数据全部回落默认值', () => {
     expect(normalizeRenderSettings(null)).toEqual(DEFAULT_RENDER_SETTINGS)

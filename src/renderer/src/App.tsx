@@ -21,6 +21,7 @@ import { useExportStore } from './state/exportStore'
 import { usePreviewSpec } from './hooks/usePreviewSpec'
 import { useTransportKeys, isEditableTarget } from './hooks/useTransportKeys'
 import { useEditKeys } from './hooks/useEditKeys'
+import { useDeleteSelected } from './hooks/useDeleteSelected'
 import { attachProjectHistory, useHistoryStore } from './state/projectHistory'
 import { useProjectAutosave } from './hooks/useProjectAutosave'
 import { runAppSmoke } from './smoke/runAppSmoke'
@@ -45,6 +46,7 @@ import { useMediaIntegrity } from './hooks/useMediaIntegrity'
 import { FontLoadingOverlay } from './dialog/FontLoadingOverlay'
 import { CompatModal } from './dialog/CompatModal'
 import { MediaLibraryPanel } from './panels/MediaLibraryPanel'
+import { TransitionPanel } from './panels/TransitionPanel'
 import { WrapPanel } from './panels/WrapPanel'
 import type { LeftTabValue, Project } from '@shared/types'
 
@@ -54,18 +56,20 @@ export function hasRestoreProgress(project: Project): boolean {
 }
 
 /**
- * 主界面（WinUI 3 / Fluent）：标题栏 + 命令栏 + 左侧 Tab 壳（素材库/包装/导出/进度） + 中央预览 + 右侧字幕条检查器 + 双轨时间轴。
+ * 主界面（WinUI 3 / Fluent）：标题栏 + 命令栏 + 左侧 Tab 壳（素材库/转场/包装/导出/进度） + 中央预览 + 右侧字幕条检查器 + 双轨时间轴。
  * 默认基础模式，只暴露高频入口；配色、字体、动画、编码与工程分辨率等低频项收进高级模式。
  * v2：左侧不再堆叠三块面板，同一时刻只展开当前 Tab；选中项写回 project.ui.leftTab 持久化。
  * v3：四条区域之间的三条分隔线可拖拽（usePaneLayout + Splitter），比例存本机 localStorage，冷启动恢复。
  * v4：左侧新增「字幕」Tab（按时间顺序的标题列表，点击 = 选中 + 跳到入点）；时间轴字幕轨改为窄示意条。
  * v10（P6）：字幕与水印合并成「包装」，片尾只做占位，左侧只剩四个 Tab；Tab 清单取自
  * shared 的 LEFT_TABS，旧工程里的 'captions' / 'watermark' 在 normalizeProject 里已迁到 'wrap'。
+ * v11：新增「转场」Tab——样式从面板长按拖到时间轴缝隙生效，片段检查器里不再有转场入口。
  */
 
 /** 左侧 Tab 的显示名（顺序取 LEFT_TABS，不另写一份清单） */
 const RAIL_LABELS: Record<LeftTabValue, string> = {
   media: '素材库',
+  transition: TEXT.transition.tab,
   wrap: TEXT.wrap.tab,
   export: '导出',
   progress: '进度'
@@ -157,6 +161,8 @@ export function App(): ReactElement {
     undo: () => useHistoryStore.getState().undo(),
     redo: () => useHistoryStore.getState().redo()
   })
+  // v11：Delete / 退格 删除当前选中项（转场优先，其次字幕条/媒体段/音频段）
+  useDeleteSelected()
 
   /**
    * 把播放头跳转能力交给 uiStore：样式面板（配色/字体/动画/预设）改完参数后
@@ -197,8 +203,8 @@ export function App(): ReactElement {
   /**
    * 快捷键（阶段 6，P3 改成走统一目标解析）：
    * - Ctrl/Cmd+B：拆「当前该操作的那一段」（选中优先，未选中拆播放头处的媒体段）；
-   * - Delete：删「当前选中的那一段」（三类段都算）。Delete 不做「未选中退到播放头」的兼容，
-   *   一个键盘就能删掉用户没打算动的段太危疑；工具栏的删除才走完整默认解析。
+   * - Delete / 退格：删「当前选中的那一段」（三类段都算；v11 起转场选中优先），
+   *   统一在 `useDeleteSelected` 里处理，这里不再重复挂 Delete。
    * 输入控件里不拦：文本框内的 Ctrl+B（如浏览器式加粗）不得被抢走。
    * 空格与方向键在 `useTransportKeys` 里，共用同一条 `isEditableTarget` 判据。
    */
@@ -212,12 +218,29 @@ export function App(): ReactElement {
         // P4：黄线（预览轴）在的时候，拆分以它指向的那一帧为准，蓝线位置不变
         const atSec = ui.hoverPreviewSec ?? ui.displayTimeSec
         if (!useProjectStore.getState().splitTargetAt(atSec)) ui.setNotice(TEXT.timeline.noSplitTarget)
-        return
       }
-      if (event.key === 'Delete' && !inField) {
-        // 只删选中的那一段（不退到播放头默认解析）：没选中时 Delete 保持安静
-        if (!useProjectStore.getState().removeSelected()) return
+      // M5：Ctrl/Cmd+M = 与同轨紧邻的下一段合并
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'm' && !inField) {
         event.preventDefault()
+        const state = useProjectStore.getState()
+        const targetId = state.selectionKind === 'media' ? state.selectedMediaClipId : null
+        if (!targetId || !state.mergeMediaClipWithNext(targetId)) {
+          useUiStore.getState().setNotice(TEXT.timeline.noMergeTarget)
+        }
+      }
+      // M5：Shift+F = 在播放头切点插入冻结帧（异步抽帧；失败给可读提示）
+      if (event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === 'f' && !inField) {
+        event.preventDefault()
+        const ui = useUiStore.getState()
+        if (ui.playing) ui.setPlaying(false)
+        const atSec = ui.hoverPreviewSec ?? ui.displayTimeSec
+        void useProjectStore
+          .getState()
+          .freezeFrameAt(atSec)
+          .then((clipId) => {
+            if (!clipId) useUiStore.getState().setNotice(TEXT.timeline.noFreezeTarget)
+          })
+          .catch(() => useUiStore.getState().setNotice(TEXT.timeline.freezeFailed))
       }
     }
     window.addEventListener('keydown', onKey)
@@ -404,6 +427,8 @@ export function App(): ReactElement {
   }, [project.fps])
 
   const lastClipEnd = project.clips.reduce((acc, clip) => Math.max(acc, clip.endTime), 0)
+  /** v11：转场 Tab 角标 = 时间轴上已配置的转场个数 */
+  const transitionCount = project.mediaClips.filter((clip) => clip.transitionIn !== undefined).length
   const banner = error ?? bootError ?? notice
 
   // ---------------------------------------------------------------- 启动页动作
@@ -625,7 +650,7 @@ export function App(): ReactElement {
 
       <div className="shell" ref={layout.shellRef} style={layout.shellStyle}>
         <div className="body">
-          {/* 左侧：Tab 壳（素材库 / 包装 / 导出 / 进度）——与「当前字幕条」无关的全局操作 */}
+          {/* 左侧：Tab 壳（素材库 / 转场 / 包装 / 导出 / 进度）——与「当前字幕条」无关的全局操作 */}
           <aside className="rail">
             <div className="rail__tabs" role="tablist" aria-label="左侧面板">
               {LEFT_TABS.map((tab) => {
@@ -634,13 +659,17 @@ export function App(): ReactElement {
                     ? project.media.length > 0
                       ? project.media.length
                       : null
-                    : tab === 'wrap'
-                      ? project.clips.length > 0
-                        ? project.clips.length
+                    : tab === 'transition'
+                      ? transitionCount > 0
+                        ? transitionCount
                         : null
-                      : tab === 'export' && busy
-                        ? '●'
-                        : null
+                      : tab === 'wrap'
+                        ? project.clips.length > 0
+                          ? project.clips.length
+                          : null
+                        : tab === 'export' && busy
+                          ? '●'
+                          : null
                 return (
                   <button
                     key={tab}
@@ -661,6 +690,7 @@ export function App(): ReactElement {
             </div>
             <div className="rail__panels">
               {leftTab === 'media' ? <MediaLibraryPanel onPlaceAtPlayhead={placeMediaAtPlayhead} /> : null}
+              {leftTab === 'transition' ? <TransitionPanel /> : null}
               {leftTab === 'wrap' ? <WrapPanel /> : null}
               {leftTab === 'export' ? (
                 <ExportPanel spec={spec} fontLoading={fontLoading} ffmpegAvailable={appInfo?.ffmpegAvailable ?? false} />

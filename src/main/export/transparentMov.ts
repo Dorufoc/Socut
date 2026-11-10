@@ -95,6 +95,8 @@ export async function runTransparentMov(ctx: TransparentRunCtx, channel: FrameCh
       channel,
       startFrame: ctx.startFrame,
       framesTotal: ctx.framesTotal,
+      // raw 帧按 RGBA 尺寸反算内存窗口；PNG 管道是压缩流，按默认窗口即可
+      frameBytes: ctx.frameFormat === 'raw' ? ctx.width * ctx.height * 4 : undefined,
       isCancelled: ctx.isCancelled,
       onFrame: async (_absolute, buffer) => {
         await writeWithBackpressure(stdin, buffer)

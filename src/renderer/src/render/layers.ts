@@ -87,13 +87,41 @@ export function contentBoundsOf(boxes: LayoutBox[]): { x: number; w: number } {
   return { x: left, w: Math.max(1, right - left) }
 }
 
+/** 只画像素的盒（row/col/spacer 是纯布局容器，不参与锚点计算）。 */
+const LAYOUT_ONLY_KINDS = new Set(['row', 'col', 'spacer'])
+
+/**
+ * 片段实际绘制内容的几何中心：关键帧的位移/缩放/旋转都以它为原点。
+ * 用绘制盒并集（与擦除线同一口径），而不是 root 盒——条宽随文字自适应后，
+ * root 是「画宽减边距」，绕它旋转会让窄条绕着一个看不见的中心甩出去。
+ *
+ * 绘制（renderer）与命中测试（hitTest）共用这一个锚点：命中测试要把鼠标点
+ * **反变换**回这个局部坐标系，否则关键帧位移/缩放后点击位置会偏。
+ */
+export function contentAnchorOf(boxes: readonly LayoutBox[]): { cx: number; cy: number } | null {
+  let left = Number.POSITIVE_INFINITY
+  let right = Number.NEGATIVE_INFINITY
+  let top = Number.POSITIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  for (const box of boxes) {
+    if (LAYOUT_ONLY_KINDS.has(box.kind)) continue
+    if (box.w <= 0 || box.h <= 0) continue
+    left = Math.min(left, box.x)
+    right = Math.max(right, box.x + box.w)
+    top = Math.min(top, box.y)
+    bottom = Math.max(bottom, box.y + box.h)
+  }
+  if (!Number.isFinite(left) || !Number.isFinite(top)) return null
+  return { cx: (left + right) / 2, cy: (top + bottom) / 2 }
+}
+
 /**
  * 条块 / 色块：几何尺寸不变，用同一条擦除线裁出（左→右）。
  * 渐变基于**完整**盒几何生成，所以擦除过程中颜色不会跟着被压缩。
  */
-export function drawBar(ctx: DrawContext, box: LayoutBox, sweep: WipeSweep): void {
+export function drawBar(ctx: DrawContext, box: LayoutBox, sweep: WipeSweep, alphaMul = 1): void {
   if (!box.fill || box.w <= 0 || box.h <= 0) return
-  const alpha = box.opacity * box.fill.opacity
+  const alpha = box.opacity * box.fill.opacity * alphaMul
   if (alpha <= 0.001) return
   const win = visibleSpanX(box, sweep.leftPx, sweep.rightPx)
   if (!win) return
@@ -132,10 +160,11 @@ export function drawRule(
   ctx: DrawContext,
   box: LayoutBox,
   sweep: WipeSweep,
-  ruleReveal: number
+  ruleReveal: number,
+  alphaMul = 1
 ): void {
   if (!box.fill || box.h <= 0) return
-  const alpha = box.opacity * box.fill.opacity
+  const alpha = box.opacity * box.fill.opacity * alphaMul
   if (alpha <= 0.001) return
   const grownRight = box.x + box.w * clampRatio(ruleReveal)
   const win = visibleSpanX(box, sweep.leftPx, Math.min(sweep.rightPx, grownRight))
@@ -167,12 +196,18 @@ export function drawRule(
  * 进度与条块擦除同源（`wipeTo` / `wipeFrom`），因此不会出现“文字抢在条块前面”。
  * 交错跨度由预设 `textRevealFrames` 解释为「同时处于过渡的字符数」（字）。
  */
-export function drawText(ctx: DrawContext, box: LayoutBox, sweep: WipeSweep, staggerChars: number): void {
+export function drawText(
+  ctx: DrawContext,
+  box: LayoutBox,
+  sweep: WipeSweep,
+  staggerChars: number,
+  alphaMul = 1
+): void {
   const text = box.text
   if (!text || text.content.length === 0 || box.w <= 0 || box.h <= 0) return
   const win = visibleSpanX(box, sweep.leftPx, sweep.rightPx)
   if (!win) return
-  const alpha = box.opacity
+  const alpha = box.opacity * alphaMul
   if (alpha <= 0.001) return
 
   const font: FontSpec = {

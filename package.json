@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "cli": "node cli/socut-cli.mjs",
+    "mcp": "node cli/socut-mcp.mjs",
     "build": "electron-vite build",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
@@ -22,14 +23,21 @@
     "lint": "eslint .",
     "check:env": "node scripts/check-env.mjs",
     "verify": "npm run check:env && npm run lint && npm run typecheck && npm run test",
+    "verify:ci": "npm run check:env && npm run lint && npm run typecheck && npm run test && npm run build",
+    "ci:bootstrap": "node scripts/ci-bootstrap.mjs",
     "verify:all": "node scripts/verify-all.mjs",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "fetch:fonts": "node scripts/fetch-fonts.mjs",
+    "fetch:whisper": "node scripts/fetch-whisper.mjs",
+    "fetch:whisper:model": "node scripts/fetch-whisper-model.mjs",
+    "fetch:rnnoise": "node scripts/fetch-rnnoise-model.mjs",
+    "fetch:matte:model": "node scripts/fetch-matte-model.mjs",
     "make:icon": "node scripts/make-icon.mjs",
     "make:fixtures": "node scripts/make-probe-fixtures.mjs",
     "preview": "electron-vite preview",
     "dist": "npm run build && electron-builder --win x64",
     "package:win": "node scripts/package-win.mjs",
+    "smoke:packaged:ai": "node scripts/smoke-packaged-ai.mjs",
     "dist:win": "node scripts/dist-win.mjs",
     "dist:cache": "node scripts/dist-win.mjs --dir",
     "verify:packaged": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/verify-packaged.ps1",
@@ -58,5 +66,8 @@
     "typescript-eslint": "^8.72.1",
     "vite": "^7.3.7",
     "vitest": "^4.1.12"
+  },
+  "optionalDependencies": {
+    "onnxruntime-node": "^1.31.1"
   }
 }

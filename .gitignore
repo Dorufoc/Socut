@@ -26,3 +26,9 @@ docs/verification/artifacts/
 Thumbs.db
 .omo/
 .trae/*
+.screenshots/*
+
+# M11：whisper.cpp 二进制与 ggml 模型（由 scripts/fetch-whisper*.mjs 产出，不入库）
+resources/whisper/
+# M8/M11：离线模型目录（ggml-*.bin、RNNoise 的 .rnnn），由 fetch:* 脚本产出，绝不入库
+resources/models/

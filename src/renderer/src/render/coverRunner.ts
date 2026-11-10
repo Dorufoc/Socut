@@ -4,6 +4,7 @@ import { topActiveMediaClip } from '@shared/mediaClips'
 import { sourceTimeAt } from '@shared/mediaClipAudio'
 import { fpsRatio } from '@shared/fps'
 import { resolveExportCanvas } from '@shared/exportPresets'
+import { sanitizeFileName } from '@shared/fileName'
 import type {
   CoverExportRequest,
   CoverExportResult,
@@ -26,13 +27,14 @@ import { useUiStore } from '../state/uiStore'
 export interface CoverExportInput {
   outputDir: string
   selection: ExportCanvasSelection
+  /** 用户填写的作品名称；缺省 = 工程名称 */
+  baseName?: string
   /** 指定取帧时间；缺省 = 当前播放头 */
   atSec?: number
 }
 
-function coverFileName(project: Project, suffix: string, width: number, height: number): string {
-  const name = project.name || 'socut'
-  return `${name}-cover-${suffix}-${width}x${height}.png`
+function coverFileName(project: Project, baseName: string | undefined, suffix: string): string {
+  return `${sanitizeFileName(baseName ?? project.name, 'socut')}-封面-${suffix}.png`
 }
 
 function visibleCoverLayers(project: Project, atSec: number): CoverMediaLayer[] {
@@ -86,7 +88,7 @@ export async function runCoverExport(input: CoverExportInput): Promise<CoverExpo
   const overlayPng = new Uint8Array(await stage.pngBuffer())
 
   const request: CoverExportRequest = {
-    outputPath: `${input.outputDir}/${coverFileName(project, canvas.suffix, canvas.width, canvas.height)}`,
+    outputPath: `${input.outputDir}/${coverFileName(project, input.baseName, canvas.suffix)}`,
     width: canvas.width,
     height: canvas.height,
     fit: canvas.fit,

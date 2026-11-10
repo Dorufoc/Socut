@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
   type CSSProperties
@@ -9,6 +10,7 @@ import {
 import { frameIntervalSec } from '@shared/fps'
 import { clipTimelineDurationSec, previewGainAt, previewPlaybackRate, previewPreservesPitch } from '@shared/mediaClipAudio'
 import { mediaVideoFilter, mediaVideoTransform, curveTableValues, needsChannelTable } from '@shared/mediaClipVideo'
+import { mediaKeyframeCssAt } from '@shared/mediaClipKeyframes'
 import { transitionProgressAt } from '@shared/transitions'
 import type { Fps, MediaClip } from '@shared/types'
 import { attachPreviewAudio, setElementLevel, setPreservesPitch } from '../audio/previewAudioGraph'
@@ -26,6 +28,7 @@ import {
   type PreviewCandidate
 } from '../render/previewCandidates'
 import { transitionStyles, type PreviewTransitionState } from '../render/previewTransition'
+import { maskPreviewObjectUrl, revokeMaskUrl } from '../render/maskCapture'
 import { previewPerf } from '../render/previewPerf'
 
 /**
@@ -71,6 +74,11 @@ export interface MediaPreviewLayerProps {
    * 需要提前把它对齐到入点，否则回绕瞬间要等一次异步 seek 才出首帧。
    */
   loopDurationSec?: number
+  /**
+   * 目标画幅宽高比（M8）：手绘遮罩的光栅化画布要跟着画面框走，
+   * 否则归一化笔画在非方形画布上会被 CSS 拉伸成椭圆。缺省按 16:9。
+   */
+  maskAspect?: number
   /**
    * 本轨道上的全部可见片段（含候选池之外的段）。
    * 用来判断「刚结束的段后面是否紧贴着下一段」——只有这种缝口才允许用最后一帧
@@ -133,8 +141,11 @@ function mediaStyleOf(clip: MediaClip): CSSProperties {
   const transform = mediaVideoTransform(clip.video)
   // 每段用自己的曲线表 id：候选池里可能同时挂着调色不同的几段
   const filter = mediaVideoFilter(clip.video, previewGradeFilterId(clip.id))
+  // M6-E：挂了关键帧的段，几何完全由外层包裹层按帧给出；元素自己不能再套静态 transform
+  // （否则被关键帧覆盖的参数会与静态值重复应用，位置/缩放会翻倍）。
+  const geometryFromKeyframes = clip.keyframes !== undefined && clip.keyframes.length > 0
   return {
-    ...(transform !== 'none' ? { transform } : {}),
+    ...(transform !== 'none' && !geometryFromKeyframes ? { transform } : {}),
     ...(filter !== 'none' ? { filter } : {})
   }
 }
@@ -143,6 +154,31 @@ function mediaStyleOf(clip: MediaClip): CSSProperties {
 function clampSeekTarget(video: HTMLVideoElement, target: number): number {
   const duration = Number.isFinite(video.duration) ? video.duration : target
   return Math.min(Math.max(0, target), Math.max(0, duration - 0.001))
+}
+
+/**
+ * M8：手绘遮罩的 CSS 样式（透明区被遮掉）。
+ *
+ * 遮罩 PNG 由 `maskCapture.applyStrokesToContext` 光栅化：白底不透明 = 可见，
+ * hide 笔画用 `destination-out` 擦成透明 = 隐藏，所以这里用 `mask-mode: alpha`
+ * （PNG 的 alpha 通道承载可见性，和导出侧 `alphamerge` 读的是同一个通道）。
+ * 无 URL（没有遮罩 / 还没画好 / 环境不支持画布）时返回 undefined：
+ * DOM 上不出现任何 mask 属性 = 与旧版逐像素一致。
+ */
+function maskStyleOf(url: string | undefined): CSSProperties | undefined {
+  if (!url) return undefined
+  const value = `url("${url}")`
+  return {
+    maskImage: value,
+    WebkitMaskImage: value,
+    maskMode: 'alpha',
+    maskSize: '100% 100%',
+    WebkitMaskSize: '100% 100%',
+    maskRepeat: 'no-repeat',
+    WebkitMaskRepeat: 'no-repeat',
+    maskPosition: '0 0',
+    WebkitMaskPosition: '0 0'
+  }
 }
 
 /** `requestSeek` 的结果：调用方据此判断是否需要重新等待 seeked（`primeVideo` 的 pending 语义）。 */
@@ -157,7 +193,19 @@ interface SeekState {
 
 export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLayerProps>(
   function MediaPreviewLayer(
-    { candidates, fps, audioEnabled = true, loopDurationSec = 0, trackClips, onVisibleChange, onAudioChange, onFailure, transition, transitionResolver },
+    {
+      candidates,
+      fps,
+      audioEnabled = true,
+      loopDurationSec = 0,
+      maskAspect,
+      trackClips,
+      onVisibleChange,
+      onAudioChange,
+      onFailure,
+      transition,
+      transitionResolver
+    },
     ref
   ) {
     // 首帧就按模块级缓存预置：缓存命中时不需要等一次 effect + re-render 才挂元素
@@ -172,6 +220,12 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     })
     const elementsRef = useRef(new Map<string, HTMLVideoElement | HTMLImageElement>())
     /**
+     * M8：手绘遮罩的预览图（每个 clipId 一个 blob URL）。
+     * 没有 mask 的段不生成、不挂样式 —— 无遮罩时 DOM 与旧版完全一致。
+     */
+    const [maskUrls, setMaskUrls] = useState<Record<string, string>>({})
+    const maskUrlsRef = useRef<Record<string, string>>({})
+    /**
      * 每个 clipId 一个**稳定**的 ref 回调：内联箭头函数每次渲染都会换身份，
      * React 会先以 null 再以元素调用一遍，导致候选池每 100ms 被清空重填一次。
      */
@@ -179,6 +233,12 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       new Map<string, (element: HTMLVideoElement | HTMLImageElement | null) => void>()
     )
     const readyRef = useRef(new Set<string>())
+    /**
+     * M6-E：关键帧包裹层。媒体元素自己的 transform/opacity 被"切段可见性 + 转场"占用，
+     * 所以关键帧的几何/不透明度写在外层 div 上（与元素相乘），互不打架。
+     */
+    const keyframeLayerRef = useRef(new Map<string, HTMLDivElement>())
+    const keyframeCallbacksRef = useRef(new Map<string, (element: HTMLDivElement | null) => void>())
     const failedRef = useRef(new Set<string>())
     const pendingSeekRef = useRef(new Set<string>())
     const prerolledRef = useRef(new Set<string>())
@@ -220,6 +280,38 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     transitionPropRef.current = transition ?? null
 
     const pathsKey = candidates.map((candidate) => candidate.sourcePath).join('\n')
+
+    /**
+     * 遮罩内容签名：笔画/半径/模式/羽化/反向任一变化都要重新光栅化（播放、切段不重画）。
+     * 用整份 `mask` 序列化：M8 的反向/羽化也参与，漏掉会出现「改了参数预览却没变」。
+     */
+    const maskSignature = useMemo(
+      () =>
+        candidates
+          .map((candidate) => `${candidate.clip.id}:${candidate.clip.mask ? JSON.stringify(candidate.clip.mask) : ''}`)
+          .join('\n'),
+      [candidates]
+    )
+
+    /**
+     * DOM 渲染顺序必须与「候选池角色」无关（活动 / 前瞻 / 兜底），否则切点前后数组顺序会翻转
+     * （`[前段, 后段]` → `[后段, 前段]`），React 就会把 `<video>` 节点在 DOM 里搬动一次。
+     *
+     * 浏览器把一个媒体元素从文档摘下再插回，会重新走一遍加载算法：`currentTime` 复位到 0，
+     * 并先画出**源文件第一帧**。裁切过的片段（入点 ≠ 0）于是每次切段都会「闪一下原素材首帧」
+     * 才回到入点；未裁切的片段因为首帧就是正确帧，看不出来。
+     *
+     * 同一图层只承载一条轨道的候选（轨道内片段不重叠），按时间轴顺序渲染既稳定又不改变
+     * 合成语义；转场两层的层级由 `transitionStyles` 显式写 zIndex，与 DOM 顺序无关。
+     */
+    const orderedCandidates = useMemo(
+      () =>
+        [...candidates].sort(
+          (a, b) =>
+            a.clip.timelineStartSec - b.clip.timelineStartSec || a.clip.id.localeCompare(b.clip.id)
+        ),
+      [candidates]
+    )
 
     /**
      * 把解析结果写回本实例的 `urls`。命中缓存也要写：缓存是模块级、`urls` 是实例级，
@@ -284,6 +376,59 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
         cancelled = true
       }
     }, [pathsKey])
+
+    /**
+     * M8：遮罩 → CSS mask 用的 blob URL。
+     * 内容签名一变就整批重光栅化，旧 URL 在新图就绪后统一 revoke（防泄漏）；
+     * 卸载时由下面的 effect 回收最后一批。光栅化是异步的：晚一帧才上遮罩，
+     * 期间画面先按无遮罩显示（不闪黑）。
+     */
+    useEffect(() => {
+      const masked = candidates.filter(
+        (candidate) => candidate.clip.mask !== undefined && candidate.clip.mask.strokes.length > 0
+      )
+      const revokeAll = (): void => {
+        for (const url of Object.values(maskUrlsRef.current)) revokeMaskUrl(url)
+        maskUrlsRef.current = {}
+        setMaskUrls({})
+      }
+      if (masked.length === 0) {
+        // 没有遮罩且本来也没有 URL：什么都不做（避免无意义的 re-render）
+        if (Object.keys(maskUrlsRef.current).length === 0) return
+        revokeAll()
+        return
+      }
+      let cancelled = false
+      const aspect =
+        typeof maskAspect === 'number' && Number.isFinite(maskAspect) && maskAspect > 0 ? maskAspect : 16 / 9
+      void Promise.all(
+        masked.map(async (candidate) => [candidate.clip.id, await maskPreviewObjectUrl(candidate.clip.mask!, aspect)] as const)
+      )
+        .then((entries) => {
+          if (cancelled) {
+            for (const [, url] of entries) revokeMaskUrl(url)
+            return
+          }
+          const previous = maskUrlsRef.current
+          const next: Record<string, string> = {}
+          for (const [clipId, url] of entries) if (url) next[clipId] = url
+          maskUrlsRef.current = next
+          for (const url of Object.values(previous)) revokeMaskUrl(url)
+          setMaskUrls(next)
+        })
+        .catch(() => undefined)
+      return () => {
+        cancelled = true
+      }
+    }, [maskSignature, maskAspect])
+
+    /** 卸载：回收最后一批遮罩 blob URL（否则每次切工程都会泄漏若干张位图）。 */
+    useEffect(() => {
+      return () => {
+        for (const url of Object.values(maskUrlsRef.current)) revokeMaskUrl(url)
+        maskUrlsRef.current = {}
+      }
+    }, [])
 
     useEffect(() => {
       return () => {
@@ -360,18 +505,31 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       requestSeek(clipId, video, wanted)
     }
 
-    const resetElement = (clipId: string): void => {
+    /**
+     * 清掉某元素的一切推导状态。`element` 传入时**立刻**把 opacity 写成 0：
+     * 媒体重载（DOM 移动 / src 换版本 / 解码器复位）会把画面退回源片第一帧，
+     * 若等下一帧 tick 再隐藏，这一帧里裁切片段就会闪出原素材首帧。
+     */
+    const resetElement = (
+      clipId: string,
+      element?: HTMLVideoElement | HTMLImageElement | null
+    ): void => {
       readyRef.current.delete(clipId)
       failedRef.current.delete(clipId)
       pendingSeekRef.current.delete(clipId)
       prerolledRef.current.delete(clipId)
       alignedRef.current.delete(clipId)
       seekStateRef.current.delete(clipId)
+      if (element) {
+        element.style.opacity = '0'
+        if (element instanceof HTMLVideoElement) element.muted = true
+      }
     }
 
-    const failElement = (clipId: string): void => {
+    const failElement = (clipId: string, element?: HTMLVideoElement | HTMLImageElement | null): void => {
       readyRef.current.delete(clipId)
       failedRef.current.add(clipId)
+      if (element) element.style.opacity = '0'
       onFailureRef.current?.(clipId)
     }
 
@@ -397,8 +555,19 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
       video.pause()
     }
 
-    const markReadyIfDecoded = (clipId: string, video: HTMLVideoElement): void => {
+    /**
+     * 只有在「所有 seek 都落地」之后才允许标就绪。
+     *
+     * 之前只看 `pendingSeekRef`：一次 seek 期间又排进新目标时（合并器把目标写进 `wanted`），
+     * `seeked` 会先补发第二次 seek、紧接着又把该段标成就绪 —— 此时元素里还是上一次 seek
+     * 的画面（媒体刚加载完时就是源片首帧）。裁切片段就在这一瞬间被翻到最上层。
+     */
+    const markReadyIfSettled = (clipId: string, video: HTMLVideoElement): void => {
+      if (failedRef.current.has(clipId)) return
       if (pendingSeekRef.current.has(clipId)) return
+      if (video.seeking) return
+      const state = seekStateRef.current.get(clipId)
+      if (state && (state.wanted !== null || state.inFlight)) return
       if (video.readyState >= 2) markReady(clipId)
     }
 
@@ -438,18 +607,58 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
           elementsRef.current.set(clipId, element)
           // 换新元素时清掉旧的就绪标记：上一枚元素的解码结果不属于这一枚，
           // 否则切回该段的第一帧可能把还没解码出画面的元素翻到最上层。
-          resetElement(clipId)
-          // 新元素先静音，等 tick 判定它该出声时再解除；避免挂载瞬间漏音
-          if (element instanceof HTMLVideoElement) element.muted = true
+          // 同时立刻隐藏（元素刚挂载时还停在源片首帧）。
+          resetElement(clipId, element)
         }
         refCallbacksRef.current.set(clipId, callback)
       }
       return callback
     }
 
+    /** 关键帧包裹层的稳定 ref 回调（同上：内联箭头每帧换身份会让 DOM 频繁 detach）。 */
+    const keyframeRefCallbackFor = (clipId: string): ((element: HTMLDivElement | null) => void) => {
+      let callback = keyframeCallbacksRef.current.get(clipId)
+      if (!callback) {
+        callback = (element) => {
+          if (!element) {
+            keyframeLayerRef.current.delete(clipId)
+            return
+          }
+          keyframeLayerRef.current.set(clipId, element)
+        }
+        keyframeCallbacksRef.current.set(clipId, callback)
+      }
+      return callback
+    }
+
+    /**
+     * M6-E：逐帧把关键帧的几何/不透明度写到包裹层（命令式，不走 React state，
+     * 与切段可见性/转场的 opacity 相乘，互不覆盖）。
+     * 进度用**时间轴**算（`timelineStartSec..timelineEndSec`），与导出滤镜内的 t 同一口径。
+     */
+    const syncKeyframeStyles = (atSec: number): void => {
+      for (const candidate of candidatesRef.current) {
+        const layer = keyframeLayerRef.current.get(candidate.clip.id)
+        if (!layer) continue
+        const clip = candidate.clip
+        const tracks = clip.keyframes
+        if (!tracks || tracks.length === 0) {
+          if (layer.style.transform !== '') layer.style.transform = ''
+          if (layer.style.opacity !== '1') layer.style.opacity = '1'
+          continue
+        }
+        const span = clip.timelineEndSec - clip.timelineStartSec
+        const progress = span > 1e-9 ? (atSec - clip.timelineStartSec) / span : 0
+        const css = mediaKeyframeCssAt(clip.video, tracks, progress)
+        const transform = css.transform === 'none' ? '' : css.transform
+        if (layer.style.transform !== transform) layer.style.transform = transform
+        const opacity = String(Math.round(css.opacity * 1000) / 1000)
+        if (layer.style.opacity !== opacity) layer.style.opacity = opacity
+      }
+    }
+
     /** 转场增量 + 片段基座样式：只改 DOM style，不触发 React state。 */
-    const applyTransitionElementStyle = (
-      candidate: PreviewCandidate,
+    const applyTransitionElementStyle = (      candidate: PreviewCandidate,
       element: HTMLVideoElement | HTMLImageElement,
       style: CSSProperties
     ): void => {
@@ -595,6 +804,8 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
         const element = elementsRef.current.get(candidate.clip.id)
         if (element instanceof HTMLVideoElement) settleSeek(candidate.clip.id, element)
       }
+      // M6-E：关键帧几何/不透明度每帧同步（转场分支也会用到，所以在分叉前统一做一次）
+      syncKeyframeStyles(atSec)
       // 转场窗口用实时 atSec 现算（resolver 优先），不再等 PreviewStage 的节流值；
       // 没有 resolver 时回落到显式 transition prop（静态用例）。
       const resolver = transitionResolverRef.current
@@ -691,6 +902,9 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
           // 之后才回到漂移判定，避免每帧都 seek。
           const firstEnter = !alignedRef.current.has(clipId)
           if (firstEnter) alignedRef.current.add(clipId)
+          // 先落位再起播：起播早于 seek 落地时，解码器会从元素**当前**位置继续出画，
+          // 而媒体刚加载完/刚被重新挂载时那个位置就是源片第一帧。
+          if (firstEnter) requestSeek(clipId, element, target)
           if (playing) {
             if (element.paused) void element.play().catch(() => undefined)
             if (!firstEnter && Math.abs(element.currentTime - target) > PREVIEW_DRIFT_SEC) {
@@ -702,7 +916,6 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
               requestSeek(clipId, element, target)
             }
           }
-          if (firstEnter) requestSeek(clipId, element, target)
           const audible = playing && candidate === audioCandidate
           element.muted = !audible
           if (audible) {
@@ -801,7 +1014,7 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
     return (
       <>
         {/* 每段自己的曲线查找表：候选池可能同时有调色不同的几段，不能共用全局 id */}
-        {candidates.map((candidate) => {
+        {orderedCandidates.map((candidate) => {
           const video = candidate.clip.video
           if (!video || !needsChannelTable(video)) return null
           return (
@@ -823,47 +1036,57 @@ export const MediaPreviewLayer = forwardRef<MediaPreviewHandle, MediaPreviewLaye
             </svg>
           )
         })}
-        {candidates.map((candidate) => {
+        {orderedCandidates.map((candidate) => {
+          const clipId = candidate.clip.id
           const url = urls[candidate.sourcePath]
           if (!url) return null
-          const style = mediaStyleOf(candidate.clip)
+          // M8：有遮罩才合并 mask 样式；无遮罩时 style 与旧版逐键相同（零回归）
+          const maskStyle = maskStyleOf(maskUrls[clipId])
+          const style = maskStyle ? { ...mediaStyleOf(candidate.clip), ...maskStyle } : mediaStyleOf(candidate.clip)
           if (candidate.kind === 'image') {
             return (
-              <img
-                key={candidate.clip.id}
-                ref={refCallbackFor(candidate.clip.id)}
-                className="stage__ref-video"
-                src={url}
-                style={style}
-                alt=""
-                draggable={false}
-                onLoadStart={() => resetElement(candidate.clip.id)}
-                onLoad={() => markReady(candidate.clip.id)}
-                onError={() => failElement(candidate.clip.id)}
-              />
+              <div key={clipId} ref={keyframeRefCallbackFor(clipId)} className="stage__media-keyframes" aria-hidden="true">
+                <img
+                  ref={refCallbackFor(clipId)}
+                  className="stage__ref-video"
+                  src={url}
+                  style={style}
+                  alt=""
+                  draggable={false}
+                  onLoadStart={(event) => resetElement(clipId, event.currentTarget)}
+                  onLoad={() => markReady(clipId)}
+                  onError={(event) => failElement(clipId, event.currentTarget)}
+                />
+              </div>
             )
           }
           return (
-            <video
-              key={candidate.clip.id}
-              ref={refCallbackFor(candidate.clip.id)}
-              className="stage__ref-video"
-              src={url}
-              style={style}
-              playsInline
-              preload="auto"
-              aria-label="参考视频预览"
-              onLoadStart={() => resetElement(candidate.clip.id)}
-              onLoadedMetadata={(event) => primeVideo(candidate, event.currentTarget)}
-              onLoadedData={(event) => markReadyIfDecoded(candidate.clip.id, event.currentTarget)}
-              onCanPlay={(event) => markReadyIfDecoded(candidate.clip.id, event.currentTarget)}
-              onSeeked={(event) => {
-                // 顺序不能反：先让合并器应用最新目标（可能再发一次 seek），再把该段标成就绪
-                settleSeek(candidate.clip.id, event.currentTarget)
-                if (pendingSeekRef.current.delete(candidate.clip.id)) markReady(candidate.clip.id)
-              }}
-              onError={() => failElement(candidate.clip.id)}
-            />
+            <div key={clipId} ref={keyframeRefCallbackFor(clipId)} className="stage__media-keyframes" aria-hidden="true">
+              <video
+                ref={refCallbackFor(clipId)}
+                className="stage__ref-video"
+                src={url}
+                style={style}
+                playsInline
+                preload="auto"
+                aria-label="参考视频预览"
+                // 加载被接管 / 媒体被复位（DOM 搬动、src 换版本）：当场隐藏并清状态，
+                // 否则重载过程中画出的源片首帧会留在屏幕上最多一帧。
+                onLoadStart={(event) => resetElement(clipId, event.currentTarget)}
+                onEmptied={(event) => resetElement(clipId, event.currentTarget)}
+                onLoadedMetadata={(event) => primeVideo(candidate, event.currentTarget)}
+                onLoadedData={(event) => markReadyIfSettled(clipId, event.currentTarget)}
+                onCanPlay={(event) => markReadyIfSettled(clipId, event.currentTarget)}
+                onSeeked={(event) => {
+                  // 顺序不能反：先让合并器应用最新目标（可能再发一次 seek），再判定是否真落地
+                  settleSeek(clipId, event.currentTarget)
+                  // 目标还在飞时不标就绪（否则会把上一次 seek 的帧当成这一段的画面）
+                  pendingSeekRef.current.delete(clipId)
+                  markReadyIfSettled(clipId, event.currentTarget)
+                }}
+                onError={(event) => failElement(clipId, event.currentTarget)}
+              />
+            </div>
           )
         })}
         {/* 转场色块（黑/白/灰）：在媒体层之上、字幕 Canvas 之下（z-index 见 styles.css） */}

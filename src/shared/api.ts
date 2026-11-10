@@ -4,12 +4,15 @@ import type {
   CompatFlags,
   CoverExportRequest,
   CoverExportResult,
+  ExportKind,
   ExportRequest,
   Fps,
   FontRecord,
   FrameEnd,
   FrameRequest,
   FrameResponse,
+  FreezeFrameRequest,
+  FreezeFrameResult,
   JobProgress,
   JobResult,
   MediaProxyRequest,
@@ -27,6 +30,7 @@ import type {
 import type { RecentProjectCard } from './recentProjects'
 import type { GpuDiagnostics, GpuPreference, RenderSettings, VideoEncoderMode } from './gpu'
 import type { CliCommandRequest, CliResponse } from './cliProtocol'
+import type { WhisperSegment } from './whisper'
 
 /** preload 暴露给渲染进程的唯一 API 面（contextIsolation，零 Node 泄露）。 */
 
@@ -92,12 +96,6 @@ export interface SmokeConfig {
    * 两者都必须能跑与能回收，不能只证透明 MOV。
    */
   exportKind: 'transparentMov' | 'pngSequence'
-  /**
-   * export 场景的帧交付方式（SOCUT_SMOKE_DELIVERY）。
-   * 'pngSequence' 是透明 MOV 的回退路径（帧先落盘再由 FFmpeg 编 ProRes），
-   * 与管道主路径走完全不同的代码，必须单独跑过。
-   */
-  frameDelivery: 'pipe' | 'pngSequence'
   /**
    * overlay 场景：跳过音频预检、强制走 `-c:a copy`。
    * 用来取证验收第 7 条后半句：copy 运行期失败 → 只重试一次 AAC 并提示用户
@@ -203,16 +201,141 @@ export interface WatermarkPickResult {
   sourceHeight: number
 }
 
+/**
+ * M8-P0：外部 matte 导入结果（selected = 用户选了文件；取消返回 null）。
+ * - 路径一定是绝对路径（工程 JSON 与素材同一惯例）；
+ * - kind 由主进程按扩展名给出 image/video，渲染侧直接落库，避免 UI 再猜；
+ * - width/height 只有静态图 matte 才有（供检查器显示尺寸，视频不探测元数据）。
+ */
+/**
+ * M8-P1：AI 人像抠像（Selfie Segmenter）请求/结果。
+ * 渲染侧只提交「片段源窗口 + 尺寸」；解码/推理/编码/缓存全在主进程。
+ */
+export interface AiMatteRequest {
+  clipId: string
+  sourcePath: string
+  sourceInSec: number
+  sourceOutSec: number
+  fps: Fps
+  /** 源素材像素宽高（用于推导 matte 输出尺寸：长边 512、偶数） */
+  sourceWidth: number
+  sourceHeight: number
+}
+
+export interface AiMatteJobResult {
+  status: 'queued' | 'cached'
+  jobId: string
+  /** 缓存命中时直接可用；排队时 null（完成后经 jobResult 的 outputs[0] 回传） */
+  path: string | null
+}
+
+export interface AiMatteStatusResult {
+  runtime: { ok: boolean; reason?: string }
+  model: { ok: boolean; path: string; sizeBytes?: number; sha256?: string; reason?: string }
+  ready: boolean
+}
+
+export interface MattePickResult {
+  path: string
+  name: string
+  kind: 'image' | 'video'
+  width?: number
+  height?: number
+}
+
 export interface EstimateInput {
   width: number
   height: number
   fps: Fps
   frames: number
   outputDir: string
+  /**
+   * 出口类型：叠加 MP4 用 H.264 口径预估（产物约为 ProRes 的 1/20），
+   * 其余出口沿用 ProRes 4444 口径。缺省 = transparentMov（旧口径）。
+   */
+  kind?: ExportKind
+  /** 视频码率（kbps）：有值时按码率口径估算，替代 kind 的经验值 */
+  videoBitrateKbps?: number
+  /** 音频码率（kbps）：缺省按 192 计 */
+  audioBitrateKbps?: number
 }
 
 export interface Unsubscribe {
   (): void
+}
+
+/**
+ * M11：渲染侧「自动字幕」的 IPC 面。
+ *
+ * 转写是**整份媒体文件**上的长任务（主进程先抽 16k WAV 再喂 whisper.cpp），
+ * 进度与取消都按渲染侧生成的 `requestId` 配对：面板重复点按/切换选中时，
+ * 别的请求的进度不会画到当前进度条上。
+ */
+export interface CaptionTranscribeRequest {
+  /** 渲染侧生成的请求 id（同一时刻只允许一个在跑；用于进度过滤与取消） */
+  requestId: string
+  /** 要转写的媒体文件绝对路径（通常是选中媒体片段引用的素材） */
+  mediaPath: string
+  /** 识别语言（zh/en/…；缺省自动检测——中文素材建议显式给 zh，见 M11 真机记录） */
+  language?: string
+  /** 模型文件覆盖（缺省走 userData/whisper.json 或随包模型） */
+  modelPath?: string
+}
+
+export interface CaptionProgressEvent {
+  requestId: string
+  /** 0..100（whisper.cpp 的 progress 百分比；准备抽音阶段恒为 0） */
+  percent: number
+  stage: 'prepare' | 'transcribe'
+}
+
+export interface CaptionTranscribeResult {
+  requestId: string
+  ok: boolean
+  /** 源时间轴（相对媒体文件起点）的 cue；落到工程时间轴前的映射/裁剪由渲染侧负责 */
+  cues: WhisperSegment[]
+  /** whisper 检测或指定的语言；未知为 null */
+  language: string | null
+  /** 失败错误码原样透传（WHISPER_BINARY_MISSING / WHISPER_MODEL_MISSING / … / CANCELLED） */
+  errorCode: string | null
+  errorMessage: string | null
+}
+
+/**
+ * M11：设置页「语音资产」的展示模型（不改工程、只读主进程状态）。
+ *
+ * 离线纪律：这里只**呈现**本地资产与候选路径，选择二进制/模型走系统文件对话框
+ * （`whisper.pickBinary/pickModel`），应用绝不自行联网下载。
+ * RNNoise 模型（M8 AI 降噪）与 whisper 模型同属"离线资产"，一起在这里呈现，
+ * 免得用户要在两个页面之间猜自己缺了哪个。
+ */
+export interface VoiceAssetStatus {
+  /** whisper 二进制 + 模型都就绪时才为 true */
+  ready: boolean
+  binaryPath: string | null
+  modelPath: string | null
+  /** userData/whisper.json 里保存的语言；null = 自动检测 */
+  language: string | null
+  /** 配置文件路径（看得见才好排查） */
+  configPath: string
+  candidates: {
+    binaries: string[]
+    models: string[]
+  }
+  /** M8：RNNoise 模型（arnndn AI 降噪用） */
+  rnnoise: {
+    path: string | null
+    candidates: string[]
+  }
+}
+
+/** whisper 配置补丁：`null` = 清除该项（回到候选探测 / 自动检测）。 */
+export interface VoiceAssetPatch {
+  binaryPath?: string | null
+  modelPath?: string | null
+  /** 'auto' 等价于 null（自动检测语言） */
+  language?: string | null
+  threads?: number | null
 }
 
 export interface SocutApi {
@@ -303,6 +426,14 @@ export interface SocutApi {
     /** 保存导出编码模式（立即生效于下一个导出任务） */
     setEncoder(mode: VideoEncoderMode): Promise<RenderSettings>
   }
+  /**
+   * M8-P1：AI 人像抠像（主进程 ONNX 推理生成灰度 matte 视频）。
+   * `status` 只读体检（运行时/模型是否就绪）；`generate` 入队后经 job 事件流转进度/结果。
+   */
+  aiMatte: {
+    status(): Promise<AiMatteStatusResult>
+    generate(request: AiMatteRequest): Promise<AiMatteJobResult>
+  }
   media: {
     /** v2：主进程 ffmpeg 抽帧生成素材卡片缩略图，返回 socut-thumb://<mediaId>（失败 null） */
     generateThumb(mediaId: string, videoPath: string, atSec?: number): Promise<string | null>
@@ -310,6 +441,16 @@ export interface SocutApi {
     thumbUrl(mediaId: string, url: string): Promise<string | null>
     /** v2：素材移出池时回收缩略图文件 */
     removeThumb(mediaId: string): Promise<void>
+    /**
+     * M8-P0：选择外部 matte 文件（图片或视频，用于导出侧 alpha 相乘）。
+     * 用户取消返回 null；文件不可读/类型无法判断时抛可读错误（由检查器呈现）。
+     */
+    pickMatte(): Promise<MattePickResult | null>
+    /**
+     * M5：冻结帧抽帧（源视频某一时刻 → 全分辨率 PNG，落 userData/freezes）。
+     * 失败时 path=null；调用方负责提示并回退（不抛错）。
+     */
+    extractFrame(request: FreezeFrameRequest): Promise<FreezeFrameResult>
     /**
      * v5：时间帧预览条（Thumbnail Strip）：主进程按源区间均匀抽帧并 tile 拼成一张长图，
      * 命中磁盘缓存不起子进程；不可用时 url=null（渲染层显示「无法预览」占位）。
@@ -343,6 +484,32 @@ export interface SocutApi {
   job: {
     onProgress(handler: (progress: JobProgress) => void): Unsubscribe
     onResult(handler: (result: JobResult) => void): Unsubscribe
+  }
+  /**
+   * M11：自动字幕（whisper.cpp）——启动转写 / 进度订阅 / 取消。
+   * 错误码（二进制缺失/模型缺失/媒体缺失/抽音失败/已取消等）原样透传，不抛异常。
+   */
+  caption: {
+    transcribe(request: CaptionTranscribeRequest): Promise<CaptionTranscribeResult>
+    onProgress(handler: (progress: CaptionProgressEvent) => void): Unsubscribe
+    /** 按 requestId 取消；没有在跑的请求时返回 false */
+    cancel(requestId: string): Promise<boolean>
+  }
+  /**
+   * M11：设置页「语音资产」（whisper 二进制/模型 + RNNoise 模型）。
+   * 只读状态 + 本地文件选择 + 配置落盘；不联网、不下载。
+   */
+  whisper: {
+    /** 当前资产状态（二进制/模型/语言/候选路径 + RNNoise 模型） */
+    status(): Promise<VoiceAssetStatus>
+    /** 保存配置并返回最新状态；路径不存在时主进程直接拒绝（抛错给面板显示） */
+    saveConfig(patch: VoiceAssetPatch): Promise<VoiceAssetStatus>
+    /** 弹文件框挑 whisper 二进制（用户取消返回 null；不落配置） */
+    pickBinary(): Promise<string | null>
+    /** 弹文件框挑 ggml 模型（用户取消返回 null；不落配置） */
+    pickModel(): Promise<string | null>
+    /** 清除已保存配置（回到候选探测） */
+    reset(): Promise<VoiceAssetStatus>
   }
   /**
    * CLI 控制面（主进程本地 HTTP 服务 → 渲染进程）：

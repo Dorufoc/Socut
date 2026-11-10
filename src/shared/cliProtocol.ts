@@ -30,6 +30,11 @@ export interface CliServerInfo {
   appVersion: string
   startedAt: string
   userDataPath: string
+  /** M10：JSON-RPC 行协议的两个入口（TCP 回环 + 命名管道）；未启动时不出现 */
+  rpc?: {
+    tcpPort: number
+    pipePath: string
+  }
 }
 
 export interface CliCommandRequest {
@@ -92,8 +97,13 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   { name: 'project.resolution', host: 'renderer', group: 'project', summary: '修改工程分辨率', params: '{ width: number, height: number }' },
   { name: 'project.fps', host: 'renderer', group: 'project', summary: '修改工程帧率', params: '{ num: number, den: number }' },
   { name: 'project.audioMastering', host: 'renderer', group: 'project', summary: '响度标准化（social/broadcast/off）', params: '{ mastering?: "social" | "broadcast" }' },
+  { name: 'project.graphicsZ', host: 'renderer', group: 'project', summary: '图形层 z 档（aboveMedia/belowMedia）', params: '{ value: "aboveMedia"|"belowMedia" }' },
   { name: 'project.undo', host: 'renderer', group: 'project', summary: '撤销', params: '{}' },
   { name: 'project.redo', host: 'renderer', group: 'project', summary: '重做', params: '{}' },
+  // M10：项目锁（窗口与 Agent 互斥；锁文件在工程旁 `<project>.lock`）
+  { name: 'project.lock', host: 'main', group: 'project', summary: '申请工程锁（window/agent）', params: '{ path: string, mode?: "window"|"agent" }' },
+  { name: 'project.unlock', host: 'main', group: 'project', summary: '按 token 释放工程锁', params: '{ path: string, token: string }' },
+  { name: 'project.lockStatus', host: 'main', group: 'project', summary: '查询工程锁状态', params: '{ path: string }' },
 
   // ---------------------------------------------------------------- media
   { name: 'media.probe', host: 'main', group: 'media', summary: 'ffprobe 探测任意媒体文件', params: '{ path: string }' },
@@ -129,6 +139,13 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   { name: 'clip.applyStyleToAll', host: 'renderer', group: 'clip', summary: '把一条字幕样式应用到全部', params: '{ id: string }' },
   { name: 'clip.resetStyle', host: 'renderer', group: 'clip', summary: '恢复该条预设默认样式', params: '{ id: string }' },
   { name: 'clip.setTimes', host: 'renderer', group: 'clip', summary: '设置字幕条入出点', params: '{ id: string, startTime: number, endTime: number }' },
+  { name: 'clip.keyframes', host: 'renderer', group: 'clip', summary: '整份替换关键帧（null = 清空）', params: '{ id: string, keyframes: object[] | null }' },
+  { name: 'clip.key', host: 'renderer', group: 'clip', summary: '设置/清除媒体段抠像（色度键/亮度键）', params: '{ id: string, key: object | null }' },
+  { name: 'clip.mask', host: 'renderer', group: 'clip', summary: '设置/清除媒体段手绘遮罩（归一化笔画）', params: '{ id: string, mask: { strokes } | null }' },
+  { name: 'clip.matte', host: 'renderer', group: 'clip', summary: '设置/清除媒体段外部 matte（图片或视频，绝对路径；仅导出生效）', params: '{ id: string, path: string | null, kind?: "image" | "video" }' },
+  { name: 'ai.matte', host: 'renderer', group: 'ai', summary: 'AI 人像抠像：生成 matte 视频并挂到媒体段（需要 onnxruntime-node + Selfie 模型）', params: '{ id: string }' },
+  { name: 'ai.matte.status', host: 'renderer', group: 'ai', summary: 'AI 抠像运行时/模型体检', params: '{}' },
+  { name: 'clip.keyframes.reset', host: 'renderer', group: 'clip', summary: '清空该片段全部关键帧', params: '{ id: string }' },
 
   // ---------------------------------------------------------------- media timeline
   { name: 'timeline.media.insert', host: 'renderer', group: 'timeline', summary: '把素材放到媒体轨', params: '{ mediaId: string, at: number, duration?: number, sourceIn?: number, trackId?: string }' },
@@ -140,6 +157,9 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   { name: 'timeline.media.removeSelected', host: 'renderer', group: 'timeline', summary: '删除当前选中的段', params: '{}' },
   { name: 'timeline.media.removeAt', host: 'renderer', group: 'timeline', summary: '删除播放头处最上层目标段', params: '{ at: number }' },
   { name: 'timeline.compact', host: 'renderer', group: 'timeline', summary: '媒体轨从左到右紧贴排列', params: '{}' },
+  { name: 'timeline.media.rippleDelete', host: 'renderer', group: 'timeline', summary: '波纹删除：删该段并把同轨后续片段左移合拢', params: '{ id: string }' },
+  { name: 'timeline.media.mergeNext', host: 'renderer', group: 'timeline', summary: '与同轨紧邻的下一段合并（同素材/源连续/参数一致）', params: '{ id: string }' },
+  { name: 'timeline.media.freeze', host: 'renderer', group: 'timeline', summary: '冻结帧：在切点插入静帧并把后续同轨片段右移', params: '{ at: number, id?: string, duration?: number }' },
 
   // ---------------------------------------------------------------- media clip effects
   { name: 'clip.video', host: 'renderer', group: 'clip', summary: '媒体段画面变换/调色（增量）', params: '{ id: string, patch: object }' },
@@ -175,16 +195,45 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   { name: 'track.locked', host: 'renderer', group: 'track', summary: '轨道锁定开关', params: '{ id: string, locked: boolean }' },
   { name: 'track.select', host: 'renderer', group: 'track', summary: '选中轨道', params: '{ id: string | null }' },
 
+  // ---------------------------------------------------------------- M7 文本元素
+  { name: 'text.presets', host: 'renderer', group: 'text', summary: '列出文本元素起始预设', params: '{}' },
+  { name: 'text.list', host: 'renderer', group: 'text', summary: '列出文本元素', params: '{}' },
+  { name: 'text.add', host: 'renderer', group: 'text', summary: '新增文本元素', params: '{ at?: number, duration?: number, presetId?: string, text?: string }' },
+  { name: 'text.update', host: 'renderer', group: 'text', summary: '更新文本元素（增量）', params: '{ id: string, patch: object }' },
+  { name: 'text.remove', host: 'renderer', group: 'text', summary: '删除文本元素', params: '{ id: string }' },
+  { name: 'text.select', host: 'renderer', group: 'text', summary: '选中文本元素', params: '{ id: string | null }' },
+
+  // ---------------------------------------------------------------- M11 Whisper 转写
+  { name: 'whisper.status', host: 'main', group: 'whisper', summary: 'whisper.cpp 二进制/模型就绪状态', params: '{}' },
+  { name: 'whisper.config', host: 'main', group: 'whisper', summary: '设置二进制/模型路径（离线导入）', params: '{ binaryPath?: string, modelPath?: string, language?: string, threads?: number }' },
+  { name: 'caption.transcribe', host: 'main', group: 'whisper', summary: '用 whisper.cpp 转写音视频，返回 cue 列表（长任务）', params: '{ path: string, modelPath?: string, language?: string, translate?: boolean, threads?: number, minDuration?: number }', longRunning: true },
+  // ---------------------------------------------------------------- M11 字幕导入/导出
+  { name: 'caption.parse', host: 'main', group: 'caption', summary: '读取并解析 SRT/ASS 文件（返回 cue 列表）', params: '{ path: string, format?: "srt"|"ass" }' },
+  { name: 'caption.import', host: 'renderer', group: 'caption', summary: '把 cue 列表落成字幕条（可替换现有）', params: '{ cues: {startSec,endSec,text}[], replace?: boolean, presetId?: string }' },
+  { name: 'caption.batch', host: 'renderer', group: 'caption', summary: '批量名单 → 首尾相接的字幕条（CSV/JSON/纯文本）', params: '{ text: string, format?: "csv"|"json"|"lines"|"auto", startSec?: number, defaultDuration?: number, gap?: number }' },
+  { name: 'caption.export', host: 'renderer', group: 'caption', summary: '把当前字幕条导出为 SRT/ASS 文本', params: '{ format: "srt"|"ass" }' },
+  { name: 'caption.write', host: 'main', group: 'caption', summary: '把字幕文本写入文件（.srt/.ass）', params: '{ path: string, text: string }' },
+
+  // ---------------------------------------------------------------- v4 多序列
+  { name: 'sequence.list', host: 'renderer', group: 'sequence', summary: '列出全部序列（活动序列排第一）', params: '{}' },
+  { name: 'sequence.add', host: 'renderer', group: 'sequence', summary: '新建空序列（不切换）', params: '{ name?: string }' },
+  { name: 'sequence.select', host: 'renderer', group: 'sequence', summary: '切换当前编辑的序列（会重置选中态）', params: '{ id: string }' },
+  { name: 'sequence.rename', host: 'renderer', group: 'sequence', summary: '重命名序列', params: '{ id: string, name: string }' },
+  { name: 'sequence.remove', host: 'renderer', group: 'sequence', summary: '删除序列（只剩一条时拒绝）', params: '{ id: string }' },
+  { name: 'sequence.duplicate', host: 'renderer', group: 'sequence', summary: '复制序列（缺省复制活动序列）', params: '{ id?: string, name?: string }' },
+
   // ---------------------------------------------------------------- export
-  { name: 'export.start', host: 'renderer', group: 'export', summary: '发起导出任务（立即返回 jobId）', params: '{ kind: "overlayMp4"|"transparentMov"|"pngSequence", outputDir: string, fileName: string, canvas?: object, quality?: "high"|"standard"|"small", codec?: "prores4444"|"qtrle", frameDelivery?: "pipe"|"pngSequence", pipeTransport?: "raw"|"png", directPipe?: boolean }', longRunning: true },
+  { name: 'export.start', host: 'renderer', group: 'export', summary: '发起导出任务（立即返回 jobId）', params: '{ kind: "overlayMp4"|"transparentMov"|"pngSequence", outputDir: string, fileName: string, canvas?: object, quality?: "high"|"standard"|"small", codec?: "prores4444"|"qtrle", pipeTransport?: "raw"|"png", videoCodec?: "avc"|"hevc"|"av1", crf?: number, encoderPreset?: string, bitDepth?: 8|10, colorRange?: "limited"|"full" }', longRunning: true },
   { name: 'export.cover', host: 'renderer', group: 'export', summary: '导出当前帧封面 PNG', params: '{ outputDir: string, canvas?: object, atSec?: number }', longRunning: true },
   { name: 'export.status', host: 'main', group: 'export', summary: '查询任务进度/结果', params: '{ jobId: string }' },
   { name: 'export.jobs', host: 'main', group: 'export', summary: '列出本次会话的任务', params: '{}' },
   { name: 'export.cancel', host: 'main', group: 'export', summary: '取消导出任务', params: '{ jobId: string }' },
   { name: 'export.estimate', host: 'main', group: 'export', summary: '预估输出体积与磁盘是否充足', params: '{ width: number, height: number, fps: { num: number, den: number }, frames: number, outputDir: string }' },
+  // M10：渲染一帧 PNG（base64）给 Agent 看；不落盘
+  { name: 'preview.frame', host: 'renderer', group: 'preview', summary: '渲染指定时刻的一帧，返回 PNG base64', params: '{ at?: number, maxWidth?: number }' },
 
   // ---------------------------------------------------------------- ui
-  { name: 'ui.set', host: 'renderer', group: 'ui', summary: '切换视图/左侧 Tab/导出范围', params: '{ view?: "launcher"|"editor"|"settings", leftTab?: "media"|"wrap"|"export"|"progress", exportScope?: "timeline"|"selected" }' }
+  { name: 'ui.set', host: 'renderer', group: 'ui', summary: '切换视图/左侧 Tab/导出范围', params: '{ view?: "launcher"|"editor"|"settings", leftTab?: "media"|"transition"|"wrap"|"export"|"progress", exportScope?: "timeline"|"selected" }' }
 ] as const
 
 export const CLI_COMMAND_NAMES: readonly string[] = CLI_COMMANDS.map((command) => command.name)

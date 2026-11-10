@@ -24,12 +24,18 @@ import {
   type CliServerInfo
 } from '../shared/cliProtocol'
 import { APP_NAME, WINDOW_TITLE } from '../shared/constants'
+import {
+  EVENT_TOPICS,
+  controlEventBus,
+  projectChangedEvent,
+  type ProjectChangedEventData
+} from '../shared/jsonRpc'
 import { APP_VERSION } from './appVersion'
 import { validateAllPresets } from '../shared/presets'
 import { CHANNELS } from '../shared/ipcChannels'
 import type { GpuDiagnostics } from '../shared/gpu'
 import type { ExportEngine } from './export/engine'
-import { describeBinarySource, resolveFfmpegBinaries, userFontsDir } from './paths'
+import { describeBinarySource, resolveFfmpegBinaries, resourcesRoot, userFontsDir } from './paths'
 import { ffmpegVersion } from './ffrun'
 import { getGpuDiagnostics } from './gpu'
 import { log } from './log'
@@ -43,10 +49,13 @@ import {
 import { probeVideo } from './videoImport'
 import { probeImageSize } from './watermark'
 import { createDefaultProject } from '../shared/projectSchema'
-import type { Fps } from '../shared/types'
+import type { ExportKind, Fps } from '../shared/types'
 import { cancelCfr } from './cfrTranscode'
 import { cancelStabPreview } from './stabPreview'
 import { cancelMediaProxy } from './mediaProxy'
+import { parseSubtitleFile } from '../shared/subtitleFormats'
+import { createWhisperManager, type WhisperManager } from './whisper'
+import { acquireProjectLock, projectLockPath, readProjectLock, releaseProjectLock } from './projectLock'
 
 /**
  * CLI 本地控制服务。
@@ -79,6 +88,10 @@ export class CliControlServer {
   private rendererReady = false
   private readonly readyWaiters: RendererWaiter[] = []
   private readonly pending = new Map<string, PendingCommand>()
+  /** M11：whisper.cpp 运行时（懒创建；配置落在 userData/whisper.json） */
+  private whisper: WhisperManager | null = null
+  /** M10 事件流：导出进度 → controlEventBus 的取消函数（start 订阅、stop 解除） */
+  private detachEngineProgress: (() => void) | null = null
 
   constructor(engine: ExportEngine) {
     this.engine = engine
@@ -116,6 +129,11 @@ export class CliControlServer {
     const info = this.info()
     await this.writeDiscovery(info)
     await log('info', `CLI 控制服务已启动：http://127.0.0.1:${this.port}（pid ${process.pid}）`)
+    // M10 事件流：导出进度直接进控制面事件总线，JSON-RPC 订阅者按 export.progress 主题收；
+    // 没有订阅者时 publish 是纯 no-op（总线按监听者数量分发）。
+    this.detachEngineProgress ??= this.engine.onProgress((progress) => {
+      controlEventBus.publish(EVENT_TOPICS.exportProgress, progress)
+    })
     return info
   }
 
@@ -129,6 +147,19 @@ export class CliControlServer {
       startedAt: this.startedAt,
       userDataPath: app.getPath('userData')
     }
+  }
+
+  /**
+   * M10：传输无关的命令入口 —— HTTP CLI 与 JSON-RPC 行协议共用同一个分派器。
+   * 调用方（传输层）自己负责鉴权与分帧，这里只管 { command, params } → result | error。
+   */
+  async dispatch(request: CliCommandRequest): Promise<unknown> {
+    return this.handleCommand(request)
+  }
+
+  /** M10：JSON-RPC 服务起来后把入口写进发现文件（供 Agent 发现）。 */
+  async attachJsonRpc(rpc: NonNullable<CliServerInfo['rpc']>): Promise<void> {
+    await this.writeDiscovery({ ...this.info(), rpc })
   }
 
   /** preload 注册好命令处理器后调用；此后才允许把命令转发进渲染进程。 */
@@ -158,6 +189,8 @@ export class CliControlServer {
   async stop(): Promise<void> {
     const server = this.server
     this.server = null
+    this.detachEngineProgress?.()
+    this.detachEngineProgress = null
     this.rendererReady = false
     for (const waiter of this.readyWaiters.splice(0)) {
       clearTimeout(waiter.timer)
@@ -276,7 +309,39 @@ export class CliControlServer {
     if (spec.host === 'main') {
       return this.handleMainCommand(request)
     }
-    return this.dispatchToRenderer(request)
+    const result = await this.dispatchToRenderer(request)
+    // M10 事件流：渲染侧保存成功后广播工程变更（主进程只知道落盘路径，revision 观测不到）
+    if (request.command === 'project.save') {
+      const saved = asRecord(result)
+      const savedPath = typeof saved?.['path'] === 'string' ? saved['path'] : null
+      this.emitProjectChanged({ path: savedPath, reason: 'save' })
+    }
+    return result
+  }
+
+  /**
+   * 广播 `project.changed`（M10 事件流）。
+   *
+   * 只从主进程可观测点发：CLI 工程命令切换当前工程（new / open / openRecent）、
+   * 渲染侧保存成功（save）、工程锁申请/释放（lock / unlock）。
+   * revision 不在主进程：渲染进程 zustand store 才是唯一真值，自动保存 IPC 也不带它，
+   * 因此事件里 revision 恒为 null——宁可缺字段也不在主进程臆造一个假版本号。
+   */
+  private emitProjectChanged(input: {
+    path: string | null
+    name?: string | null
+    reason: ProjectChangedEventData['reason']
+    mode?: 'window' | 'agent'
+  }): void {
+    controlEventBus.publish(
+      EVENT_TOPICS.projectChanged,
+      projectChangedEvent({
+        path: input.path,
+        name: input.name ?? null,
+        reason: input.reason,
+        ...(input.mode ? { mode: input.mode } : {})
+      })
+    )
   }
 
   private async readJsonBody(request: http.IncomingMessage): Promise<unknown> {
@@ -368,14 +433,57 @@ export class CliControlServer {
       case 'app.shutdown':
         setTimeout(() => app.quit(), 250).unref?.()
         return { closing: true }
-      case 'project.new':
-        return this.newProject(params)
-      case 'project.open':
-        return this.openProject(params)
-      case 'project.openRecent':
-        return this.openRecent(params)
+      case 'project.new': {
+        const created = await this.newProject(params)
+        this.emitProjectChanged({ path: created.path, name: created.name, reason: 'new' })
+        return created
+      }
+      case 'project.open': {
+        const opened = await this.openProject(params)
+        this.emitProjectChanged({ path: opened.path, name: opened.name, reason: 'open' })
+        return opened
+      }
+      case 'project.openRecent': {
+        const opened = await this.openRecent(params)
+        this.emitProjectChanged({ path: opened.path, name: opened.name, reason: 'openRecent' })
+        return opened
+      }
       case 'project.recent':
         return { projects: await listRecentProjects() }
+      // M10：工程锁（窗口 / Agent 互斥）
+      case 'project.lock': {
+        const target = requireString(params, 'path')
+        const mode = params['mode'] === 'window' ? 'window' : 'agent'
+        const result = await acquireProjectLock(target, mode)
+        if (!result.ok) {
+          throw new CliCommandError(
+            CLI_ERROR_CODES.GATE_BLOCKED,
+            result.holder
+              ? `工程已被占用（pid ${result.holder.pid}，${result.holder.mode}）`
+              : '工程锁申请失败'
+          )
+        }
+        this.emitProjectChanged({ path: target, reason: 'lock', mode })
+        return {
+          path: projectLockPath(target),
+          mode,
+          token: result.handle.info.token,
+          holder: result.handle.info
+        }
+      }
+      case 'project.unlock': {
+        const target = requireString(params, 'path')
+        const token = requireString(params, 'token')
+        const released = await releaseProjectLock(target, token)
+        if (!released) throw new CliCommandError(CLI_ERROR_CODES.NOT_FOUND, '工程锁不存在或 token 不匹配')
+        this.emitProjectChanged({ path: target, reason: 'unlock' })
+        return { path: target, released: true }
+      }
+      case 'project.lockStatus': {
+        const target = requireString(params, 'path')
+        const holder = await readProjectLock(target)
+        return { path: projectLockPath(target), locked: holder !== null, holder }
+      }
       case 'media.probe': {
         const target = requireString(params, 'path')
         const probe = await probeVideo(target)
@@ -387,6 +495,47 @@ export class CliControlServer {
       case 'media.exists': {
         const target = requireString(params, 'path')
         return { path: target, exists: await fileExists(target) }
+      }      // ---------------------------------------------------------------- M11 Whisper 转写
+      case 'whisper.status':
+        return this.whisperManager().status()
+      case 'whisper.config': {
+        const patch: { binaryPath?: string; modelPath?: string; language?: string; threads?: number } = {}
+        if (typeof params['binaryPath'] === 'string' && params['binaryPath'].length > 0) patch.binaryPath = params['binaryPath']
+        if (typeof params['modelPath'] === 'string' && params['modelPath'].length > 0) patch.modelPath = params['modelPath']
+        if (typeof params['language'] === 'string' && params['language'].length > 0) patch.language = params['language']
+        if (typeof params['threads'] === 'number') patch.threads = params['threads']
+        await this.whisperManager().saveConfig(patch)
+        return this.whisperManager().status()
+      }
+      case 'caption.transcribe': {
+        const target = requireString(params, 'path')
+        const result = await this.whisperManager().transcribe({
+          mediaPath: target,
+          ...(typeof params['modelPath'] === 'string' ? { modelPath: params['modelPath'] } : {}),
+          ...(typeof params['language'] === 'string' ? { language: params['language'] } : {}),
+          ...(params['translate'] === true ? { translate: true } : {}),
+          ...(typeof params['threads'] === 'number' ? { threads: params['threads'] } : {}),
+          ...(typeof params['minDuration'] === 'number' ? { minDurationSec: params['minDuration'] } : {})
+        })
+        return result
+      }      case 'caption.parse': {
+        const target = requireString(params, 'path')
+        if (!(await fileExists(target))) {
+          throw new CliCommandError(CLI_ERROR_CODES.NOT_FOUND, `字幕文件不存在：${target}`)
+        }
+        const raw = await fs.readFile(target, 'utf8')
+        const format = params['format'] === 'ass' ? 'ass' : params['format'] === 'srt' ? 'srt' : undefined
+        const report = parseSubtitleFile(raw, format)
+        return { path: target, cues: report.cues, dropped: report.dropped, count: report.cues.length }
+      }
+      case 'caption.write': {
+        const target = requireString(params, 'path')
+        const text = requireString(params, 'text')
+        if (!/\.(srt|ass|ssa)$/i.test(target)) {
+          throw new CliCommandError(CLI_ERROR_CODES.BAD_PARAMS, '字幕文件扩展名必须是 .srt / .ass')
+        }
+        await fs.writeFile(target, text, 'utf8')
+        return { path: target, bytes: Buffer.byteLength(text, 'utf8'), format: /\.ass$|\.ssa$/i.test(target) ? 'ass' : 'srt' }
       }
       case 'watermark.probe': {
         const target = requireString(params, 'path')
@@ -419,7 +568,8 @@ export class CliControlServer {
           height: requireNumber(params, 'height'),
           fps,
           frames: requireNumber(params, 'frames'),
-          outputDir: requireString(params, 'outputDir')
+          outputDir: requireString(params, 'outputDir'),
+          ...(typeof params.kind === 'string' ? { kind: params.kind as ExportKind } : {})
         })
       }
       default:
@@ -455,7 +605,9 @@ export class CliControlServer {
     return getGpuDiagnostics()
   }
 
-  private async newProject(params: Record<string, unknown>): Promise<unknown> {
+  private async newProject(
+    params: Record<string, unknown>
+  ): Promise<{ path: string | null; entryId: string | null; name: string }> {
     const target = optionalString(params, 'path')
     const requestedName = optionalString(params, 'name')
     let filePath = ''
@@ -490,7 +642,9 @@ export class CliControlServer {
     return { path: filePath || null, entryId: entryId || null, name: project.name }
   }
 
-  private async openProject(params: Record<string, unknown>): Promise<unknown> {
+  private async openProject(
+    params: Record<string, unknown>
+  ): Promise<{ path: string; entryId: string; name: string }> {
     const target = requireString(params, 'path')
     const project = await readProjectFile(target)
     if (!project) {
@@ -505,7 +659,9 @@ export class CliControlServer {
     return { path: target, entryId: entry.id, name: project.name }
   }
 
-  private async openRecent(params: Record<string, unknown>): Promise<unknown> {
+  private async openRecent(
+    params: Record<string, unknown>
+  ): Promise<{ path: string | null; entryId: string; name: string }> {
     const id = requireString(params, 'id')
     const opened = await openRecentProject(id)
     if (!opened) {
@@ -582,6 +738,19 @@ export class CliControlServer {
   // 发现文件
   // -------------------------------------------------------------------------
 
+  private whisperManager(): WhisperManager {
+    if (!this.whisper) {
+      this.whisper = createWhisperManager({
+        userDataDir: app.getPath('userData'),
+        resourcesDir: resourcesRoot(),
+        // whisper-cli 只吃 16k 单声道 WAV：用随包 FFmpeg 先把视频/音频抽成 wav
+        ffmpegPath: async () => (await resolveFfmpegBinaries()).ffmpeg,
+        // 抽音阶段真实进度需要 ffprobe 读媒体时长
+        ffprobePath: async () => (await resolveFfmpegBinaries()).ffprobe
+      })
+    }
+    return this.whisper
+  }
   private discoveryPath(): string {
     return path.join(app.getPath('userData'), CLI_SERVER_DIR, CLI_SERVER_FILE)
   }

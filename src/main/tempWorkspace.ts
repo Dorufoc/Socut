@@ -75,10 +75,6 @@ async function pathIsDirectory(target: string): Promise<boolean> {
   }
 }
 
-export function framePattern(dir: string, prefix = 'frame'): string {
-  return path.join(dir, `${prefix}_%06d.png`)
-}
-
 export function frameFileName(index: number, prefix = 'frame'): string {
   return `${prefix}_${String(index).padStart(6, '0')}.png`
 }

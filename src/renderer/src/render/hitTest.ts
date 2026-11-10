@@ -1,6 +1,7 @@
-import type { RenderJobSpec } from '@shared/types'
+import { resolveClipParams, type ResolvedClipParams } from '@shared/keyframes'
+import type { LayoutBox, RenderJobSpec } from '@shared/types'
 import { motionAt } from './animation'
-import { contentBoundsOf, sweepOf, visibleSpanX } from './layers'
+import { contentAnchorOf, contentBoundsOf, sweepOf, visibleSpanX } from './layers'
 
 /**
  * 预览命中测试（「在预览区域点击字幕条即选中该片段」）。
@@ -24,6 +25,41 @@ export const HIT_SLOP_PX = 2
 
 const HITTABLE_KINDS = new Set(['bar', 'block', 'rule', 'text'])
 
+/** 不透明度低于这个值时视为不可点（几乎全透明的像素谈不上"看得见"）。 */
+export const HIT_MIN_OPACITY = 0.02
+
+/**
+ * 画布坐标 → 片段局部坐标（关键帧变换的逆变换）。
+ *
+ * 绘制侧的变换（renderer.ts）是：先平移到 `锚点 + 位移`，再旋转，再缩放，最后平移回 `-锚点`，
+ * 即 `p' = A + S·R·(p − anchor)`。命中测试必须在局部坐标里做，否则关键帧把条块挪走/放大后，
+ * 用户点到的"看到的位置"与命中的盒会整体错开（M6 遗留问题）。
+ * 无关键帧（`hasAny = false`）时原样返回，零开销。
+ */
+function toLocalPoint(
+  point: HitPoint,
+  params: ResolvedClipParams,
+  anchor: { cx: number; cy: number },
+  frame: { width: number; height: number }
+): HitPoint | null {
+  if (!params.hasAny) return point
+  const scale = params.scalePct / 100
+  if (!(scale > 1e-6)) return null
+  const ax = anchor.cx + (frame.width * params.offsetXPct) / 100
+  const ay = anchor.cy + (frame.height * params.offsetYPct) / 100
+  const dx = point.x - ax
+  const dy = point.y - ay
+  if (params.rotationDeg === 0) return { x: anchor.cx + dx / scale, y: anchor.cy + dy / scale }
+  const radians = (params.rotationDeg * Math.PI) / 180
+  const cos = Math.cos(radians)
+  const sin = Math.sin(radians)
+  // R⁻¹：(x, y) → (x·cos + y·sin, −x·sin + y·cos)
+  return {
+    x: anchor.cx + (dx * cos + dy * sin) / scale,
+    y: anchor.cy + (-dx * sin + dy * cos) / scale
+  }
+}
+
 export function hitTestClips(
   spec: RenderJobSpec,
   frame: number,
@@ -36,6 +72,13 @@ export function hitTestClips(
     if (frame < clip.startFrame || frame >= clip.endFrame) continue
     const motion = motionAt(clip.animation, frame - clip.startFrame)
     if (!motion.visible) continue
+    // M6：关键帧在这一帧的参数 → 把点反变换回局部坐标（与绘制同一套锚点/顺序）
+    const span = clip.endFrame - clip.startFrame
+    const progress = span > 0 ? (frame - clip.startFrame) / span : 0
+    const params = resolveClipParams(clip.keyframes, progress)
+    if (params.hasAny && params.opacity < HIT_MIN_OPACITY) continue
+    const local = localPointFor(clip.boxes, params, point, spec)
+    if (!local) continue
     // 擦除线与绘制同源：用实际内容包络（自适应宽条不能用 root）
     const sweep = sweepOf(motion, contentBoundsOf(clip.boxes))
 
@@ -43,20 +86,33 @@ export function hitTestClips(
       const box = clip.boxes[boxIndex]
       if (!box || !HITTABLE_KINDS.has(box.kind)) continue
       if (box.w <= 0 || box.h <= 0) continue
-      if (point.y < box.y - slopPx || point.y > box.y + box.h + slopPx) continue
+      if (local.y < box.y - slopPx || local.y > box.y + box.h + slopPx) continue
       const rightPx = sweep.rightPx
       // 装饰线自身还有生长比例（ruleReveal）：还没长到的地方同样不该被点到
       const grownRight =
         box.kind === 'rule'
           ? box.x + box.w * Math.max(0, Math.min(1, motion.ruleReveal))
           : box.x + box.w
-      const span = visibleSpanX(box, sweep.leftPx, Math.min(rightPx, grownRight))
-      if (!span) continue
-      if (point.x < span.left - slopPx || point.x > span.left + span.width + slopPx) continue
+      const span2 = visibleSpanX(box, sweep.leftPx, Math.min(rightPx, grownRight))
+      if (!span2) continue
+      if (local.x < span2.left - slopPx || local.x > span2.left + span2.width + slopPx) continue
       return clip.id
     }
   }
   return null
+}
+
+/** 局部坐标换算：有关键帧变换时需要锚点；没有锚点（空盒）视为不可命中。 */
+function localPointFor(
+  boxes: readonly LayoutBox[],
+  params: ResolvedClipParams,
+  point: HitPoint,
+  frame: { width: number; height: number }
+): HitPoint | null {
+  if (!params.hasAny) return point
+  const anchor = contentAnchorOf(boxes)
+  if (!anchor) return null
+  return toLocalPoint(point, params, anchor, frame)
 }
 
 /**

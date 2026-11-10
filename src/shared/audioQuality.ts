@@ -12,9 +12,34 @@ import type { AudioDenoiseLevel, AudioDuckingLevel, AudioMastering, AudioRole } 
  * 调用方拼接时不会多出逗号，也不会凭空注入滤镜。
  */
 
-/** 降噪档位 → `afftdn` 滤镜串；关闭/缺省返回 ''。 */
-export function denoiseFilter(level: AudioDenoiseLevel | undefined): string {
+/**
+ * 滤镜串里的文件路径写法（arnndn 的 `m=` 参数）。
+ *
+ * 真机实测（FFmpeg 9，Windows）：`m=D:\a\b.rnnn` 与 `m=D:/a/b.rnnn` 都解析失败
+ * （"No option name near …"），必须 **引号 + 反斜杠转义冒号**：`m='D\:/a/b.rnnn'`。
+ * 滤镜语法里 `:` 是选项分隔符、`\` 是转义符，所以在引号内也要转义冒号。
+ */
+export function filterPathArg(filePath: string): string {
+  if (filePath.length === 0) return ''
+  return filePath.replace(/\\/g, '/').replace(/:/g, '\\:')
+}
+
+/** `arnndn`（RNNoise 神经网络降噪）滤镜串；没有模型路径返回 ''。 */
+export function arnndnFilter(modelPath: string | undefined): string {
+  const escaped = modelPath ? filterPathArg(modelPath) : ''
+  if (escaped.length === 0) return ''
+  return `arnndn=m='${escaped}'`
+}
+
+export interface DenoiseFilterOptions {
+  /** `denoise = 'ai'` 时必须给出（main 侧解析随包 `std.rnnn`）；缺省时 ai 档不产出滤镜 */
+  arnndnModelPath?: string
+}
+
+/** 降噪档位 → 滤镜串；关闭/缺省返回 ''。`ai` 档走 `arnndn`，其余档走 `afftdn`。 */
+export function denoiseFilter(level: AudioDenoiseLevel | undefined, options: DenoiseFilterOptions = {}): string {
   if (level === undefined) return ''
+  if (level === 'ai') return arnndnFilter(options.arnndnModelPath)
   const profile = AUDIO_DENOISE_PROFILES[level]
   if (!profile) return ''
   return `afftdn=nr=${profile.nr}:nf=${profile.nf}`

@@ -119,7 +119,10 @@ async function preflight() {
     ['resources/fonts/manifest.json', '缺少内置字体，请运行：npm run fetch:fonts'],
     ['resources/icons/icon.ico', '缺少应用图标，请运行：npm run make:icon'],
     ['resources/icons/icon.png', '缺少运行时图标，请运行：npm run make:icon'],
-    ['electron-builder.yml', '缺少 electron-builder.yml']
+    ['electron-builder.yml', '缺少 electron-builder.yml'],
+    ['cli/socut-cli.mjs', '缺少 CLI 客户端（打包版需要它）'],
+    ['cli/socut-mcp.mjs', '缺少 MCP server（打包版需要它）'],
+    ['cli/lib/mcpTools.mjs', '缺少 MCP 工具表']
   ]
   const missing = []
   for (const [relative, hint] of deps) {
@@ -127,6 +130,21 @@ async function preflight() {
   }
   if (missing.length > 0) {
     throw new Error(`打包前置条件不满足：\n${missing.join('\n')}`)
+  }
+
+  // M11 whisper 资产是**可选**的：缺了照样出包，只是语音识别不可用（设置页会提示导入）。
+  const whisperExe = path.join(root, 'resources', 'whisper', 'whisper-cli.exe')
+  const modelsDir = path.join(root, 'resources', 'models', 'whisper')
+  const hasWhisperBinary = await exists(whisperExe)
+  const whisperModels = await fs.readdir(modelsDir).catch(() => [])
+  const hasWhisperModel = whisperModels.some((name) => name.endsWith('.bin'))
+  if (hasWhisperBinary && hasWhisperModel) {
+    log('whisper 资产随包：whisper-cli.exe + ggml 模型（约 141MB，安装包会相应变大）')
+  } else {
+    log(
+      `⚠ 未取回 whisper 资产（二进制=${hasWhisperBinary ? '有' : '缺'}，模型=${hasWhisperModel ? '有' : '缺'}）：` +
+        '语音识别不可用，安装包不含该能力（npm run fetch:whisper / npm run fetch:whisper:model 可补齐）'
+    )
   }
 }
 

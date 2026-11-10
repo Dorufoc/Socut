@@ -38,6 +38,9 @@ vi.mock('../src/main/procRegistry', () => ({
     const code = queue.length > 0 ? queue.shift() : 0
     const child = new EventEmitter() as EventEmitter & { kill: (signal: string) => boolean }
     child.kill = () => true
+    // 流式路径必须拿到可写的 stdin；帧泵已被 mock，不需要真的写
+    const stdin = { end: () => undefined, destroyed: false, write: () => true }
+    ;(child as unknown as { stdin: typeof stdin }).stdin = stdin
     const job: SpawnedJob = {
       jobId: request.jobId,
       child: child as unknown as SpawnedJob['child'],
@@ -143,13 +146,10 @@ function makeCtx(state: JobState) {
     spanStartSec: 0.5,
     spanEndSec: 4.5,
     outputPath: 'D:/out.mp4',
-    overlayPath: 'D:/tmp/overlay.mov',
-    codec: 'prores4444' as const,
     // v8：防抖段以工作目录为 cwd；本例不启用防抖，但仍然要满足类型形状
     workspaceDir: 'D:/tmp/job',
     frameFormat: 'raw' as const,
     frameSize: { width: 1920, height: 1080 },
-    directPipe: false,
     isCancelled: () => false,
     onTick: () => undefined
   }

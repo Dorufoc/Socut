@@ -37,15 +37,15 @@ afterEach(() => {
   })
 })
 
-describe('WrapPanel：三段顺序与归属', () => {
-  it('从上到下依次是字幕、片尾、水印', () => {
+describe('WrapPanel：分段顺序与归属', () => {
+  it('从上到下依次是字幕、文本元素、片尾、水印（M7 增加文本元素段）', () => {
     seed(0)
     const { container } = render(<WrapPanel />)
 
     const titles = Array.from(container.querySelectorAll('.wrap-section')).map(
       (section) => section.querySelector('.group__title')?.textContent
     )
-    expect(titles).toEqual([TEXT.captions.title, TEXT.wrap.ending, TEXT.wrap.watermark])
+    expect(titles).toEqual([TEXT.captions.title, TEXT.wrap.textElements, TEXT.wrap.ending, TEXT.wrap.watermark])
   })
 
   it('字幕区就是原来那份字幕列表：新建与删除入口都在里面', () => {

@@ -111,7 +111,9 @@ export function timelineContentEndSec(project: Project): number {
 export function projectDurationSec(project: Project): number {
   const maxClipEnd = project.clips.reduce((acc, clip) => Math.max(acc, clip.endTime), 0)
   const maxMediaEnd = project.mediaClips.reduce((acc, clip) => Math.max(acc, clip.timelineEndSec), 0)
-  const combined = Math.max(maxClipEnd, maxMediaEnd)
+  // M7：文本元素也算进工程时长（否则只有文本元素、没有字幕条时导出区间会是 0）
+  const maxTextEnd = (project.textClips ?? []).reduce((acc, clip) => Math.max(acc, clip.endTime), 0)
+  const combined = Math.max(maxClipEnd, maxMediaEnd, maxTextEnd)
   if (combined === 0) return MIN_CLIP_DURATION_SEC
   return Math.max(MIN_CLIP_DURATION_SEC, combined)
 }
@@ -275,10 +277,25 @@ export function buildProjectPlan(input: PlanInput): ProjectPlan {
   }
 
   // 活跃区间与 scope 无关：始终取本次参与片段的真实入出点包络
+  // M7：文本元素（timeline scope）也参与包络，否则只含文本元素的项目导出区间会是空
+  const textClipsInScope = input.scope.kind === 'timeline' ? (project.textClips ?? []) : []
+  const textStartFrames = textClipsInScope.map((clip) => clipStartFrame(clip.startTime, fps))
+  const textEndFrames = textClipsInScope.map((clip) => clipEndFrame(clip.endTime, fps))
+  const hasText = textClipsInScope.length > 0
   const activeStartFrame =
-    clips.length === 0 ? startFrame : clips.reduce((acc, c) => Math.min(acc, c.startFrame), Number.POSITIVE_INFINITY)
+    clips.length === 0 && !hasText
+      ? startFrame
+      : Math.min(
+          clips.length === 0 ? Number.POSITIVE_INFINITY : clips.reduce((acc, c) => Math.min(acc, c.startFrame), Number.POSITIVE_INFINITY),
+          ...(hasText ? textStartFrames : [Number.POSITIVE_INFINITY])
+        )
   const activeEndFrame =
-    clips.length === 0 ? endFrame : clips.reduce((acc, c) => Math.max(acc, c.endFrame), startFrame + 1)
+    clips.length === 0 && !hasText
+      ? endFrame
+      : Math.max(
+          clips.length === 0 ? 0 : clips.reduce((acc, c) => Math.max(acc, c.endFrame), 0),
+          ...(hasText ? textEndFrames : [0])
+        )
 
   return {
     width,

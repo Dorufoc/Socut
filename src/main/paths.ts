@@ -76,6 +76,22 @@ export function userStripsDir(): string {
   return path.join(app.getPath('userData'), USER_DATA_DIRS.strips)
 }
 
+/** M5：冻结帧静态 PNG 目录（userData/freezes）。 */
+export function userFreezesDir(): string {
+  return path.join(app.getPath('userData'), USER_DATA_DIRS.freezes)
+}
+
+/**
+ * M5：一次冻结帧抽帧的落盘路径。
+ * 文件名 = 安全化的素材前缀 + 毫秒帧号令牌：同一素材的不同时刻互不覆盖，
+ * 「素材移出池」可按前缀整批回收；两段都只留安全字符，不接受外部拼路径。
+ */
+export function userFreezePath(key: string, atSec: number): string {
+  const safe = key.replace(/[^\w-]/g, '_').slice(0, 64) || 'freeze'
+  const token = Math.max(0, Math.round(atSec * 1000)).toString(36)
+  return path.join(userFreezesDir(), `${safe}-${token}.png`)
+}
+
 /** v8.1：防抖预览代理缓存目录（userData/stab-preview：代理 mp4 与 .trf 运动数据同放）。 */
 export function userStabPreviewDir(): string {
   return path.join(app.getPath('userData'), USER_DATA_DIRS.stabPreview)
@@ -84,6 +100,14 @@ export function userStabPreviewDir(): string {
 /** v10：4K / MXF 预览代理缓存目录（userData/proxies：整片 720p H.264）。 */
 export function userProxyDir(): string {
   return path.join(app.getPath('userData'), USER_DATA_DIRS.proxies)
+}
+
+/** M8：RNNoise 模型（arnndn）的两个目录：用户自备优先，随包兜底。 */
+export function rnnoiseModelDirs(): { userDir: string; bundledDir: string } {
+  return {
+    userDir: path.join(app.getPath('userData'), 'models', 'rnnoise'),
+    bundledDir: path.join(resourcesRoot(), 'models', 'rnnoise')
+  }
 }
 
 /**

@@ -25,6 +25,7 @@ import { stabSignatureFor, useStabPreviewStore } from '../state/stabPreviewStore
 import { useProxyStore } from '../state/proxyStore'
 import { FontLoadingOverlay } from '../dialog/FontLoadingOverlay'
 import { MediaPreviewLayer, type MediaPreviewHandle } from './MediaPreviewLayer'
+import { MaskPaintLayer } from './MaskPaintLayer'
 import { StageTransformOverlay } from './StageTransformOverlay'
 
 /**
@@ -381,6 +382,9 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
   const selectionKind = useProjectStore((state) => state.selectionKind)
   const selectedMediaClipId = useProjectStore((state) => state.selectedMediaClipId)
   const stageInteract = useUiStore((state) => state.stageInteract)
+  /** M8：手绘遮罩画笔会话（进入/退出/笔刷大小由右侧检查器写） */
+  const maskPaint = useUiStore((state) => state.maskPaint)
+  const endMaskPaint = useUiStore((state) => state.endMaskPaint)
   const audioClips = useProjectStore((state) => state.project.audioClips) ?? EMPTY_AUDIO_CLIPS
   /**
    * 内嵌原声的出声轨：可见、未静音、且当前有 active 视频（带音轨）的**最高轨道**。
@@ -424,10 +428,13 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     () => topActiveMediaClip(visibleClips, Math.max(0, displayTime), trackOrder) ?? null,
     [visibleClips, displayTime, trackOrder]
   )
-  const overlayClip =
-    stageInteract && selectionKind === 'media' && playheadClip && playheadClip.id === selectedMediaClipId
-      ? playheadClip
-      : null
+  /**
+   * M8：画笔模式只在「被选中 → 播放头正压着它 → 画面框已量到」时生效。
+   * 画笔层 z-index 高于字幕 Canvas 与画面交互层，所以这段时间点选/拖拽手柄被接管；
+   * 退出画笔后这些层自然恢复（画笔层是条件渲染，不是常驻遮挡）。
+   */
+  const maskPaintClip =
+    maskPaint.clipId === null ? null : (visibleClips.find((clip) => clip.id === maskPaint.clipId) ?? null)
 
   /**
    * 画面框：量的是**外层容器**而不是 Canvas 自己——尺寸变化时 Canvas 盒子会被我们写回，
@@ -455,6 +462,23 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     if (!frame) return undefined
     return { left: frame.left, top: frame.top, width: frame.width, height: frame.height }
   }, [frame])
+
+  /**
+   * M8：画笔模式只在「被选中 → 播放头正压着它 → 画面框已量到」时生效。
+   * 画笔层 z-index 高于字幕 Canvas 与画面交互层，所以这段时间点选/拖拽手柄被接管；
+   * 退出画笔后这些层自然恢复（画笔层是条件渲染，不是常驻遮挡）。
+   */
+  const maskPaintVisible =
+    maskPaintClip !== null &&
+    frame !== null &&
+    selectionKind === 'media' &&
+    selectedMediaClipId === maskPaintClip.id &&
+    isClipActiveAt(maskPaintClip, Math.max(0, displayTime))
+  // 画笔模式下隐藏画面交互手柄：否则手柄会被画笔层挡住一半，看起来像"拖不动了"
+  const overlayClip =
+    maskPaint.clipId === null && stageInteract && selectionKind === 'media' && playheadClip && playheadClip.id === selectedMediaClipId
+      ? playheadClip
+      : null
 
   const [watermarkUrl, setWatermarkUrl] = useState<string | null>(null)
   const watermarkPath = watermark?.enabled ? watermark.path : null
@@ -582,7 +606,9 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
     <div className="stage__canvas-wrap" ref={wrapRef}>
       {/* 画面框：唯一与目标分辨率同比例的矩形，里面所有层共用同一原点与缩放比 */}
       <div
-        className={`stage__frame stage__frame--${previewFit === 'cover' ? 'cover' : 'contain'}`}
+        className={`stage__frame stage__frame--${previewFit === 'cover' ? 'cover' : 'contain'}${
+          project.graphicsZ === 'belowMedia' ? ' stage__frame--graphics-below' : ''
+        }`}
         style={frameStyle}
       >
         {/* 每层一条可见媒体轨，按轨道升序渲染：DOM 顺序 = 合成顺序，高处轨道盖住低处 */}
@@ -594,6 +620,7 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
             trackClips={group.trackClips}
             fps={projectFps}
             loopDurationSec={loopDurationSec}
+            maskAspect={spec ? spec.width / spec.height : undefined}
             audioEnabled={group.trackId === audioOwnerTrackId}
             transitionResolver={transitionResolverFor(group.trackId)}
             onVisibleChange={(visible) => handleVisibleChange(group.trackId, visible)}
@@ -625,12 +652,25 @@ export function PreviewStage({ spec, onHandle }: PreviewStageProps): ReactElemen
           />
         ) : null}
 
+        {/* M8：手绘遮罩画笔层（只在画笔模式渲染；覆盖 Canvas/手柄，退出即卸载） */}
+        {maskPaintVisible && frame && maskPaintClip ? (
+          <MaskPaintLayer
+            clipId={maskPaintClip.id}
+            mode={maskPaint.mode}
+            radiusPct={maskPaint.radiusPct}
+            width={frame.width}
+            height={frame.height}
+            onExit={endMaskPaint}
+          />
+        ) : null}
+
         <div className="stage__badges">
           {spec ? (
             <span className="chip mono">
               {spec.width}×{spec.height} · {fpsToString(spec.fps)} · {MODE_LABEL[spec.aspectMode] ?? spec.aspectMode}
             </span>
           ) : null}
+          {maskPaintVisible ? <span className="chip chip--accent">{TEXT.mask.title}</span> : null}
           {previewCanvasKind ? (
             <span className="chip chip--ok">
               目标画布 {previewCanvasKind === 'portrait' ? '9:16' : previewCanvasKind === 'square' ? '1:1' : '16:9'}

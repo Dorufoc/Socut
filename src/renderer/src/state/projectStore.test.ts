@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_FONT_ID, FPS_29_97, FPS_30, MEDIA_BIN_MAX_COUNT, MEDIA_BIN_NAME_MAX_LENGTH, MEDIA_TAG_MAX_COUNT, MEDIA_TAG_MAX_LENGTH, MIN_CLIP_DURATION_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
+import { DEFAULT_FONT_ID, FPS_29_97, FPS_30, MEDIA_BIN_MAX_COUNT, MEDIA_BIN_NAME_MAX_LENGTH, MEDIA_TAG_MAX_COUNT, MEDIA_TAG_MAX_LENGTH, MIN_CLIP_DURATION_SEC, MIN_MEDIA_CLIP_SEC, TRACK_SOFT_LIMIT } from '@shared/constants'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import { getPreset } from '@shared/presets'
 import { snapTimeToFrame } from '@shared/fps'
@@ -933,6 +933,38 @@ describe('v3 轨道管理', () => {
     useProjectStore.getState().removeAudioTrack(last)
     expect(useProjectStore.getState().project.audioTracks).toHaveLength(1)
     expect(clip.trackId).toBe(second)
+  })
+
+  /**
+   * M5-A 无限轨（第一阶段软上限 50）：
+   * 旧硬上限 8 已移除；新增到 50 条才拒收，且拒收不是一次写操作（revision 不变）。
+   */
+  it('轨道软上限：媒体轨/音频轨都能加到 12 条以上，达到 50 条后新增返回 null', () => {
+    // > 旧硬上限 8：连续加 11 条 → 12 条，一次都不该被拒
+    for (let index = 0; index < 11; index += 1) {
+      expect(useProjectStore.getState().addMediaTrack()).not.toBeNull()
+      expect(useProjectStore.getState().addAudioTrack()).not.toBeNull()
+    }
+    expect(useProjectStore.getState().project.mediaTracks).toHaveLength(12)
+    expect(useProjectStore.getState().project.audioTracks).toHaveLength(12)
+
+    // 一直加到软上限
+    while (useProjectStore.getState().project.mediaTracks.length < TRACK_SOFT_LIMIT) {
+      expect(useProjectStore.getState().addMediaTrack()).not.toBeNull()
+    }
+    while (useProjectStore.getState().project.audioTracks.length < TRACK_SOFT_LIMIT) {
+      expect(useProjectStore.getState().addAudioTrack()).not.toBeNull()
+    }
+    expect(useProjectStore.getState().project.mediaTracks).toHaveLength(TRACK_SOFT_LIMIT)
+    expect(useProjectStore.getState().project.audioTracks).toHaveLength(TRACK_SOFT_LIMIT)
+
+    // 软上限拒收：返回 null、数量不再增长、revision 也不动
+    const revision = useProjectStore.getState().revision
+    expect(useProjectStore.getState().addMediaTrack()).toBeNull()
+    expect(useProjectStore.getState().addAudioTrack()).toBeNull()
+    expect(useProjectStore.getState().project.mediaTracks).toHaveLength(TRACK_SOFT_LIMIT)
+    expect(useProjectStore.getState().project.audioTracks).toHaveLength(TRACK_SOFT_LIMIT)
+    expect(useProjectStore.getState().revision).toBe(revision)
   })
 })
 

@@ -6,7 +6,7 @@ import {
 } from './constants'
 import { duckingFilter, duckingStrengthOf, loudnormFilter } from './audioQuality'
 import { exportQualityCrf } from './exportPresets'
-import { fpsToArg } from './fps'
+import { fpsToArg, frameIntervalSec, fpsRatio } from './fps'
 import { videoEncodeArgs } from './gpu'
 import { stabDetectProfile, stabTransformProfile } from './mediaStab'
 import { clipAudioFilterChain, clipVideoSpeedFilter, speedValueOf } from './mediaClipAudio'
@@ -29,11 +29,24 @@ import type {
   ExportQuality,
   ExportTarget,
   Fps,
+  GraphicsZ,
   MediaClip,
   MediaClipTransition,
   MediaClipVideo,
-  Resolution
+  MediaClipKey,
+  Resolution,
+  VideoCodec
 } from './types'
+import type { KeyframeTrack } from './keyframes'
+import { mediaKeyframesActive } from './mediaClipKeyframes'
+
+/**
+ * 该段是否需要走"特效/关键帧链"（`buildMediaClipVideoFx`）。
+ * 静态几何全默认**且**没有关键帧时才允许走旧的直通链——否则关键帧会被静默忽略。
+ */
+function needsVideoFx(seg: ConcatSegment): boolean {
+  return !isDefaultMediaVideo(seg.video) || mediaKeyframesActive(seg.keyframes)
+}
 
 /**
  * FFmpeg 参数构造（纯函数，argv 快照测试锁定；规格 §5 + 计划 C1–C5 修正）。
@@ -74,6 +87,71 @@ function common(flags: CommonInputFlags | undefined): string[] {
 /** BT.709 SDR 标签（规格 §5.2 / §6.2：HDR 效果丢失后统一回归 SDR BT.709）。 */
 export const BT709_TAGS: string[] = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709']
 
+/**
+ * M9：合成出口的编码参数（四个 overlay builder 共用）。
+ * 不传新字段时 argv 与旧版**逐字节一致**（CRF 仍按画质档、preset 仍 medium）。
+ */
+export function overlayEncodeArgs(
+  input: {
+    quality?: ExportQuality
+    videoCodec?: VideoCodec
+    videoBitrateKbps?: number
+    crf?: number
+    encoderPreset?: string
+  },
+  encoder: string | null
+): string[] {
+  const codec = input.videoCodec === 'hevc' ? 'hevc' : input.videoCodec === 'av1' ? 'av1' : 'h264'
+  return videoEncodeArgs({
+    encoder,
+    quality: input.crf ?? exportQualityCrf(input.quality),
+    preset: input.encoderPreset ?? 'medium',
+    codec,
+    ...(input.videoBitrateKbps !== undefined ? { bitrateKbps: input.videoBitrateKbps } : {})
+  })
+}
+
+/**
+ * M9：输出色彩参数。默认（8bit + limited）只输出 BT.709 标签，
+ * 与旧版 argv 完全一致；显式 10bit / full range 时才追加 `-pix_fmt` / `-color_range`。
+ */
+export function overlayColorArgs(input: {
+  bitDepth?: 8 | 10
+  colorRange?: 'limited' | 'full'
+}): string[] {
+  const args: string[] = []
+  if (input.bitDepth === 10) args.push('-pix_fmt', 'yuv420p10le')
+  args.push(...BT709_TAGS)
+  if (input.colorRange === 'full') args.push('-color_range', 'pc')
+  return args
+}
+
+/**
+ * M9-B：滤镜链尾的输出像素格式（缺省 yuv420p，与旧 argv 逐字节一致）。
+ *
+ * 10bit 时链尾落到 `yuv420p10le`，编码器才真正按 10bit 编码；
+ * 源素材仍是 8bit（HDR 传递链路未做），所以这是"10bit 交付路径"而不是"原生 10bit 采集"。
+ */
+export function outputPixelFormat(bitDepth?: 8 | 10): 'yuv420p' | 'yuv420p10le' {
+  return bitDepth === 10 ? 'yuv420p10le' : 'yuv420p'
+}
+
+/**
+ * M9-B：full range 的**像素范围转换**。
+ *
+ * `-color_range pc` 只是标签：limited 的像素值（16–235）不转换就贴 pc 标签，
+ * 播放器会把画面对比拉开。真正铺满 0–255 需要 `scale=in_range=limited:out_range=full`。
+ */
+export function fullRangeFilter(colorRange?: 'limited' | 'full'): string | null {
+  return colorRange === 'full' ? 'scale=in_range=limited:out_range=full' : null
+}
+
+/** M9-B：滤镜链尾（可选范围转换 + 目标像素格式）；8bit/limited 时与旧版逐字节一致。 */
+export function outputTailFilters(input: { bitDepth?: 8 | 10; colorRange?: 'limited' | 'full' }): string {
+  const range = fullRangeFilter(input.colorRange)
+  return [range, `format=${outputPixelFormat(input.bitDepth)}`].filter(Boolean).join(',')
+}
+
 /** ProRes 4444 编码参数（透明通道必需）。 */
 export function proresArgs(): string[] {
   return [
@@ -89,32 +167,6 @@ export function proresArgs(): string[] {
     // PNG 为全范围 RGB；ProRes 惯例为有限范围，Premiere/Resolve 读此标签决定合成基线
     '-color_range',
     'tv'
-  ]
-}
-
-/** 透明帧序列 → ProRes 4444 MOV（帧从 PNG 目录读取，规格 §5.1 回退路径）。 */
-export function buildTransparentMovFromSeq(
-  fps: Fps,
-  framePattern: string,
-  outputPath: string,
-  startNumber = 0,
-  audio?: TransparentAudioOptions
-): string[] {
-  return [
-    ...common({}),
-    '-framerate',
-    fpsToArg(fps),
-    '-start_number',
-    String(startNumber),
-    '-i',
-    framePattern,
-    ...proresArgs(),
-    // v7：有音频段就带音轨（多段 amix），否则保持原来的 `-an`
-    ...(buildTransparentAudioArgs(audio) ?? ['-an']),
-    // 中间产物无需 faststart（计划 C5：moov 重定位会带来整文件重写）
-    '-f',
-    'mov',
-    outputPath
   ]
 }
 
@@ -202,6 +254,33 @@ export function buildThumbnailArgs(inputPath: string, outputPath: string, atSec:
     `scale=${width}:-2,setsar=1`,
     '-q:v',
     '6',
+    outputPath
+  ]
+}
+
+/**
+ * M5 冻结帧抽帧：从源视频的某一时刻取**一帧全分辨率 PNG**，作为静态素材落盘。
+ *
+ * 与缩略图的关键区别：
+ * - `-ss` 放在 `-i` **之后**：这里要的是「与时间轴一致的这一帧」，宁可慢一点也要帧精确；
+ * - 不做缩放、不压 JPEG：产物要按原始分辨率重新上轨（4K 源抽出来仍是 4K）；
+ * - 输出 PNG（无损、无二次压缩），素材库里按 `MediaKind='image'` 处理，导出走 `-loop 1`。
+ */
+export function buildFreezeFrameArgs(inputPath: string, outputPath: string, atSec: number): string[] {
+  return [
+    '-hide_banner',
+    '-y',
+    '-loglevel',
+    'error',
+    '-i',
+    inputPath,
+    '-ss',
+    formatSec(Math.max(0, atSec)),
+    '-frames:v',
+    '1',
+    '-an',
+    '-sn',
+    '-dn',
     outputPath
   ]
 }
@@ -377,11 +456,14 @@ export function buildWatermarkFilterChain(input: {
   prevLabel: string
   watermark: WatermarkInput
   output: Resolution
+  /** M9-B：链尾目标像素格式/范围（缺省 = 旧版 yuv420p） */
+  bitDepth?: 8 | 10
+  colorRange?: 'limited' | 'full'
 }): string[] {
   const box = computeWatermarkGeometry(input.watermark, input.output)
   return [
     `[${input.label}:v]format=rgba,scale=${box.width}:${box.height}[wm]`,
-    `[${input.prevLabel}][wm]overlay=${box.x}:${box.y}:alpha=straight:format=auto:eof_action=pass,format=yuv420p[v]`
+    `[${input.prevLabel}][wm]overlay=${box.x}:${box.y}:alpha=straight:format=auto:eof_action=pass,${outputTailFilters(input)}[v]`
   ]
 }
 
@@ -432,6 +514,22 @@ export interface ConcatSegment {
   speed?: ClipSpeed
   /** v10：入场转场（缺省 = 硬切）；非空时视频链用扩展手柄走 xfade，音频仍按切点硬切 */
   transitionIn?: MediaClipTransition
+  /** M8：抠像参数（缺省 = 不抠像；只在导出侧合成） */
+  key?: MediaClipKey
+  /** M6-E：媒体段关键帧（缺省 = 静态几何；与旧 argv 逐字节一致） */
+  keyframes?: KeyframeTrack[]
+  /**
+   * M8：手绘遮罩 PNG 的路径（主进程写盘后填）。
+   * 缺省 = 不遮罩；argv 与旧版**逐字节一致**（没有这一路输入、段链不多一条语句）。
+   */
+  maskPath?: string
+  /**
+   * M8-P0：外部 matte 文件路径（静态图或视频；与 maskPath 可同时存在，两者都进 alpha 相乘链）。
+   * 缺省 = 无外部 matte，argv 与旧版逐字节一致。
+   */
+  mattePath?: string
+  /** M8-P0：外部 matte 类型（显式优先；缺省按扩展名推断，见 matteKindOf） */
+  matteKind?: 'image' | 'video'
   /** v10：源素材总时长（手柄夹取用；图像视为无限手柄） */
   sourceDurationSec?: number
 }
@@ -439,6 +537,265 @@ export interface ConcatSegment {
 /** v8：该段本次导出是否需要防抖（开关打开且已分配到运动数据文件）。 */
 export function segmentWantsStab(seg: ConcatSegment): boolean {
   return seg.stab?.enabled === true && typeof seg.stabFile === 'string' && seg.stabFile.length > 0
+}
+
+// ---------------------------------------------------------------------------
+// M8：手绘遮罩（mask PNG → 段链 alpha 相乘 → 单轨合黑底 / 多轨保留透明）
+// ---------------------------------------------------------------------------
+
+/** 该段本次导出是否需要接遮罩（只有主进程写过 maskPath 才算）。 */
+export function segmentWantsMask(seg: Pick<ConcatSegment, 'maskPath'>): boolean {
+  return typeof seg.maskPath === 'string' && seg.maskPath.length > 0
+}
+
+// ---------------------------------------------------------------------------
+// M8-P0：外部 matte（静态图 / 视频文件）
+// ---------------------------------------------------------------------------
+
+/** 静态图 matte 的扩展名集合。 */
+const IMAGE_MATTE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tif', 'tiff', 'gif', 'avif'])
+/** 常见视频容器扩展名（其余扩展名视为「无法判断」，需要显式 matteKind）。 */
+const VIDEO_MATTE_EXTENSIONS = new Set([
+  'mp4',
+  'mov',
+  'mkv',
+  'webm',
+  'avi',
+  'm4v',
+  'mpg',
+  'mpeg',
+  'mxf',
+  'ts',
+  'mts',
+  'm2ts',
+  'wmv',
+  'flv',
+  'ogv',
+  '3gp',
+  'prores',
+  'y4m',
+  'gifv'
+])
+
+/** matte 类型推断：扩展名 → image / video；不认识的扩展名返回 null（要求显式 matteKind）。 */
+export function inferMatteKind(targetPath: string): 'image' | 'video' | null {
+  const ext = (targetPath.split('.').pop() ?? '').toLowerCase()
+  if (IMAGE_MATTE_EXTENSIONS.has(ext)) return 'image'
+  if (VIDEO_MATTE_EXTENSIONS.has(ext)) return 'video'
+  return null
+}
+
+/** 显式优先、缺省按扩展名；无法判断时返回 null（由调用方报可读错误）。 */
+export function resolveMatteKind(seg: Pick<ConcatSegment, 'mattePath' | 'matteKind'>): 'image' | 'video' | null {
+  if (seg.matteKind === 'image' || seg.matteKind === 'video') return seg.matteKind
+  return inferMatteKind(seg.mattePath ?? '')
+}
+
+/** 该段 matte 的最终类型：显式优先、缺省按扩展名，仍无法判断时按 video 兜底（构建 argv 用；预检会先报错）。 */
+export function matteKindOf(seg: Pick<ConcatSegment, 'mattePath' | 'matteKind'>): 'image' | 'video' {
+  return resolveMatteKind(seg) ?? 'video'
+}
+
+/** 该段本次导出是否需要接外部 matte。 */
+export function segmentWantsMatte(seg: Pick<ConcatSegment, 'mattePath'>): boolean {
+  return typeof seg.mattePath === 'string' && seg.mattePath.length > 0
+}
+
+/**
+ * M8-P0：输入编号纪律（与 mask 同一套，先 mask 后 matte）：
+ * 各段媒体（0..N-1）→ 各段 mask（N..N+maskTotal-1）→ 各段 matte（紧跟 mask 之后）
+ * → 透明层/帧流 → 水印 → 音频。
+ */
+export function maskInputCount(segments: readonly Pick<ConcatSegment, 'maskPath'>[]): number {
+  return segments.filter((seg) => segmentWantsMask(seg)).length
+}
+
+export function matteInputCount(segments: readonly Pick<ConcatSegment, 'mattePath'>[]): number {
+  return segments.filter((seg) => segmentWantsMatte(seg)).length
+}
+
+/**
+ * M8：遮罩输入的路序号。所有 builder 的输入顺序统一为：
+ * 各段媒体（0..N-1）→ 各段的 mask PNG（N..N+M-1）→ 透明层/帧流 → 水印 → 音频。
+ * 因此第 i 段的遮罩序号 = N + 「i 之前带遮罩的段数」。
+ */
+export function maskInputIndexFor(
+  segments: readonly Pick<ConcatSegment, 'maskPath'>[],
+  index: number
+): number {
+  const before = segments.slice(0, Math.max(0, index)).filter((seg) => segmentWantsMask(seg)).length
+  return segments.length + before
+}
+
+/** M8-P0：第 i 段的外部 matte 输入序号（排在全部 mask 输入之后）。 */
+export function matteInputIndexFor(
+  segments: readonly (Pick<ConcatSegment, 'maskPath'> & Pick<ConcatSegment, 'mattePath'>)[],
+  index: number
+): number {
+  const before = segments.slice(0, Math.max(0, index)).filter((seg) => segmentWantsMatte(seg)).length
+  return segments.length + maskInputCount(segments) + before
+}
+
+/**
+ * M8/M8-P0：段链需要的额外输入序号（mask 先、matte 后；没有对应输入的键不落）。
+ * 三个基座（单轨/多轨/转场）共用，保证「输入编号」与「段链引用」始终同一口径。
+ */
+function alphaInputIndicesFor(
+  segments: readonly ConcatSegment[],
+  index: number
+): { maskInputIndex?: number; matteInputIndex?: number } {
+  const seg = segments[index]
+  if (!seg) return {}
+  return {
+    ...(segmentWantsMask(seg) ? { maskInputIndex: maskInputIndexFor(segments, index) } : {}),
+    ...(segmentWantsMatte(seg) ? { matteInputIndex: matteInputIndexFor(segments, index) } : {})
+  }
+}
+
+/**
+ * M8：遮罩 PNG 的输入参数（静态图循环播放）。
+ *
+ * 只喂 **1 帧**（`-t` = 一帧间隔），原因（本机 FFmpeg 8.1.1 实证）：
+ * - 无界 `-loop 1` 时 `alphamerge` 的输出长度取两路中**较长**的一路（不是文档直觉的
+ *   “按第一路结束”），1s 素材会被循环图拖成 90 帧；
+ * - 静态图不会有变化，framesync 默认 `repeatlast` 会把最后一帧补齐到画面结束，
+ *   于是输出长度恒等于段长，且与「本段被 span 夹短 / 转场扩展手柄」等时长差异完全解耦。
+ */
+export function buildMaskInputArgs(maskPath: string, fps: Fps): string[] {
+  return ['-loop', '1', '-framerate', fpsToArg(fps), '-t', formatSec(frameIntervalSec(fps)), '-i', maskPath]
+}
+
+/**
+ * M8-P0：外部 matte 的输入参数。
+ * - 静态图：与手绘遮罩 PNG 完全同一写法（循环 + 只喂 1 帧，framesync repeatlast 补齐）；
+ * - 视频：普通 `-i`（不加 -loop；时序裁切在段链里用 fps + trim 帧索引完成）。
+ */
+export function buildMatteInputArgs(
+  seg: Pick<ConcatSegment, 'mattePath' | 'matteKind'>,
+  fps: Fps
+): string[] {
+  if (!segmentWantsMatte(seg)) return []
+  const target = seg.mattePath as string
+  return matteKindOf(seg) === 'video' ? ['-i', target] : buildMaskInputArgs(target, fps)
+}
+
+export interface MediaMaskChainInput {
+  /** 同一张 filter_complex 内的唯一后缀（用段下标），避免标签重复 */
+  id: number | string
+  /** 段链当前输出标签（不含方括号） */
+  sourceLabel: string
+  /** 遮罩/matte 输入的路序号（见 maskInputIndexFor / matteInputIndexFor） */
+  maskInputIndex: number
+  /**
+   * M8-P0：输入种类。缺省 `'image'` = 旧行为（静态 PNG）；
+   * `'video'` = 视频 matte，需要 sourceInSec/sourceOutSec/frameCount 做时序对齐。
+   */
+  kind?: 'image' | 'video'
+  /** video matte：该段在 matte 上的源入点（与画面段同一 source 区间） */
+  sourceInSec?: number
+  /** video matte：源出点 */
+  sourceOutSec?: number
+  /** video matte：该段的输出帧数（trim 帧索引裁切，防止等长 matte 多出 1 帧） */
+  frameCount?: number
+  frameSize: { width: number; height: number }
+  fps: Fps
+  /** 段的输出时长（秒）：单轨黑底的时长基准 */
+  durationSec: number
+  /**
+   * true = 单轨不透明基座：alpha 相乘后合到黑底并回到 yuv420p
+   * （隐藏区必须变黑，不能保留原像素）；false = 多轨透明图层：保留 RGBA 让下层透出。
+   */
+  opaqueBackground: boolean
+}
+
+/**
+ * M8-P0：alpha 相乘链的收尾（单轨不透明基座）。
+ *
+ * 黑底刻意比段长 +2s（`eof_action=pass` 让黑底在 alpha 流结束后继续供帧），
+ * 再用 `trim=end=<段长>` 精确截回段长。为什么不用 `eof_action=endall`：
+ * 本机 FFmpeg 8.1.1 实证 endall 的输出 EOF 落在「最后一帧 PTS」而不是「PTS+帧时长」，
+ * 后续 `fps=..` 会因此少出一帧（1s/30fps 成片变 29 帧，拼接后整条时间轴错 1 帧）。
+ */
+export function buildAlphaOpaqueFinish(input: {
+  id: number | string
+  sourceLabel: string
+  frameSize: { width: number; height: number }
+  fps: Fps
+  durationSec: number
+}): { statements: string[]; outputLabel: string } {
+  const size = `${input.frameSize.width}x${input.frameSize.height}`
+  const bg = `mbg${input.id}`
+  const out = `mout${input.id}`
+  return {
+    statements: [
+      `color=c=black:s=${size}:r=${fpsToArg(input.fps)}:d=${formatSec(Math.max(0.01, input.durationSec + 2))}[${bg}]`,
+      // 黑底供帧 → 精确 trim 回段长（EOF 必须落在段长上，否则后续 fps 会少一帧）
+      `[${bg}][${input.sourceLabel}]overlay=0:0:format=auto:eof_action=pass:shortest=0,trim=end=${formatSec(
+        Math.max(0.01, input.durationSec)
+      )},setpts=PTS-STARTPTS,format=yuv420p[${out}]`
+    ],
+    outputLabel: out
+  }
+}
+
+/**
+ * M8：mask / matte 的 alpha 相乘段链。
+ *
+ * 做法：段画面转 RGBA → 抽 alpha → 与输入灰度做 multiply → alphamerge 回写 alpha。
+ * 与手绘遮罩同一套；`kind:'video'` 时先把 matte 用 `fps + trim 帧索引` 对齐到该段的输出帧。
+ */
+export function buildMediaMaskFilterChain(input: MediaMaskChainInput): {
+  statements: string[]
+  outputLabel: string
+} {
+  const { width, height } = input.frameSize
+  const id = input.id
+  const mb = `mb${id}`
+  const mae = `mae${id}`
+  const mm = `mm${id}`
+  const mam = `mam${id}`
+  const mon = `mon${id}`
+  let maskPrep: string
+  if (input.kind === 'video') {
+    const rate = fpsToArg(input.fps)
+    const ratio = fpsRatio(input.fps)
+    const startFrame = Math.max(0, Math.round((input.sourceInSec ?? 0) * ratio))
+    const count = Math.max(
+      1,
+      Math.round(
+        input.frameCount ?? ((input.sourceOutSec ?? 0) - (input.sourceInSec ?? 0)) * ratio
+      )
+    )
+    // 帧索引裁切（不用 trim=end=秒：边界帧会留在 PTS=end 上，等长 matte 会多 1 帧）
+    maskPrep =
+      `[${input.maskInputIndex}:v]fps=${rate}` +
+      `,trim=start_frame=${startFrame}:end_frame=${startFrame + count}` +
+      `,setpts=PTS-STARTPTS,format=gray,scale=${width}:${height}[${mm}]`
+  } else {
+    // 静态图：统一成灰度并归一到目标画布尺寸（白=可见，黑=隐藏）
+    maskPrep = `[${input.maskInputIndex}:v]format=gray,scale=${width}:${height}[${mm}]`
+  }
+  const statements = [
+    // 1) 段画面先转 RGBA（yuv420p 没有 alpha 通道可乘）
+    `[${input.sourceLabel}]format=rgba[${mb}]`,
+    // 2) 取段自身 alpha（普通视频恒为 255；多轨图层里已有透明补边）
+    `[${mb}]alphaextract[${mae}]`,
+    // 3) 遮罩/matte 统一成灰度（视频 matte 先按段窗口对齐到输出帧）
+    maskPrep,
+    // 4) alpha × mask（multiply：255×255=255 可见，×0=0 隐藏）
+    `[${mae}][${mm}]blend=all_mode=multiply[${mam}]`,
+    // 5) 新的 alpha 回写到 RGBA 画面
+    `[${mb}][${mam}]alphamerge[${mon}]`
+  ]
+  if (!input.opaqueBackground) return { statements, outputLabel: mon }
+  const finish = buildAlphaOpaqueFinish({
+    id,
+    sourceLabel: mon,
+    frameSize: input.frameSize,
+    fps: input.fps,
+    durationSec: input.durationSec
+  })
+  return { statements: [...statements, ...finish.statements], outputLabel: finish.outputLabel }
 }
 
 /** v8：detect 去重键：同一源文件、同一帧序列、同一档位只需分析一次。
@@ -472,6 +829,9 @@ type MultiInputDecisionSegment = Pick<
   | 'muted'
   | 'isImage'
   | 'transitionIn'
+  | 'maskPath'
+  | 'mattePath'
+  | 'matteKind'
 >
 
 /**
@@ -500,6 +860,10 @@ export function segmentsNeedMultiInput(segments: MultiInputDecisionSegment[] | u
   if (segments.some((seg) => seg.audio !== undefined || seg.speed !== undefined)) return true
   // v10：转场只能走多输入路径（旧单输入 builder 没有 xfade 入口/扩展手柄）
   if (segments.some((seg) => seg.transitionIn !== undefined)) return true
+  // M8：遮罩必须在「段链输出之后」插 alpha 相乘，旧单输入 builder 没有逐段插入点
+  if (segments.some((seg) => segmentWantsMask(seg))) return true
+  // M8-P0：外部 matte 同样需要逐段 alpha 相乘（且要独立输入）
+  if (segments.some((seg) => segmentWantsMatte(seg))) return true
   const only = segments[0]
   if (!only) return false
   // 单段但被剪裁/不在 0 起点：时长恒等式下 timelineEndSec - timelineStartSec === sourceOutSec - sourceInSec，
@@ -850,7 +1214,11 @@ export interface MediaBasisOverlayInput {
   /** 本次输出覆盖的时间轴区间（含开头/中间/尾部空隙补黑） */
   spanStartSec: number
   spanEndSec: number
-  /** 透明层输入索引（两阶段法与直管道都是最后一路输入） */
+  /**
+   * 透明层/帧流输入索引（两阶段法或直管道）。
+   * M8：遮罩输入排在各段媒体之后，所以这里 = segments.length + maskCount；
+   * 水印输入 = overlayLabel + 1、音频输入依次后移，均由调用方按同一口径传入。
+   */
   overlayLabel: string
   /** 透明 MOV（两阶段法）；directPipe 时忽略 */
   overlayPath: string
@@ -861,14 +1229,35 @@ export interface MediaBasisOverlayInput {
   frameSize: { width: number; height: number }
   audioMode: 'copy' | 'aac'
   fpsMode: 'cfr' | 'vfr'
+  /** M7-E：图形层 z 档；缺省 aboveMedia（旧 argv 逐字节不变） */
+  graphicsZ?: GraphicsZ
   /** 水印（可选）：作为紧接透明层之后的一路输入，合成在最后一层 */
   watermark?: WatermarkInput
   /** v7：音频轨（可选）：全部追加在水印之后，与基座原声混在一起输出 */
   audioClips?: AudioMixClip[]
+  /**
+   * M8：`denoise = 'ai'` 用的 RNNoise 模型绝对路径（main 侧解析随包 `std.rnnn` 后下传）。
+   * 缺省时 ai 档不产出滤镜（main 会在导出前把"要 ai 但没模型"拦成明确错误）。
+   */
+  arnndnModelPath?: string
   /** v10：显式目标画布；缺省 = 不做画布归一（argv 与旧版逐字节一致） */
   canvas?: { width: number; height: number; fit: ExportFit }
   /** v10：画质档；缺省 = high（CRF 18，与现有默认一致） */
   quality?: ExportQuality
+  /** 视频编码格式；缺省 = AVC/H.264；M9 增加 AV1 */
+  videoCodec?: VideoCodec
+  /** 视频码率（kbps）；有值时走码率模式 */
+  videoBitrateKbps?: number
+  /** 音频码率（kbps）；有值时 AAC 分支使用该码率 */
+  audioBitrateKbps?: number
+  /** M9：CRF 直给（0–51）；缺省按画质档 */
+  crf?: number
+  /** M9：软件编码 preset（x264/x265 名称；AV1 映射到 SVT-AV1 档位） */
+  encoderPreset?: string
+  /** M9：输出位深（10 走 yuv420p10le） */
+  bitDepth?: 8 | 10
+  /** M9：色彩范围标签（full → -color_range pc） */
+  colorRange?: 'limited' | 'full'
   /** v10：成片响度标准化（off/缺省 = 不注入 loudnorm，argv 与旧版一致） */
   mastering?: AudioMastering
 }
@@ -926,6 +1315,8 @@ export function buildAudioMixPlan(input: {
   baseLabel?: string
   /** v10：成片响度标准化（off/缺省 = 不注入 loudnorm，argv 与旧版逐字节一致） */
   mastering?: AudioMastering
+  /** M8：`denoise = 'ai'` 的 RNNoise 模型路径（缺省 = ai 档不产出滤镜） */
+  arnndnModelPath?: string
 }): AudioMixPlan | null {
   if (input.clips.length === 0) return null
   const spanLen = formatSec(Math.max(0.01, input.spanEndSec - input.spanStartSec))
@@ -946,7 +1337,12 @@ export function buildAudioMixPlan(input: {
     const delayMs = Math.max(0, Math.round((clip.timelineStartSec - input.spanStartSec) * 1000))
     inputArgs.push('-ss', formatSec(Math.max(0, clip.sourceInSec)), '-t', formatSec(sourceLen), '-i', clip.path)
     const label = `ai${index}`
-    const fx = clipAudioFilterChain({ audio: clip.audio, speed: clip.speed, outputDurationSec: outLen })
+    const fx = clipAudioFilterChain({
+      audio: clip.audio,
+      speed: clip.speed,
+      outputDurationSec: outLen,
+      ...(input.arnndnModelPath ? { arnndnModelPath: input.arnndnModelPath } : {})
+    })
     statements.push(
       `[${input.baseIndex + index}:a]atrim=duration=${formatSec(sourceLen)},asetpts=PTS-STARTPTS` +
         `${fx.length > 0 ? `,${fx}` : ''},` +
@@ -1030,6 +1426,8 @@ export interface TransparentAudioOptions {
   spanEndSec: number
   /** v10：成片响度标准化（off/缺省 = 不注入 loudnorm） */
   mastering?: AudioMastering
+  /** M8：`denoise = 'ai'` 的 RNNoise 模型路径 */
+  arnndnModelPath?: string
 }
 
 /**
@@ -1043,7 +1441,8 @@ export function buildTransparentAudioArgs(audio: TransparentAudioOptions | undef
     baseIndex: 1,
     spanStartSec: audio.spanStartSec,
     spanEndSec: audio.spanEndSec,
-    mastering: audio.mastering
+    mastering: audio.mastering,
+    ...(audio.arnndnModelPath ? { arnndnModelPath: audio.arnndnModelPath } : {})
   })
   if (!plan) return null
   return [
@@ -1062,9 +1461,86 @@ export function buildTransparentAudioArgs(audio: TransparentAudioOptions | undef
 }
 
 /**
+ * 段画面的 alpha 相乘链（M8 mask 先、M8-P0 matte 后；两者可同时存在）。
+ *
+ * - 只有 mask：标签/语句与旧版完全一致（id 用调用方传入的 maskId，单轨 `s{i}`、多轨 `m{i}`）；
+ * - 只有 matte：id 用 `t{i}`；
+ * - 两者同时：先 mask 再 matte（乘法可交换，但语句顺序固定并测试锁定）；
+ * - `opaqueBackground=true`（单轨且无 fx）时链尾合黑底回 yuv420p，否则保留 RGBA。
+ */
+function maskedAlphaForSegment(input: {
+  index: number
+  seg: ConcatSegment
+  sourceLabel: string
+  maskInputIndex?: number
+  matteInputIndex?: number
+  /** mask 链的标签后缀前缀（保持旧 argv 一致：单轨 s、多轨 m） */
+  maskIdPrefix: string
+  sourceInSec: number
+  sourceOutSec: number
+  frameSize: { width: number; height: number }
+  fps: Fps
+  durationSec: number
+  opaqueBackground: boolean
+}): { statements: string[]; label: string; hasAlpha: boolean } {
+  const hasMask = input.maskInputIndex !== undefined && segmentWantsMask(input.seg)
+  const hasMatte = input.matteInputIndex !== undefined && segmentWantsMatte(input.seg)
+  if (!hasMask && !hasMatte) {
+    return { statements: [], label: input.sourceLabel, hasAlpha: false }
+  }
+  const maskChain = hasMask
+    ? buildMediaMaskFilterChain({
+        id: `${input.maskIdPrefix}${input.index}`,
+        sourceLabel: input.sourceLabel,
+        maskInputIndex: input.maskInputIndex as number,
+        frameSize: input.frameSize,
+        fps: input.fps,
+        durationSec: input.durationSec,
+        // 只有 mask 且需要不透明收尾时，沿用旧行为（一条链内直接合黑底）
+        opaqueBackground: input.opaqueBackground && !hasMatte
+      })
+    : null
+  const matteChain = hasMatte
+    ? buildMediaMaskFilterChain({
+        id: `t${input.index}`,
+        sourceLabel: maskChain ? maskChain.outputLabel : input.sourceLabel,
+        maskInputIndex: input.matteInputIndex as number,
+        ...(matteKindOf(input.seg) === 'video'
+          ? {
+              kind: 'video' as const,
+              sourceInSec: input.sourceInSec,
+              sourceOutSec: input.sourceOutSec,
+              frameCount: Math.max(1, Math.round((input.sourceOutSec - input.sourceInSec) * fpsRatio(input.fps)))
+            }
+          : {}),
+        frameSize: input.frameSize,
+        fps: input.fps,
+        durationSec: input.durationSec,
+        opaqueBackground: input.opaqueBackground && !maskChain
+      })
+    : null
+  const statements = [...(maskChain ? maskChain.statements : []), ...(matteChain ? matteChain.statements : [])]
+  if (!(hasMask && hasMatte && input.opaqueBackground)) {
+    return { statements, label: (matteChain ?? maskChain)!.outputLabel, hasAlpha: true }
+  }
+  // 两者同时 + 单轨不透明：两条链都保持 RGBA，链尾统一合黑底
+  const finish = buildAlphaOpaqueFinish({
+    id: `f${input.index}`,
+    sourceLabel: matteChain!.outputLabel,
+    frameSize: input.frameSize,
+    fps: input.fps,
+    durationSec: input.durationSec
+  })
+  return { statements: [...statements, ...finish.statements], label: finish.outputLabel, hasAlpha: true }
+}
+
+/**
  * 单轨每段视频链（旧路径与转场路径共用，避免两条链分叉）：
  * trim → fps → stab → speed →（有画布）归一 → fx → 链尾 yuv420p。
  * `sourceInSec/sourceOutSec` 由调用方给出：旧路径用核心区间，转场路径用扩展手柄区间。
+ *
+ * M8：有遮罩/外部 matte 时在「归一化之后、fx 几何变换之前」做 alpha 相乘 —— 与预览把
+ * mask 挂在媒体元素上（transform/filter 之前）的口径一致：遮罩随画面一起缩放/位移/旋转。
  */
 function singleTrackVideoChains(input: {
   index: number
@@ -1077,34 +1553,72 @@ function singleTrackVideoChains(input: {
   fps: Fps
   outputLabel: string
   baseLabel: string
-}): string[] {
+  /** M8：遮罩输入路序号（undefined = 无遮罩） */
+  maskInputIndex?: number
+  /** M8-P0：外部 matte 输入路序号（undefined = 无 matte） */
+  matteInputIndex?: number
+}): { chains: string[]; label: string } {
   const stabChain = segmentWantsStab(input.seg)
     ? `,${stabTransformFilter(input.seg.stab!, input.seg.stabFile!)}`
     : ''
   const speedChain = clipVideoSpeedFilter(input.seg.speed)
   const speedPart = speedChain ? `,${speedChain}` : ''
   const prefix = segmentTrimFpsPrefix(input.sourceInSec, input.sourceOutSec, input.rate)
-  if (isDefaultMediaVideo(input.seg.video)) {
-    return [
-      `[${input.index}:v]${prefix}${stabChain}${speedPart}` +
-        `${input.canvasFilter ? `,${input.canvasFilter}` : ',setsar=1'},format=yuv420p[${input.outputLabel}]`
-    ]
-  }
   const normalize = input.canvasFilter ?? 'setsar=1'
   const durationSec = Math.max(0, (input.sourceOutSec - input.sourceInSec) / speedValueOf(input.seg.speed))
+  const needsFx = needsVideoFx(input.seg)
+  const masked = maskedAlphaForSegment({
+    index: input.index,
+    seg: input.seg,
+    sourceLabel: input.baseLabel,
+    ...(input.maskInputIndex !== undefined ? { maskInputIndex: input.maskInputIndex } : {}),
+    ...(input.matteInputIndex !== undefined ? { matteInputIndex: input.matteInputIndex } : {}),
+    maskIdPrefix: 's',
+    sourceInSec: input.sourceInSec,
+    sourceOutSec: input.sourceOutSec,
+    frameSize: input.frameSize,
+    fps: input.fps,
+    durationSec,
+    opaqueBackground: !needsFx
+  })
+  if (!needsFx) {
+    if (!masked.hasAlpha) {
+      return {
+        chains: [
+          `[${input.index}:v]${prefix}${stabChain}${speedPart}` +
+            `${input.canvasFilter ? `,${input.canvasFilter}` : ',setsar=1'},format=yuv420p[${input.outputLabel}]`
+        ],
+        label: input.outputLabel
+      }
+    }
+    // 无 fx：归一化后在元素空间做 alpha 相乘，再合黑底回到 yuv420p（concat 需要统一像素格式）
+    return {
+      chains: [
+        `[${input.index}:v]${prefix}${stabChain}${speedPart},${normalize}[${input.baseLabel}]`,
+        ...masked.statements
+      ],
+      label: masked.label
+    }
+  }
   const fx = buildMediaClipVideoFx({
-    baseLabel: input.baseLabel,
+    baseLabel: masked.hasAlpha ? masked.label : input.baseLabel,
     outputLabel: input.outputLabel,
     video: input.seg.video,
+    ...(input.seg.key ? { key: input.seg.key } : {}),
+    ...(input.seg.keyframes ? { keyframes: input.seg.keyframes } : {}),
     frame: input.frameSize,
     fps: input.fps,
     durationSec,
     transparentBackground: false
   })
-  return [
-    `[${input.index}:v]${prefix}${stabChain}${speedPart},${normalize}[${input.baseLabel}]`,
-    ...fx.statements
-  ]
+  return {
+    chains: [
+      `[${input.index}:v]${prefix}${stabChain}${speedPart},${normalize}[${input.baseLabel}]`,
+      ...masked.statements,
+      ...fx.statements
+    ],
+    label: input.outputLabel
+  }
 }
 
 /** 单轨每段音频链（音频永远是核心源区间 + 切点硬切，绝不使用转场手柄）。 */
@@ -1115,12 +1629,15 @@ function segmentAudioChains(input: {
   sourceOutSec: number
   outputLabel: string
   outLen: number
+  /** M8：`denoise = 'ai'` 的 RNNoise 模型路径 */
+  arnndnModelPath?: string
 }): string[] {
   if (input.seg.hasAudio) {
     const audioFx = clipAudioFilterChain({
       audio: input.seg.audio,
       speed: input.seg.speed,
-      outputDurationSec: input.outLen
+      outputDurationSec: input.outLen,
+      ...(input.arnndnModelPath ? { arnndnModelPath: input.arnndnModelPath } : {})
     })
     return [
       `[${input.index}:a]atrim=start=${formatSec(input.sourceInSec)}:end=${formatSec(input.sourceOutSec)},` +
@@ -1146,7 +1663,6 @@ function buildSingleTrackBasis(
 ): string {
   const rate = fpsToArg(input.fps)
   const start = formatSec(input.spanStartSec)
-  const end = formatSec(input.spanEndSec)
   const size = `${input.frameSize.width}x${input.frameSize.height}`
   const chains: string[] = []
   const parts: string[] = []
@@ -1192,7 +1708,8 @@ function buildSingleTrackBasis(
     const outLen = Math.max(0, (seg.sourceOutSec - seg.sourceInSec) / speed)
     // v8：防抖段在 fps 重采样之后、setsar 之前插入 transform（与 detect 同一帧序列）
     // v9：画面变速挂在 fps 之后（.trf 按帧序号索引，不能在重采样前改 PTS）
-    const videoChains = singleTrackVideoChains({
+    // M8：有遮罩时段链内部在「归一化后、fx 几何变换前」做 alpha 相乘（随画面一起变换）
+    const video = singleTrackVideoChains({
       index: i,
       seg,
       sourceInSec: seg.sourceInSec,
@@ -1201,18 +1718,22 @@ function buildSingleTrackBasis(
       canvasFilter,
       frameSize: input.frameSize,
       fps: input.fps,
-      outputLabel: isDefaultMediaVideo(seg.video) ? `pre${label}` : `fx${i}`,
-      baseLabel: `bv${i}`
+      outputLabel: needsVideoFx(seg) ? `fx${i}` : `pre${label}`,
+      baseLabel: `bv${i}`,
+      ...alphaInputIndicesFor(input.segments, i)
     })
-    chains.push(...videoChains)
+    chains.push(...video.chains)
     // concat 会把输入自身的起点再累加一次，段链里绝不能再按时间轴平移 PTS：
     // 否则第二段视频/音频会被推到 2× 偏移处（实测两段各 0.5s 成片变 1.5s）。
     // 段间空隙已由 pushGap 补黑场/静音，concat 本身就是按顺序累加时长。
-    parts.push(
-      `[${isDefaultMediaVideo(seg.video) ? `pre${label}` : `fx${i}`}]null[vs${i}]`
-    )
+    parts.push(`[${video.label}]null[vs${i}]`)
     if (seg.hasAudio) {
-      const audioFx = clipAudioFilterChain({ audio: seg.audio, speed: seg.speed, outputDurationSec: outLen })
+      const audioFx = clipAudioFilterChain({
+        audio: seg.audio,
+        speed: seg.speed,
+        outputDurationSec: outLen,
+        ...(input.arnndnModelPath ? { arnndnModelPath: input.arnndnModelPath } : {})
+      })
       chains.push(
         `[${i}:a]atrim=start=${segIn}:end=${segOut},asetpts=PTS-STARTPTS${audioFx.length > 0 ? `,${audioFx}` : ''},` +
           `aresample=async=1:first_pts=0[prea${label}]`
@@ -1239,16 +1760,17 @@ function buildSingleTrackBasis(
     ...parts,
     `${pairLabels}concat=n=${n}:v=1:a=1[vb][ab]`,
     `[vb]setpts=PTS-${start}/TB,fps=${rate}[v0]`,
-    // 透明层平移到 span 起点并按时间窗叠加（与单输入路径同一纪律，计划 C7）
-    `[${input.overlayLabel}:v]setpts=PTS+${start}/TB[ov]`,
-    `[v0][ov]overlay=0:0:alpha=straight:format=auto:eof_action=pass:enable='between(t,${start},${end})',format=yuv420p[${subtitleOut}]`,
+    // M7-E：透明层与媒体基座的合成顺序由 graphicsZ 决定（缺省 aboveMedia，与旧 argv 一致）
+    ...subtitleOverlayChains(input, 'v0'),
     // 水印输入固定是「透明层序号 + 1」（与下面两个 builder 的 `-i` 顺序同一口径）
     ...(input.watermark
       ? buildWatermarkFilterChain({
           label: Number(input.overlayLabel) + 1,
           prevLabel: subtitleOut,
           watermark: input.watermark,
-          output: input.frameSize
+          output: input.frameSize,
+          ...(input.bitDepth ? { bitDepth: input.bitDepth } : {}),
+          ...(input.colorRange ? { colorRange: input.colorRange } : {})
         })
       : [])
   ].join(';')
@@ -1265,7 +1787,6 @@ function buildSingleTrackTransitionBasis(
 ): string {
   const rate = fpsToArg(input.fps)
   const start = formatSec(input.spanStartSec)
-  const end = formatSec(input.spanEndSec)
   const size = `${input.frameSize.width}x${input.frameSize.height}`
   const chains: string[] = []
   const parts: string[] = []
@@ -1313,22 +1834,23 @@ function buildSingleTrackTransitionBasis(
     for (const segment of active) {
       const seg = ctx.segments.get(segment.index)!
       const label = `trv${segment.index}`
-      chains.push(
-        ...singleTrackVideoChains({
-          index: segment.index,
-          seg,
-          // 视频 trim 用扩展手柄；音频仍用核心源区间（见下）
-          sourceInSec: segment.sourceInExtSec,
-          sourceOutSec: segment.sourceOutExtSec,
-          rate,
-          canvasFilter,
-          frameSize: input.frameSize,
-          fps: input.fps,
-          outputLabel: label,
-          baseLabel: `tbv${segment.index}`
-        })
-      )
-      videoLabels.push(label)
+      // M8：遮罩在段链内部、fx 几何之前生效（转场段同样用扩展手柄区间做归一化）
+      const video = singleTrackVideoChains({
+        index: segment.index,
+        seg,
+        // 视频 trim 用扩展手柄；音频仍用核心源区间（见下）
+        sourceInSec: segment.sourceInExtSec,
+        sourceOutSec: segment.sourceOutExtSec,
+        rate,
+        canvasFilter,
+        frameSize: input.frameSize,
+        fps: input.fps,
+        outputLabel: label,
+        baseLabel: `tbv${segment.index}`,
+        ...alphaInputIndicesFor(input.segments, segment.index)
+      })
+      chains.push(...video.chains)
+      videoLabels.push(video.label)
 
       const audioLabel = `tra${segment.index}`
       const audioPartsForSegment = segmentAudioChains({
@@ -1337,7 +1859,8 @@ function buildSingleTrackTransitionBasis(
         sourceInSec: seg.sourceInSec,
         sourceOutSec: seg.sourceOutSec,
         outputLabel: audioLabel,
-        outLen: segment.coreDurationSec
+        outLen: segment.coreDurationSec,
+        ...(input.arnndnModelPath ? { arnndnModelPath: input.arnndnModelPath } : {})
       })
       chains.push(...audioPartsForSegment)
       // 音频按核心区间顺序 concat（空隙已由 pushGap 补静音），
@@ -1389,14 +1912,16 @@ function buildSingleTrackTransitionBasis(
     videoConcat,
     audioConcat,
     `[vb]setpts=PTS-${start}/TB,fps=${rate}[v0]`,
-    `[${input.overlayLabel}:v]setpts=PTS+${start}/TB[ov]`,
-    `[v0][ov]overlay=0:0:alpha=straight:format=auto:eof_action=pass:enable='between(t,${start},${end})',format=yuv420p[${subtitleOut}]`,
+    // M7-E：透明层与媒体基座的合成顺序由 graphicsZ 决定（缺省 aboveMedia）
+    ...subtitleOverlayChains(input, 'v0'),
     ...(input.watermark
       ? buildWatermarkFilterChain({
           label: Number(input.overlayLabel) + 1,
           prevLabel: subtitleOut,
           watermark: input.watermark,
-          output: input.frameSize
+          output: input.frameSize,
+          ...(input.bitDepth ? { bitDepth: input.bitDepth } : {}),
+          ...(input.colorRange ? { colorRange: input.colorRange } : {})
         })
       : [])
   ].join(';')
@@ -1405,6 +1930,9 @@ function buildSingleTrackTransitionBasis(
 /**
  * 多轨每段图层链（旧路径与转场路径共用）：
  * trim → fps → stab → speed → 透明归一（rgba + pad black@0.0）→ fx → 链尾 rgba。
+ *
+ * M8：有遮罩时在「归一化之后、fx 几何变换之前」做 alpha 相乘（保留 RGBA：隐藏区透出下层），
+ * 与预览把 mask 挂在媒体元素上（transform 之前）同一口径。
  */
 function multiTrackVideoChains(input: {
   seg: ConcatSegment
@@ -1419,6 +1947,10 @@ function multiTrackVideoChains(input: {
   plainLabel: string
   baseLabel: string
   fxLabel: string
+  /** M8：遮罩输入路序号（undefined = 无遮罩 → 旧图层链逐字节不变） */
+  maskInputIndex?: number
+  /** M8-P0：外部 matte 输入路序号（undefined = 无 matte） */
+  matteInputIndex?: number
 }): { chains: string[]; label: string } {
   const stabChain = segmentWantsStab(input.seg)
     ? `,${stabTransformFilter(input.seg.stab!, input.seg.stabFile!)}`
@@ -1432,30 +1964,47 @@ function multiTrackVideoChains(input: {
   // 默认路径（含画布）保持旧链；有画布时先转 rgba 再做归一（pad 的 black@0.0 需要 alpha）。
   const normalizeChain = input.canvasFilter ? `format=rgba,${input.canvasFilter}` : legacyNormalize
   const prefix = segmentTrimFpsPrefix(input.sourceInSec, input.sourceOutSec, input.rate)
-  if (isDefaultMediaVideo(input.seg.video)) {
-    return {
-      chains: [`[${input.index}:v]${prefix}${stabChain}${speedPart},${normalizeChain}[${input.plainLabel}]`],
-      label: input.plainLabel
-    }
-  }
+  const needsFx = needsVideoFx(input.seg)
+  const normalizeLabel = needsFx ? input.baseLabel : input.plainLabel
+  const normalizeStatement = `[${input.index}:v]${prefix}${stabChain}${speedPart},${normalizeChain}[${normalizeLabel}]`
   const durationSec = Math.max(
     0,
     (input.sourceOutSec - input.sourceInSec) / speedValueOf(input.seg.speed)
   )
+  // M8/M8-P0：透明图层只做 alpha 相乘、不合黑底（隐藏区 alpha=0 透出下层轨道）
+  const masked = maskedAlphaForSegment({
+    index: input.index,
+    seg: input.seg,
+    sourceLabel: normalizeLabel,
+    ...(input.maskInputIndex !== undefined ? { maskInputIndex: input.maskInputIndex } : {}),
+    ...(input.matteInputIndex !== undefined ? { matteInputIndex: input.matteInputIndex } : {}),
+    maskIdPrefix: 'm',
+    sourceInSec: input.sourceInSec,
+    sourceOutSec: input.sourceOutSec,
+    frameSize: input.frameSize,
+    fps: input.fps,
+    durationSec,
+    opaqueBackground: false
+  })
+  if (!needsFx) {
+    return {
+      chains: [normalizeStatement, ...masked.statements],
+      label: masked.label
+    }
+  }
   const fx = buildMediaClipVideoFx({
-    baseLabel: input.baseLabel,
+    baseLabel: masked.label,
     outputLabel: input.fxLabel,
     video: input.seg.video,
+    ...(input.seg.key ? { key: input.seg.key } : {}),
+    ...(input.seg.keyframes ? { keyframes: input.seg.keyframes } : {}),
     frame: input.frameSize,
     fps: input.fps,
     durationSec,
     transparentBackground: true
   })
   return {
-    chains: [
-      `[${input.index}:v]${prefix}${stabChain}${speedPart},${normalizeChain}[${input.baseLabel}]`,
-      ...fx.statements
-    ],
+    chains: [normalizeStatement, ...masked.statements, ...fx.statements],
     label: fx.outputLabel
   }
 }
@@ -1473,8 +2022,6 @@ function multiTrackVideoChains(input: {
  */
 function buildMultiTrackBasis(input: Omit<MediaBasisOverlayInput, 'overlayPath'>): string {
   const rate = fpsToArg(input.fps)
-  const start = formatSec(input.spanStartSec)
-  const end = formatSec(input.spanEndSec)
   const size = `${input.frameSize.width}x${input.frameSize.height}`
   const spanLen = formatSec(Math.max(0.01, input.spanEndSec - input.spanStartSec))
   const chains: string[] = []
@@ -1551,7 +2098,8 @@ function buildMultiTrackBasis(input: Omit<MediaBasisOverlayInput, 'overlayPath'>
               fps: input.fps,
               plainLabel: `tmc${segment.index}`,
               baseLabel: `tbv${segment.index}`,
-              fxLabel: `tfx${segment.index}`
+              fxLabel: `tfx${segment.index}`,
+              ...alphaInputIndicesFor(input.segments, segment.index)
             })
             chains.push(...video.chains)
             runLabels.push(video.label)
@@ -1614,7 +2162,8 @@ function buildMultiTrackBasis(input: Omit<MediaBasisOverlayInput, 'overlayPath'>
         fps: input.fps,
         plainLabel: `mc${layerNo}_${index}`,
         baseLabel: `bv${index}`,
-        fxLabel: `fx${index}`
+        fxLabel: `fx${index}`,
+        ...alphaInputIndicesFor(input.segments, index)
       })
       chains.push(...video.chains)
       layerParts.push(`[${video.label}]`)
@@ -1644,10 +2193,8 @@ function buildMultiTrackBasis(input: Omit<MediaBasisOverlayInput, 'overlayPath'>
     current = out
   })
   parts.push(`[${current}]format=yuv420p[mv]`)
-  parts.push(`[${input.overlayLabel}:v]setpts=PTS+${start}/TB[ov]`)
-  parts.push(
-    `[mv][ov]overlay=0:0:alpha=straight:format=auto:eof_action=pass:enable='between(t,${start},${end})',format=yuv420p[${subtitleOut}]`
-  )
+  // M7-E：多轨基座与透明层的合成顺序由 graphicsZ 决定（缺省 aboveMedia）
+  parts.push(...subtitleOverlayChains(input, 'mv'))
 
   // 多轨原声已由渲染侧压平进 audioClips：这里补一路等长静音，保证 [ab] 永远存在
   chains.push('anullsrc=channel_layout=stereo:sample_rate=48000[masrc]')
@@ -1661,7 +2208,9 @@ function buildMultiTrackBasis(input: Omit<MediaBasisOverlayInput, 'overlayPath'>
           label: Number(input.overlayLabel) + 1,
           prevLabel: subtitleOut,
           watermark: input.watermark,
-          output: input.frameSize
+          output: input.frameSize,
+          ...(input.bitDepth ? { bitDepth: input.bitDepth } : {}),
+          ...(input.colorRange ? { colorRange: input.colorRange } : {})
         })
       : [])
   ].join(';')
@@ -1689,12 +2238,33 @@ export function buildMediaBasisFilterComplex(
   return buildSingleTrackBasis(input)
 }
 
+/**
+ * M8/M8-P0：按段顺序追加遮罩与外部 matte 输入。
+ *
+ * 输入顺序必须是「各段媒体 → 各段 mask → 各段 matte → 透明层/帧流 → 水印 → 音频」：
+ * 下游用 `maskInputIndexFor` / `matteInputIndexFor` 与
+ * `overlayLabel = segments.length + maskCount + matteCount` 同一口径编号。
+ * 无任何 maskPath/mattePath 时不追加任何参数（argv 与旧版逐字节一致）。
+ */
+function pushMaskInputs(args: string[], segments: readonly ConcatSegment[], fps: Fps): void {
+  for (const seg of segments) {
+    const maskPath = seg.maskPath
+    if (!segmentWantsMask(seg) || maskPath === undefined) continue
+    args.push(...buildMaskInputArgs(maskPath, fps))
+  }
+  // M8-P0：外部 matte 紧跟在全部 mask 输入之后（顺序与编号函数一致）
+  for (const seg of segments) {
+    if (!segmentWantsMatte(seg)) continue
+    args.push(...buildMatteInputArgs(seg, fps))
+  }
+}
+
 /** 多输入叠加（两阶段法）：N 路媒体 + 循环透明 MOV 帧序列，trim+concat 基座后叠加。 */
 export function buildOverlayMp4MultiInput(
   input: MediaBasisOverlayInput,
   encoder?: string | null
 ): string[] {
-  const audioArgs = overlayAudioArgs(input.audioMode, input.mastering)
+  const audioArgs = overlayAudioArgs(input.audioMode, input.mastering, input.audioBitrateKbps)
   // v10：转场图像需要把 `-loop` 撑到扩展后的源出点（静态内容可无限延长）
   const transitionPlans = input.segments.some((seg) => seg.transitionIn !== undefined)
     ? transitionSegmentPlansByTrack({
@@ -1718,6 +2288,8 @@ export function buildOverlayMp4MultiInput(
     }
     args.push('-i', seg.refVideoPath)
   })
+  // M8：遮罩 PNG 紧跟在各段媒体输入之后、透明 MOV 之前
+  pushMaskInputs(args, input.segments, input.fps)
   // 透明 MOV 这一路只能给 `-t`：`-loop` 与 `-framerate` 都是 image2 解封装器的选项，
   // mov 解封装器不认识（本机 FFmpeg 8.1.1 实证：`Option loop not found.` + 打不开输入而直接退出）。
   // 这里也不需要循环：基座已按 span 补黑补齐，透明层的帧数本就覆盖整段，
@@ -1736,7 +2308,8 @@ export function buildOverlayMp4MultiInput(
     spanStartSec: input.spanStartSec,
     spanEndSec: input.spanEndSec,
     baseLabel: '[ab]',
-    mastering: input.mastering
+    mastering: input.mastering,
+    ...(input.arnndnModelPath ? { arnndnModelPath: input.arnndnModelPath } : {})
   })
   if (audioPlan) args.push(...audioPlan.inputArgs)
   const basisFilter = buildMediaBasisFilterComplex(input)
@@ -1752,10 +2325,10 @@ export function buildOverlayMp4MultiInput(
     '[v]',
     '-map',
     audioPlan ? `[${audioPlan.label}]` : mastering ? '[aout]' : '[ab]',
-    ...videoEncodeArgs({ encoder: encoder ?? null, quality: exportQualityCrf(input.quality), preset: 'medium' }),
+    ...overlayEncodeArgs(input, encoder ?? null),
     '-fps_mode',
     input.fpsMode,
-    ...BT709_TAGS,
+    ...overlayColorArgs(input),
     ...audioArgs,
     '-movflags',
     '+faststart',
@@ -1769,7 +2342,7 @@ export function buildOverlayMp4MultiInputDirectPipe(
   input: Omit<MediaBasisOverlayInput, 'overlayPath'> & { frameFormat: 'raw' | 'png' },
   encoder?: string | null
 ): string[] {
-  const audioArgs = overlayAudioArgs(input.audioMode, input.mastering)
+  const audioArgs = overlayAudioArgs(input.audioMode, input.mastering, input.audioBitrateKbps)
   const frameInput =
     input.frameFormat === 'raw'
       ? rawPipeInputArgs(input.fps, input.frameSize.width, input.frameSize.height)
@@ -1794,6 +2367,8 @@ export function buildOverlayMp4MultiInputDirectPipe(
     }
     args.push('-i', seg.refVideoPath)
   })
+  // M8：遮罩 PNG 紧跟在各段媒体输入之后、stdin 帧流之前
+  pushMaskInputs(args, input.segments, input.fps)
   args.push(...frameInput)
   if (input.watermark) args.push(...buildWatermarkInputArgs(input.watermark, input.fps))
   const audioPlan = buildAudioMixPlan({
@@ -1802,7 +2377,8 @@ export function buildOverlayMp4MultiInputDirectPipe(
     spanStartSec: input.spanStartSec,
     spanEndSec: input.spanEndSec,
     baseLabel: '[ab]',
-    mastering: input.mastering
+    mastering: input.mastering,
+    ...(input.arnndnModelPath ? { arnndnModelPath: input.arnndnModelPath } : {})
   })
   if (audioPlan) args.push(...audioPlan.inputArgs)
   const basisFilter = buildMediaBasisFilterComplex(input)
@@ -1818,10 +2394,10 @@ export function buildOverlayMp4MultiInputDirectPipe(
     '[v]',
     '-map',
     audioPlan ? `[${audioPlan.label}]` : mastering ? '[aout]' : '[ab]',
-    ...videoEncodeArgs({ encoder: encoder ?? null, quality: exportQualityCrf(input.quality), preset: 'medium' }),
+    ...overlayEncodeArgs(input, encoder ?? null),
     '-fps_mode',
     input.fpsMode,
-    ...BT709_TAGS,
+    ...overlayColorArgs(input),
     ...audioArgs,
     '-movflags',
     '+faststart',
@@ -1860,39 +2436,9 @@ export function buildTransparentMovQtrle(
   ]
 }
 
-/** PNG 序列 → qtrle MOV（兼容模式的落盘路径）。 */
-export function buildTransparentMovQtrleFromSeq(
-  fps: Fps,
-  framePattern: string,
-  outputPath: string,
-  startNumber = 0,
-  audio?: TransparentAudioOptions
-): string[] {
-  return [
-    ...common({}),
-    '-framerate',
-    fpsToArg(fps),
-    '-start_number',
-    String(startNumber),
-    '-i',
-    framePattern,
-    '-c:v',
-    'qtrle',
-    '-pix_fmt',
-    'argb',
-    ...BT709_TAGS,
-    '-color_range',
-    'pc',
-    ...(buildTransparentAudioArgs(audio) ?? ['-an']),
-    '-f',
-    'mov',
-    outputPath
-  ]
-}
-
 export interface OverlayInput {
   refVideoPath: string
-  /** 透明 MOV（两阶段法）；directPipe 时忽略 */
+  /** 透明 MOV 路径（仅两阶段合成 builder 使用） */
   overlayPath: string
   outputPath: string
   /** 参考视频帧率（叠加必须跟随参考视频，规格 §2.3） */
@@ -1905,10 +2451,26 @@ export interface OverlayInput {
   spanEndSec: number
   audioMode: 'copy' | 'aac'
   fpsMode: 'cfr' | 'vfr'
+  /** M7-E：图形层 z 档；缺省 aboveMedia（旧 argv 逐字节不变） */
+  graphicsZ?: GraphicsZ
   /** 水印（可选）：固定在输入序号 2（参考视频 0 / 透明层或管道 1 之后） */
   watermark?: WatermarkInput
   /** v10：画质档；缺省 = high（CRF 18，与现有默认一致） */
   quality?: ExportQuality
+  /** 视频编码格式；缺省 = AVC/H.264；M9 增加 AV1 */
+  videoCodec?: VideoCodec
+  /** 视频码率（kbps）；有值时走码率模式 */
+  videoBitrateKbps?: number
+  /** 音频码率（kbps）；有值时 AAC 分支使用该码率 */
+  audioBitrateKbps?: number
+  /** M9：CRF 直给（0–51）；缺省按画质档 */
+  crf?: number
+  /** M9：软件编码 preset（x264/x265 名称；AV1 映射到 SVT-AV1 档位） */
+  encoderPreset?: string
+  /** M9：输出位深（10 走 yuv420p10le） */
+  bitDepth?: 8 | 10
+  /** M9：色彩范围标签（full → -color_range pc） */
+  colorRange?: 'limited' | 'full'
   /** v10：成片响度标准化（off/缺省 = 不注入 loudnorm，argv 与旧版一致） */
   mastering?: AudioMastering
 }
@@ -1917,25 +2479,78 @@ export interface OverlayInput {
 const FALLBACK_OUTPUT: Resolution = { width: 1920, height: 1080 }
 
 /** overlay 滤镜链尾必须落到 8-bit 4:2:0（计划 C3：format=auto 会给出 10-bit 4:4:4）。 */
+/**
+ * M7-E：透明帧层（字幕条 + 文本元素）与媒体基座的合成顺序。
+ *
+ * - `aboveMedia`（缺省）：媒体基座在下、透明帧按时间窗叠在上 —— 与旧 argv 逐字节一致；
+ * - `belowMedia`：透明帧作为基座，媒体基座整体叠在它上面（媒体不透明处会盖住字幕/文本，
+ *   形成"图形层垫底"的层级），媒体结束处由 `eof_action=pass` 露出字幕层。
+ */
+function subtitleOverlayChains(
+  input: {
+    overlayLabel?: string
+    spanStartSec: number
+    spanEndSec: number
+    fps: Fps
+    watermark?: WatermarkInput
+    graphicsZ?: GraphicsZ
+    /** M9-B：链尾目标像素格式/范围（缺省 = 旧版 yuv420p，逐字节一致） */
+    bitDepth?: 8 | 10
+    colorRange?: 'limited' | 'full'
+  },
+  baseLabel: string
+): string[] {
+  const rate = fpsToArg(input.fps)
+  const start = formatSec(input.spanStartSec)
+  const end = formatSec(input.spanEndSec)
+  const overlayLabel = input.overlayLabel ?? '1'
+  const subtitleOut = input.watermark ? 'vsub' : 'v'
+  const tail = outputTailFilters(input)
+  if (input.graphicsZ === 'belowMedia') {
+    return [
+      `[${overlayLabel}:v]fps=${rate},setsar=1[obase]`,
+      `[obase][${baseLabel}]overlay=0:0:alpha=straight:format=auto:eof_action=pass,${tail}[${subtitleOut}]`
+    ]
+  }
+  return [
+    `[${overlayLabel}:v]setpts=PTS+${start}/TB[ov]`,
+    `[${baseLabel}][ov]overlay=0:0:alpha=straight:format=auto:eof_action=pass:enable='between(t,${start},${end})',${tail}[${subtitleOut}]`
+  ]
+}
 export function buildFilterComplex(
   spanStartSec: number,
   spanEndSec: number,
   fps: Fps,
   watermark?: WatermarkInput,
-  output: Resolution = FALLBACK_OUTPUT
+  output: Resolution = FALLBACK_OUTPUT,
+  graphicsZ?: GraphicsZ,
+  /** M9-B：链尾目标像素格式/范围（缺省 = 旧版 yuv420p，逐字节一致） */
+  color?: { bitDepth?: 8 | 10; colorRange?: 'limited' | 'full' }
 ): string {
   const rate = fpsToArg(fps)
-  const start = formatSec(spanStartSec)
-  const end = formatSec(spanEndSec)
-  // 有水印时字幕层改标 [vsub]，水印叠为最后的 [v]（与多输入路径同一命名纪律）
   const subtitleOut = watermark ? 'vsub' : 'v'
   return [
     `[0:v]fps=${rate},setsar=1[v0]`,
-    `[1:v]setpts=PTS+${start}/TB[ov]`,
-    // alpha=straight（计划 C2）+ format=auto + 链尾 format=yuv420p（计划 C3）
-    `[v0][ov]overlay=0:0:alpha=straight:format=auto:eof_action=pass:enable='between(t,${start},${end})',format=yuv420p[${subtitleOut}]`,
+    // M7-E：图形层 z 档（缺省 aboveMedia = 与旧版逐字节一致）
+    ...subtitleOverlayChains(
+      {
+        spanStartSec,
+        spanEndSec,
+        fps,
+        ...(watermark ? { watermark } : {}),
+        ...(graphicsZ ? { graphicsZ } : {}),
+        ...(color ?? {})
+      },
+      'v0'
+    ),
     ...(watermark
-      ? buildWatermarkFilterChain({ label: 2, prevLabel: subtitleOut, watermark, output })
+      ? buildWatermarkFilterChain({
+          label: 2,
+          prevLabel: subtitleOut,
+          watermark,
+          output,
+          ...(color ?? {})
+        })
       : [])
   ].join(';')
 }
@@ -1947,15 +2562,20 @@ function audioMasteringArgs(mastering: AudioMastering | undefined): string[] {
 }
 
 /** 输出音频编码参数：开启 loudnorm 时不能 `-c:a copy`（滤镜作用不到复制流）。 */
-function overlayAudioArgs(mode: 'copy' | 'aac', mastering: AudioMastering | undefined): string[] {
+function overlayAudioArgs(
+  mode: 'copy' | 'aac',
+  mastering: AudioMastering | undefined,
+  audioBitrateKbps?: number
+): string[] {
+  const bitrate = `${audioBitrateKbps ?? 192}k`
   const filter = loudnormFilter(mastering)
-  if (filter) return ['-c:a', 'aac', '-b:a', '192k']
-  return mode === 'copy' ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']
+  if (filter) return ['-c:a', 'aac', '-b:a', bitrate]
+  return mode === 'copy' ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', bitrate]
 }
 
 /** 叠加合成（两阶段：参考视频 + 临时透明 MOV）。 */
 export function buildOverlayMp4(input: OverlayInput, encoder?: string | null): string[] {
-  const audioArgs = overlayAudioArgs(input.audioMode, input.mastering)
+  const audioArgs = overlayAudioArgs(input.audioMode, input.mastering, input.audioBitrateKbps)
   return [
     ...common({}),
     '-i',
@@ -1969,17 +2589,19 @@ export function buildOverlayMp4(input: OverlayInput, encoder?: string | null): s
       input.spanEndSec,
       input.fps,
       input.watermark,
-      input.frameSize ?? FALLBACK_OUTPUT
+      input.frameSize ?? FALLBACK_OUTPUT,
+      input.graphicsZ,
+      { bitDepth: input.bitDepth, colorRange: input.colorRange }
     ),
     '-map',
     '[v]',
     '-map',
     '0:a?',
     ...audioMasteringArgs(input.mastering),
-    ...videoEncodeArgs({ encoder: encoder ?? null, quality: exportQualityCrf(input.quality), preset: 'medium' }),
+    ...overlayEncodeArgs(input, encoder ?? null),
     '-fps_mode',
     input.fpsMode,
-    ...BT709_TAGS,
+    ...overlayColorArgs(input),
     ...audioArgs,
     '-movflags',
     '+faststart',
@@ -1992,7 +2614,7 @@ export function buildOverlayMp4DirectPipe(
   input: Omit<OverlayInput, 'overlayPath'>,
   encoder?: string | null
 ): string[] {
-  const audioArgs = overlayAudioArgs(input.audioMode, input.mastering)
+  const audioArgs = overlayAudioArgs(input.audioMode, input.mastering, input.audioBitrateKbps)
   const frameInput =
     (input.frameFormat ?? 'raw') === 'raw'
       ? rawPipeInputArgs(input.fps, input.frameSize?.width ?? 1920, input.frameSize?.height ?? 1080)
@@ -2010,17 +2632,19 @@ export function buildOverlayMp4DirectPipe(
       input.spanEndSec,
       input.fps,
       input.watermark,
-      input.frameSize ?? FALLBACK_OUTPUT
+      input.frameSize ?? FALLBACK_OUTPUT,
+      input.graphicsZ,
+      { bitDepth: input.bitDepth, colorRange: input.colorRange }
     ),
     '-map',
     '[v]',
     '-map',
     '0:a?',
     ...audioMasteringArgs(input.mastering),
-    ...videoEncodeArgs({ encoder: encoder ?? null, quality: exportQualityCrf(input.quality), preset: 'medium' }),
+    ...overlayEncodeArgs(input, encoder ?? null),
     '-fps_mode',
     input.fpsMode,
-    ...BT709_TAGS,
+    ...overlayColorArgs(input),
     ...audioArgs,
     '-movflags',
     '+faststart',

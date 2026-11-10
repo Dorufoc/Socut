@@ -54,6 +54,12 @@ export const CHANNELS = {
   mediaThumbUrl: 'media:thumbUrl',
   /** v2：素材移出池时回收 userData/thumbs 里的 jpg */
   mediaThumbRemove: 'media:thumbRemove',
+  /** M8-P0：外部 matte 导入（选一个图片或视频 matte 文件，返回绝对路径 + 类型） */
+  mediaPickMatte: 'media:pickMatte',
+  /** M8-P1：AI 人像抠像状态（onnxruntime-node 可选加载 + Selfie 模型资产） */
+  aiMatteStatus: 'ai:matteStatus',
+  /** M8-P1：生成 AI matte（后台 job，jobId 前缀 matte-；进度/结果走 export job 事件） */
+  aiMatteGenerate: 'ai:matteGenerate',
   /** v5：主进程均匀抽帧并拼成时间帧预览条（Thumbnail Strip）长图 */
   mediaGenerateStrip: 'media:generateStrip',
   /** v9：主进程把片段源区间解成单声道 PCM，折成频谱条的等分桶峰值 */
@@ -64,11 +70,31 @@ export const CHANNELS = {
   mediaProxyStatus: 'media:proxyStatus',
   /** v10：素材移出池时回收它的全部代理版本 */
   mediaProxyRemove: 'media:proxyRemove',
+  /** M5：冻结帧抽帧（源视频某一时刻 → 全分辨率 PNG，返回绝对路径给渲染侧建 image 素材） */
+  mediaExtractFrame: 'media:extractFrame',
   videoCfrConvert: 'video:cfrConvert',
   /** v8.1：防抖预览预处理：主进程后台生成稳定化代理文件（进度经 job 事件流，jobId 前缀 stab-） */
   videoStabPreview: 'video:stabPreview',
   /** v8.1：片段删除/关闭防抖时回收它的代理 mp4 与 .trf 运动数据 */
   videoStabPreviewRemove: 'video:stabPreviewRemove',
+
+  /** M11：渲染侧「自动字幕」——whisper.cpp 转写（长任务，进度走 caption:progress） */
+  captionTranscribe: 'caption:transcribe',
+  /** 主进程 → 渲染侧：转写进度（payload: requestId + percent + stage） */
+  captionProgress: 'caption:progress',
+  /** 渲染侧 → 主进程：按 requestId 取消在跑的转写（kill 子进程） */
+  captionCancel: 'caption:cancel',
+
+  /** M11：设置页「语音资产」——whisper 状态（二进制/模型/语言）与 RNNoise 模型状态 */
+  whisperStatus: 'whisper:status',
+  /** M11：保存 whisper 配置（二进制/模型/语言/线程；null = 清除该项） */
+  whisperSaveConfig: 'whisper:config',
+  /** M11：弹文件选择框挑 whisper 二进制（返回路径，不落配置） */
+  whisperPickBinary: 'whisper:pickBinary',
+  /** M11：弹文件选择框挑 ggml 模型（返回路径，不落配置） */
+  whisperPickModel: 'whisper:pickModel',
+  /** M11：清除 whisper 配置（相当于"忘记已选资产"，回到候选探测） */
+  whisperReset: 'whisper:reset',
 
   exportEstimate: 'export:estimate',
   exportStart: 'export:start',

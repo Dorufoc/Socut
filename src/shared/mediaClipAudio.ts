@@ -1,4 +1,5 @@
 import { denoiseFilter } from './audioQuality'
+import { isVoiceChangeKind, isVoiceEnhanceLevel, voiceChangeFilters, voiceEnhanceFilters } from './audioFx'
 import type { AudioDenoiseLevel, ClipAudio, ClipSpeed } from './types'
 
 /**
@@ -68,7 +69,7 @@ function rate(value: number): string {
 }
 
 function isDenoiseLevel(value: unknown): value is AudioDenoiseLevel {
-  return value === 'light' || value === 'standard' || value === 'strong'
+  return value === 'light' || value === 'standard' || value === 'strong' || value === 'ai'
 }
 
 /** 任意 JSON → 合法音频参数；**全部默认时返回 undefined**（调用方据此整键删除）。 */
@@ -76,12 +77,16 @@ export function normalizeClipAudio(raw: unknown): ClipAudio | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const record = raw as Record<string, unknown>
   const denoise = isDenoiseLevel(record['denoise']) ? record['denoise'] : undefined
+  const voiceEnhance = isVoiceEnhanceLevel(record['voiceEnhance']) ? record['voiceEnhance'] : undefined
+  const voiceChange = isVoiceChangeKind(record['voiceChange']) ? record['voiceChange'] : undefined
   const next: ClipAudio = {
     volumePercent: round2(clamp(num(record['volumePercent'], 100), CLIP_AUDIO_RANGE.volume.min, CLIP_AUDIO_RANGE.volume.max)),
     fadeInSec: round2(clamp(num(record['fadeInSec'], 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max)),
     fadeOutSec: round2(clamp(num(record['fadeOutSec'], 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max)),
-    // v10：降噪只在非关闭档位落盘；缺省不写进工程
-    ...(denoise ? { denoise } : {})
+    // v10/M8：三类"特效"只在非关闭档位落盘；缺省不写进工程
+    ...(denoise ? { denoise } : {}),
+    ...(voiceEnhance ? { voiceEnhance } : {}),
+    ...(voiceChange ? { voiceChange } : {})
   }
   return isDefaultClipAudio(next) ? undefined : next
 }
@@ -103,8 +108,10 @@ export function isDefaultClipAudio(audio: ClipAudio | undefined): boolean {
     Math.abs(audio.volumePercent - 100) < 1e-6 &&
     Math.abs(audio.fadeInSec) < 1e-6 &&
     Math.abs(audio.fadeOutSec) < 1e-6 &&
-    // v10：降噪非默认时整键必须落盘
-    audio.denoise === undefined
+    // v10/M8：降噪/人声增强/变声非默认时整键必须落盘
+    audio.denoise === undefined &&
+    audio.voiceEnhance === undefined &&
+    audio.voiceChange === undefined
   )
 }
 
@@ -120,7 +127,9 @@ export function clipAudioOf(audio: ClipAudio | undefined): ClipAudio {
     volumePercent: round2(clamp(num(audio.volumePercent, 100), CLIP_AUDIO_RANGE.volume.min, CLIP_AUDIO_RANGE.volume.max)),
     fadeInSec: round2(clamp(num(audio.fadeInSec, 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max)),
     fadeOutSec: round2(clamp(num(audio.fadeOutSec, 0), CLIP_AUDIO_RANGE.fade.min, CLIP_AUDIO_RANGE.fade.max)),
-    ...(isDenoiseLevel(audio.denoise) ? { denoise: audio.denoise } : {})
+    ...(isDenoiseLevel(audio.denoise) ? { denoise: audio.denoise } : {}),
+    ...(isVoiceEnhanceLevel(audio.voiceEnhance) ? { voiceEnhance: audio.voiceEnhance } : {}),
+    ...(isVoiceChangeKind(audio.voiceChange) ? { voiceChange: audio.voiceChange } : {})
   }
 }
 
@@ -256,10 +265,18 @@ export function clipAudioFilterChain(input: {
   audio?: ClipAudio
   speed?: ClipSpeed
   outputDurationSec: number
+  /** M8：`denoise = 'ai'` 用的 RNNoise 模型绝对路径（main 侧解析后下传） */
+  arnndnModelPath?: string
 }): string {
-  const denoise = denoiseFilter(input.audio?.denoise)
+  const denoise = denoiseFilter(input.audio?.denoise, {
+    ...(input.arnndnModelPath ? { arnndnModelPath: input.arnndnModelPath } : {})
+  })
   const parts = [
     ...(denoise ? [denoise] : []),
+    // M8：人声增强 → 变声（都在变速之前：增强面对的是源采样率/原时长；
+    // rubberband 保证变声不改变时长，所以后续 atempo/volume/afade 的口径不变）
+    ...voiceEnhanceFilters(input.audio?.voiceEnhance),
+    ...voiceChangeFilters(input.audio?.voiceChange),
     ...tempoFilters(input.speed),
     ...(() => {
       const volume = volumeFilter(input.audio)

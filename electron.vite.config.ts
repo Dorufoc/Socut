@@ -58,7 +58,12 @@ export default defineConfig(({ command }) => {
       plugins: [externalizeDepsPlugin()],
       resolve: { alias },
       build: {
-        sourcemap: devMaps ? 'inline' : false
+        sourcemap: devMaps ? 'inline' : false,
+        // M8-P1：onnxruntime-node 是原生模块（.node + DLL），Vite 不能 bundle，
+        // 必须外置并在 electron-builder 里按 node_modules 路径放进安装包（见 electron-builder.yml）。
+        rollupOptions: {
+          external: ['onnxruntime-node', 'onnxruntime-common']
+        }
       }
     },
     preload: {

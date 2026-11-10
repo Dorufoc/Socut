@@ -1,8 +1,9 @@
 import { create } from 'zustand'
-import { DEFAULT_FPS, DEFAULT_RESOLUTION, MAX_TRACK_SEC, MEDIA_BIN_MAX_COUNT, MEDIA_BIN_NAME_MAX_LENGTH, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
-import { applyClipStyleToAll, createClip, createId, duplicateClip, normalizeMediaTags, normalizeProject, normalizeTransition, splitSubtitleClipAt } from '@shared/projectSchema'
+import { DEFAULT_FPS, DEFAULT_RESOLUTION, DEFAULT_SEQUENCE_ID, FREEZE_FRAME_DEFAULT_SEC, MAX_TRACK_SEC, MEDIA_BIN_MAX_COUNT, MEDIA_BIN_NAME_MAX_LENGTH, MIN_CLIP_DURATION_SEC, MIN_MEDIA_CLIP_SEC } from '@shared/constants'
+import { applyClipStyleToAll, createClip, createId, createTextElementClip, duplicateClip, normalizeMediaClipMask, normalizeMediaTags, normalizeProject, normalizeTextElementClip, normalizeTransition, splitSubtitleClipAt } from '@shared/projectSchema'
 import { frameIntervalSec, snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
-import { compactMediaClips, splitMediaClipAt } from '@shared/mediaClips'
+import { compactMediaClips, splitMediaClipAt, topActiveMediaClip } from '@shared/mediaClips'
+import { mergeMediaClips, nextMediaClipOnTrack, planFreezeFrame, rippleDeleteMediaClip as applyRippleDelete } from '@shared/timelineOps'
 import { clampMoveToGap, clampTrimEnd, clampTrimStart, firstFreeStart, gapAround, type TimelineSpan } from '@shared/clipCollision'
 import { resolveTargetAt, findSelectedRef, type TargetRef, type TimelineSelection, type TimelineTracks } from '@shared/timelineTargets'
 import { useStabPreviewStore } from './stabPreviewStore'
@@ -15,8 +16,11 @@ import type {
   ClipSpeed,
   FontRecord,
   Fps,
+  GraphicsZ,
+  MediaClipKey,
   MediaBin,
   MediaClip,
+  MediaClipMask,
   MediaClipStab,
   MediaClipTransition,
   MediaClipVideo,
@@ -26,37 +30,51 @@ import type {
   RefVideo,
   StyleOverrides,
   SubtitleClip,
+  TextElementClip,
+  TextElementPresetId,
   WatermarkSettings
 } from '@shared/types'
-import { getPreset } from '@shared/presets'
+import { DEFAULT_PRESET_ID, PRESET_IDS, getPreset } from '@shared/presets'
 import { clipWithPresetDefaults, hasKeys } from '@shared/clipStyle'
 import { defaultMediaVideo, normalizeMediaVideo } from '@shared/mediaClipVideo'
+import { normalizeKeyframeTracks, type KeyframeTrack } from '@shared/keyframes'
+import { normalizeMediaClipKey } from '@shared/keying'
+import { planCaptionClips, type CaptionRow } from '@shared/captionBatch'
 import { defaultMediaStab, normalizeMediaStab } from '@shared/mediaStab'
-import { defaultClipAudio, defaultClipSpeed, normalizeClipAudio, normalizeClipSpeed, speedValueOf } from '@shared/mediaClipAudio'
+import { defaultClipAudio, defaultClipSpeed, normalizeClipAudio, normalizeClipSpeed, sourceTimeAt, speedValueOf } from '@shared/mediaClipAudio'
 import {
   cleanupInvalidTransitions,
   previousMediaClipOnTrack,
   resolveTransitionDuration,
   transitionMediaMetaOf
 } from '@shared/transitions'
+import {
+  addSequence as addSequenceToProject,
+  duplicateSequence as duplicateSequenceInProject,
+  removeSequence as removeSequenceFromProject,
+  renameSequence as renameSequenceInProject,
+  switchSequence as switchSequenceInProject
+} from '@shared/sequence'
 import { IMAGE_STILL_SEC, applyAudioClipSpeed, inferMediaKind, makeAudioClip, moveAudioClip as applyMoveAudioClip, sortAudioClips, splitAudioClipAt, trimAudioClip as applyTrimAudioClip } from '@shared/audioClips'
 import {
   addAudioTrack as appendAudioTrack,
   addMediaTrack as appendMediaTrack,
   isTrackLocked,
+  mediaTrackOrder,
   moveTrack as moveTrackIn,
   removeTrack as removeTrackIn,
   renameTrack as renameTrackIn,
   setTrackHidden as setTrackHiddenIn,
   setTrackLocked as setTrackLockedIn,
   setTrackMuted as setTrackMutedIn,
-  trackById
+  trackById,
+  visibleMediaTracks
 } from '@shared/tracks'
 
 /** 工程状态（规格 §4.6）。所有时间值在写入时已吸附到帧边界，存储仍为秒。 */
 
-/** 右侧检查器当前跟谁：刚点中的是字幕条、媒体段还是音频段（三者可同时处于选中态）。 */
-export type SelectionKind = 'subtitle' | 'media' | 'audio'
+/** 右侧检查器当前跟谁：刚点中的是字幕条、媒体段、音频段、文本元素还是转场（可同时处于选中态）。 */
+export type SelectionKind = 'subtitle' | 'media' | 'audio' | 'text' | 'transition'
 
 export interface ProjectState {
   project: Project
@@ -65,6 +83,13 @@ export interface ProjectState {
   selectedMediaClipId: string | null
   /** v7：音频轨上选中的片段 */
   selectedAudioClipId: string | null
+  /** M7：文本元素选中 id（文本轨固定一条） */
+  selectedTextClipId: string | null
+  /**
+   * v11：时间轴缝隙上选中的转场——记录的是**切点右侧片段**的 id（转场数据也落在它身上）。
+   * 与 `selectedMediaClipId` 相互独立：点转场图标不会改变片段选中，右侧检查器靠 `selectionKind` 分流。
+   */
+  selectedTransitionClipId: string | null
   /** v3：当前选中的轨道 id（时间轴行高亮 / 新片段默认落点）；不持久化 */
   selectedTrackId: string | null
   /** v6：最后一次点选的类型——决定右侧检查器渲染字幕编辑器还是视频编辑器 */
@@ -122,6 +147,83 @@ export interface ProjectState {
   /** 清除本条全部自定义参数，回到当前预设的默认配置（文字与入出点不动） */
   resetClipStyle: (id: string) => void
   setClipTimes: (id: string, startTime: number, endTime: number) => void
+  /**
+   * M6：整份替换字幕条关键帧（undefined = 清空并删键）。
+   * 入参经 `normalizeKeyframeTracks` 归一（未知参数/非法点/过冲曲线都在这里被挡掉）。
+   */
+  setClipKeyframes: (id: string, keyframes: KeyframeTrack[] | undefined) => void
+  /**
+   * M6-E：整份替换媒体段关键帧（undefined = 清空并删键）。
+   * 与字幕条共用 `normalizeKeyframeTracks`，同样"同值不产生撤销步"。
+   */
+  setMediaClipKeyframes: (id: string, keyframes: KeyframeTrack[] | undefined) => void
+  /**
+   * M8：整份替换媒体段手绘遮罩（undefined = 清除遮罩）。
+   * 归一化/去重口径同 `setMediaClipKeyframes`：同值不产生撤销步。
+   */
+  setMediaClipMask: (id: string, mask: MediaClipMask | undefined) => void
+  /** M8-P0：外部 matte（绝对路径 + 类型）；同值不推 revision，空则整键删除 */
+  setMediaClipMatte: (
+    id: string,
+    matte: { path: string; kind: 'image' | 'video' } | undefined
+  ) => void
+
+  // ---------------------------------------------------------------- M11 字幕导入/批量
+  /**
+   * 把外部字幕（SRT/ASS 解析后的 cue）落成字幕条：时间吸附帧边界、标题=文本、副标题留空。
+   * `replace` = 先清空现有字幕条；返回新增条数。
+   */
+  addCaptionsFromCues: (
+    cues: ReadonlyArray<{ startSec: number; endSec: number; text: string }>,
+    options?: { replace?: boolean; presetId?: PresetId }
+  ) => number
+  /**
+   * 批量名单 → 首尾相接的字幕条（CSV/JSON/纯文本解析后的行）；返回新增条数。
+   * 入点缺省 = 现有字幕末尾（接在最后一条后面）。
+   */
+  addCaptionBatch: (
+    rows: ReadonlyArray<{ title: string; subtitle: string; durationSec?: number }>,
+    options?: { startSec?: number; defaultDurationSec?: number; gapSec?: number; presetId?: PresetId }
+  ) => number
+
+  /**
+   * M11-I：字幕列表多选的批量编辑。
+   *
+   * 五个入口共享同一条口径：**一次批量动作只推一次 revision**（= 项目级历史里的一步撤销），
+   * 而且没有任何条目真的变化时不推 revision；`ids` 里不存在的条目直接忽略。
+   * 返回实际改写的条数（0 = 什么都没动）。
+   */
+  /** 批量应用包装预设：与单条切预设同义（重置自定义、字体与动画节奏；文字与入出点不动）。 */
+  applyPresetToClips: (ids: readonly string[], presetId: PresetId) => number
+  /**
+   * 批量统一时长：每条从自己的入点起顺延到「入点 + durationSec」，帧吸附、不小于最短时长；
+   * 撞到右侧邻居就贴住（夹完不足最短时长的条目保持原样，不制造非法区间）。
+   */
+  setClipsDuration: (ids: readonly string[], durationSec: number) => number
+  /** 批量删除字幕条（未知 id 忽略；删掉当前选中条目时把选中态挪到剩余第一条）。 */
+  removeClips: (ids: readonly string[]) => number
+  /** 批量开关「强制竖屏紧凑分支」（对应单条检查器里的 compact 开关；关掉即删键）。 */
+  setClipsCompact: (ids: readonly string[], compact: boolean) => number
+  /** 批量开关标题渐变（主/副标题各一条；开启沿用各条已有颜色，缺省用统一双色）。 */
+  setClipsGradientEnabled: (ids: readonly string[], enabled: boolean) => number
+
+  // ---------------------------------------------------------------- M7 文本元素
+  /** 新建文本元素（缺省放在 `at`，示例文案取预设；选中并切到文本检查器）。 */
+  addTextClip: (input?: {
+    at?: number
+    durationSec?: number
+    presetId?: TextElementPresetId
+    text?: string
+  }) => TextElementClip | null
+  /** 增量更新（text/presetId/styleOverrides/动画/入出点/关键帧）；整份候选过归一后再写。 */
+  updateTextClip: (
+    id: string,
+    patch: Partial<
+      Pick<TextElementClip, 'text' | 'presetId' | 'styleOverrides' | 'startTime' | 'endTime' | 'animation' | 'keyframes'>
+    >
+  ) => void
+  removeTextClip: (id: string) => void
+  selectTextClip: (id: string | null) => void
 
   // ---------------------------------------------------------------- v2 素材池
   /** 导入一枚素材（已探测 + 已门禁确认）；同路径已存在时复用旧条目，返回 mediaId。 */
@@ -176,6 +278,37 @@ export interface ProjectState {
   /** 删除一段（不动素材池；素材库卡片仍在）。 */
   removeMediaClip: (id: string) => void
   /**
+   * M5 波纹删除：删除该段并把它后面的**同轨**片段整体左移被删时长（合上空隙）。
+   * 返回是否真的处理了（片段不存在 / 轨道锁定 → false）。
+   */
+  rippleDeleteMediaClip: (id: string) => boolean
+  /**
+   * M5 合并：把该段与同轨紧邻的下一段并成一段（要求同素材、源连续、参数一致）。
+   * 返回是否合并成功；失败时 UI/CLI 用 `canMergeMediaClips` 拿具体原因。
+   */
+  mergeMediaClipWithNext: (id: string) => boolean
+  /**
+   * M5 冻结帧：把 `atSec`（默认播放头）所在片段的那一帧抽成静态 PNG 素材，
+   * 切点处插入一段冻结片段，并把后续同轨片段右移。
+   * 源不在 / FFmpeg 不可用 / 轨道锁定 / 切点不可用时返回 null（不抛错）。
+   */
+  freezeFrameAt: (
+    atSec?: number,
+    options?: { clipId?: string; durationSec?: number }
+  ) => Promise<string | null>
+
+  // ---------------------------------------------------------------- v4 多序列
+  /** 新建一条空序列（不切换）；达到上限返回 null。 */
+  addSequence: (name?: string) => string | null
+  /** 删除序列；只剩一条或不存在时返回 false。删活动序列会先切到第一条非活动序列。 */
+  removeSequence: (id: string) => boolean
+  /** 重命名序列；空名/不存在返回 false。 */
+  renameSequence: (id: string, name: string) => boolean
+  /** 切换当前编辑的序列（会重置选中态）；不存在或已是当前时返回 false。 */
+  selectSequence: (id: string) => boolean
+  /** 复制序列（缺省复制活动序列），副本留在非活动序列里；返回新序列 id。 */
+  duplicateSequence: (id?: string, name?: string) => string | null
+  /**
    * 拆「当前该操作的那一段」（P3）：选中优先（字幕条 / 媒体段 / 音频段三类都算），
    * 未选中时拆播放头处媒体轨的最下一层。返回右半段 id；
    * 没有目标段、切点不在段内或任一半不足最短时长时返回 null，由 UI 提示。
@@ -202,9 +335,15 @@ export interface ProjectState {
   // ---------------------------------------------------------------- v10 转场
   /**
    * 设置 / 移除本段的入场转场（落在切点右侧片段上）。
-   * 类型/时长走 schema 归一与手柄解析；首段、空隙、手柄不足时不写入无效数据。
+   * 类型/时长走 schema 归一与手柄解析；首段、空隙、手柄不足、轨道锁定时不写入无效数据。
+   * 返回是否写入了有效转场（拖拽落点反馈用；重复设置同一转场也算成功）。
    */
-  setMediaClipTransition: (id: string, transition: MediaClipTransition | null) => void
+  setMediaClipTransition: (id: string, transition: MediaClipTransition | null) => boolean
+  /**
+   * v11：选中切点上的转场（id = 切点右侧片段）。数据不存在时忽略。
+   * 选中后右侧检查器切到转场面板，Delete/退格键优先删除它。
+   */
+  selectTransition: (id: string | null) => void
 
   // ---------------------------------------------------------------- v9 音频与变速
   /** 写回媒体段原声的音量/渐入渐出（patch 为增量；全默认整键删除） */
@@ -228,6 +367,10 @@ export interface ProjectState {
   // ---------------------------------------------------------------- v10 音频质量
   /** 工程级响度标准化：social/broadcast 落盘，off/undefined 删除键；单次写入推一次 revision */
   setAudioMastering: (mastering: AudioMastering | undefined) => void
+  /** M7-E：图形层 z 档（belowMedia 才落盘；aboveMedia = 删键） */
+  setGraphicsZ: (graphicsZ: GraphicsZ | undefined) => void
+  /** M8：媒体段抠像（undefined = 关闭；归一后写入） */
+  setClipKey: (id: string, key: MediaClipKey | undefined) => void
 
   // ---------------------------------------------------------------- v7 音频轨
   selectAudioClip: (id: string | null) => void
@@ -325,6 +468,15 @@ function withMediaClips(project: Project, mediaClips: MediaClip[]): Project {
   return { ...project, mediaClips: [...mediaClips].sort((a, b) => a.timelineStartSec - b.timelineStartSec) }
 }
 
+/** M7：文本元素写入口（按入点排序；空数组时删掉整个键，保持 JSON 干净）。 */
+function withTextClips(project: Project, textClips: TextElementClip[]): Project {
+  const sorted = [...textClips].sort((a, b) => a.startTime - b.startTime || a.id.localeCompare(b.id))
+  const next: Project = { ...project }
+  if (sorted.length > 0) next.textClips = sorted
+  else delete next.textClips
+  return next
+}
+
 /**
  * v7：入池前把素材补全成「带 kind 的完整条目」。
  * - 图像：ffprobe 读不出时长（单帧），给一个默认静帧时长，否则上轨后长度为 0；
@@ -351,6 +503,17 @@ function withAudioClips(project: Project, audioClips: AudioClip[]): Project {
   return next
 }
 
+/**
+ * M11-I：批量开渐变时的缺省双色（与 ColorPanel 的 GradientEditor 缺省值同源）。
+ * 批量只负责「开/关」，颜色本身仍归单条面板管：已有颜色一律沿用，只有从没有过渐变的条目才落到这组默认值。
+ */
+const BATCH_GRADIENT_DEFAULTS = { from: '#ffffff', to: '#9ec7ff', angleDeg: 90 }
+
+/** 批量写入口的「是否真的变了」判定：结构完全相同视为没变（不推 revision、不产生撤销步）。 */
+function clipSnapshotOf(clip: SubtitleClip): string {
+  return JSON.stringify(clip)
+}
+
 /** P3：拆分/删除的目标解析要看的三条轨。 */
 function tracksOf(project: Project): TimelineTracks {
   return {
@@ -359,6 +522,17 @@ function tracksOf(project: Project): TimelineTracks {
     audioClips: project.audioClips ?? [],
     mediaTracks: project.mediaTracks
   }
+}
+
+/**
+ * M5：播放头处「最上层可见媒体轨」上的片段。
+ * 冻结帧默认以它为目标：隐藏轨不参与（预览里看不见的东西不该被悄悄冻结），
+ * 多轨重叠时取最上层（与预览/导出的合成顺序一致）。
+ */
+function topMediaClipAt(project: Project, atSec: number): MediaClip | null {
+  const visibleTrackIds = new Set(visibleMediaTracks(project.mediaTracks).map((track) => track.id))
+  const visibleClips = project.mediaClips.filter((clip) => visibleTrackIds.has(clip.trackId))
+  return topActiveMediaClip(visibleClips, atSec, mediaTrackOrder(project.mediaTracks))
 }
 
 /**
@@ -379,6 +553,20 @@ function removeTargetRef(store: ProjectState, target: TargetRef): void {
   if (target.kind === 'subtitle') store.removeClip(target.id)
   else if (target.kind === 'audio') store.removeAudioClip(target.id)
   else store.removeMediaClip(target.id)
+}
+
+/**
+ * v4：切换/删除活动序列后要清空的选中态。
+ * 片段 id 属于旧序列，留着会让检查器指向一段不存在的片段（面板空白但仍在编辑）。
+ */
+const CLEARED_SELECTION = {
+  selectedClipId: null,
+  selectedMediaClipId: null,
+  selectedAudioClipId: null,
+  selectedTextClipId: null,
+  selectedTransitionClipId: null,
+  selectedTrackId: null,
+  selectionKind: 'subtitle' as const
 }
 
 /** v3：落点轨道解析——显式指定优先，其次当前选中轨，最后第一条同类轨道。 */
@@ -453,6 +641,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   selectedClipId: null,
   selectedMediaClipId: null,
   selectedAudioClipId: null,
+  selectedTextClipId: null,
+  selectedTransitionClipId: null,
   selectedTrackId: null,
   selectionKind: 'subtitle',
   fonts: [],
@@ -471,6 +661,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       selectedClipId: project.clips[0]?.id ?? null,
       selectedMediaClipId: project.mediaClips[0]?.id ?? null,
       selectedAudioClipId: project.audioClips?.[0]?.id ?? null,
+      selectedTransitionClipId: null,
       selectedTrackId: null,
       // 打开工程默认先看字幕（这是主任务）；没有字幕条时才落到视频编辑器
       selectionKind: project.clips.length > 0 ? 'subtitle' : 'media',
@@ -576,7 +767,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ project: withClips(state.project, clips), selectedClipId, revision: state.revision + 1 })
   },
 
-  selectClip: (id) => set({ selectedClipId: id, ...(id ? { selectionKind: 'subtitle' as const } : {}) }),
+  selectClip: (id) =>
+    set({ selectedClipId: id, selectedTransitionClipId: null, ...(id ? { selectionKind: 'subtitle' as const } : {}) }),
 
   applyStyleToAll: (sourceId) => {
     const state = get()
@@ -648,6 +840,274 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ project: withClips(state.project, clips), revision: state.revision + 1 })
   },
 
+  setClipKeyframes: (id, keyframes) => {
+    const state = get()
+    const current = state.project.clips.find((clip) => clip.id === id)
+    if (!current) return
+    // 归一后再比较：避免「写入了同样的点」也产生一次撤销步 / 一次自动存档
+    const normalized = normalizeKeyframeTracks(keyframes)
+    const before = JSON.stringify(current.keyframes ?? null)
+    const after = JSON.stringify(normalized ?? null)
+    if (before === after) return
+    const next: SubtitleClip = { ...current }
+    if (normalized) next.keyframes = normalized
+    else delete next.keyframes
+    const clips = state.project.clips.map((clip) => (clip.id === id ? next : clip))
+    set({ project: withClips(state.project, clips), revision: state.revision + 1 })
+  },
+
+  // ---------------------------------------------------------------- M11 字幕导入/批量
+  addCaptionsFromCues: (cues, options) => {
+    const state = get()
+    const fps = state.project.fps
+    const presetId = options?.presetId ?? DEFAULT_PRESET_ID
+    const created: SubtitleClip[] = []
+    for (const cue of cues) {
+      const start = snapTimeToFrame(Math.max(0, cue.startSec), fps)
+      const end = snapTimeToFrame(Math.max(start + MIN_CLIP_DURATION_SEC, cue.endSec), fps)
+      if (!(end > start)) continue
+      const clip = createClip({ startTime: start, fps, presetId })
+      clip.startTime = start
+      clip.endTime = end
+      clip.content = { title: cue.text.slice(0, 200), subtitle: '' }
+      created.push(clip)
+    }
+    if (created.length === 0) return 0
+    const next = options?.replace === true ? created : [...state.project.clips, ...created]
+    set({
+      project: withClips(state.project, next),
+      selectedClipId: created[0]!.id,
+      selectionKind: 'subtitle',
+      revision: state.revision + 1
+    })
+    return created.length
+  },
+
+  addCaptionBatch: (rows, options) => {
+    const state = get()
+    const fps = state.project.fps
+    const presetId = options?.presetId ?? DEFAULT_PRESET_ID
+    // 缺省接在现有字幕末尾（不与已有条目重叠；用户也可以显式给 startSec）
+    const existingEnd = state.project.clips.reduce((acc, clip) => Math.max(acc, clip.endTime), 0)
+    const plan = planCaptionClips(rows as CaptionRow[], {
+      fps,
+      startSec: options?.startSec ?? existingEnd,
+      ...(options?.defaultDurationSec !== undefined ? { defaultDurationSec: options.defaultDurationSec } : {}),
+      ...(options?.gapSec !== undefined ? { gapSec: options.gapSec } : {})
+    })
+    const created: SubtitleClip[] = plan.map((item) => {
+      const clip = createClip({ startTime: item.startTime, fps, presetId })
+      clip.startTime = item.startTime
+      clip.endTime = item.endTime
+      clip.content = { title: item.title, subtitle: item.subtitle }
+      return clip
+    })
+    if (created.length === 0) return 0
+    set({
+      project: withClips(state.project, [...state.project.clips, ...created]),
+      selectedClipId: created[0]!.id,
+      selectionKind: 'subtitle',
+      revision: state.revision + 1
+    })
+    return created.length
+  },
+
+  // ---------------------------------------------------------------- M11-I 字幕批量编辑（列表多选）
+
+  applyPresetToClips: (ids, presetId) => {
+    const state = get()
+    // 合法值为空时不动：越界/未知预设 id（手改 JSON、旧版本留下的值）一律拒收
+    if (!(PRESET_IDS as readonly string[]).includes(presetId)) return 0
+    const wanted = new Set(ids)
+    if (wanted.size === 0) return 0
+    const preset = getPreset(presetId)
+    let changed = 0
+    const clips = state.project.clips.map((clip) => {
+      if (!wanted.has(clip.id)) return clip
+      // 与单条 updateClip(presetId) 完全同义：即时应用预设并清掉自定义，文字与入出点不动
+      const next = clipWithPresetDefaults(clip, preset)
+      if (clipSnapshotOf(next) === clipSnapshotOf(clip)) return clip
+      changed += 1
+      return next
+    })
+    if (changed === 0) return 0
+    set({ project: withClips(state.project, clips), revision: state.revision + 1 })
+    return changed
+  },
+
+  setClipsDuration: (ids, durationSec) => {
+    const state = get()
+    const fps = state.project.fps
+    // 合法值为空时不动：非有限值 / 非正 / 吸附后仍不足最短时长都拒收
+    if (!Number.isFinite(durationSec) || durationSec <= 0) return 0
+    const requested = snapTimeToFrame(durationSec, fps)
+    if (requested < MIN_CLIP_DURATION_SEC - 1e-9) return 0
+    const wanted = new Set(ids)
+    if (wanted.size === 0) return 0
+    let changed = 0
+    const clips = state.project.clips.map((clip) => {
+      if (!wanted.has(clip.id)) return clip
+      // 入点不动，只把出点顺延到统一时长；右侧邻居的起点是硬边界（字幕条不允许重叠）
+      const gap = gapAround(
+        subtitleSpan(clip),
+        state.project.clips.filter((other) => other.id !== clip.id).map(subtitleSpan)
+      )
+      // 空档本身就放不下最短时长（历史重叠数据）：不动它，免得把条子撑到邻居身上
+      if (gap.endSec < clip.startTime + MIN_CLIP_DURATION_SEC - 1e-9) return clip
+      const desiredEnd = snapTimeToFrame(clip.startTime + requested, fps)
+      const endTime = snapTimeToFrame(
+        clampTrimEnd(desiredEnd, clip.startTime + MIN_CLIP_DURATION_SEC, gap.endSec),
+        fps
+      )
+      if (endTime - clip.startTime < MIN_CLIP_DURATION_SEC - 1e-9) return clip
+      if (Math.abs(endTime - clip.endTime) < 1e-9) return clip
+      changed += 1
+      return { ...clip, endTime }
+    })
+    if (changed === 0) return 0
+    set({ project: withClips(state.project, clips), revision: state.revision + 1 })
+    return changed
+  },
+
+  removeClips: (ids) => {
+    const state = get()
+    const wanted = new Set(ids)
+    if (wanted.size === 0) return 0
+    const clips = state.project.clips.filter((clip) => !wanted.has(clip.id))
+    const removed = state.project.clips.length - clips.length
+    if (removed === 0) return 0
+    // 删掉的正是当前选中条目 → 选中态挪到剩余第一条，绝不留下指向已删片段的选中 id
+    const selectedRemoved = state.selectedClipId !== null && wanted.has(state.selectedClipId)
+    set({
+      project: withClips(state.project, clips),
+      ...(selectedRemoved ? { selectedClipId: clips[0]?.id ?? null } : {}),
+      revision: state.revision + 1
+    })
+    return removed
+  },
+
+  setClipsCompact: (ids, compact) => {
+    const state = get()
+    const wanted = new Set(ids)
+    if (wanted.size === 0) return 0
+    let changed = 0
+    const clips = state.project.clips.map((clip) => {
+      if (!wanted.has(clip.id)) return clip
+      if ((clip.styleOverrides.compact === true) === compact) return clip
+      const styleOverrides: StyleOverrides = { ...clip.styleOverrides }
+      // 关掉 = 删键（与 mergeOverrides 同一洁净度：不留「看似自定义」的 false）
+      if (compact) styleOverrides.compact = true
+      else delete styleOverrides.compact
+      changed += 1
+      return { ...clip, styleOverrides }
+    })
+    if (changed === 0) return 0
+    set({ project: withClips(state.project, clips), revision: state.revision + 1 })
+    return changed
+  },
+
+  setClipsGradientEnabled: (ids, enabled) => {
+    const state = get()
+    const wanted = new Set(ids)
+    if (wanted.size === 0) return 0
+    let changed = 0
+    const clips = state.project.clips.map((clip) => {
+      if (!wanted.has(clip.id)) return clip
+      const currentTitle = clip.styleOverrides.titleGradient
+      const currentSubtitle = clip.styleOverrides.subtitleGradient
+      // 开：沿用已有颜色（从没有过渐变才用统一双色）；关：只翻 enabled，颜色留着下次开不用重配
+      const nextTitle = enabled
+        ? { ...(currentTitle ?? BATCH_GRADIENT_DEFAULTS), enabled: true }
+        : currentTitle
+          ? { ...currentTitle, enabled: false }
+          : undefined
+      const nextSubtitle = enabled
+        ? { ...(currentSubtitle ?? BATCH_GRADIENT_DEFAULTS), enabled: true }
+        : currentSubtitle
+          ? { ...currentSubtitle, enabled: false }
+          : undefined
+      if (
+        JSON.stringify(nextTitle) === JSON.stringify(currentTitle) &&
+        JSON.stringify(nextSubtitle) === JSON.stringify(currentSubtitle)
+      ) {
+        return clip
+      }
+      const styleOverrides: StyleOverrides = { ...clip.styleOverrides }
+      if (nextTitle) styleOverrides.titleGradient = nextTitle
+      if (nextSubtitle) styleOverrides.subtitleGradient = nextSubtitle
+      changed += 1
+      return { ...clip, styleOverrides }
+    })
+    if (changed === 0) return 0
+    set({ project: withClips(state.project, clips), revision: state.revision + 1 })
+    return changed
+  },
+
+  // ---------------------------------------------------------------- M7 文本元素
+  addTextClip: (input) => {
+    const state = get()
+    const fps = state.project.fps
+    const clip = createTextElementClip({
+      startTime: input?.at ?? 0,
+      fps,
+      ...(input?.presetId ? { presetId: input.presetId } : {}),
+      ...(input?.text ? { text: input.text } : {}),
+      ...(input?.durationSec ? { durationSec: input.durationSec } : {})
+    })
+    const textClips = withTextClips(state.project, [...(state.project.textClips ?? []), clip])
+    set({
+      project: textClips,
+      selectedTextClipId: clip.id,
+      selectionKind: 'text',
+      revision: state.revision + 1
+    })
+    return clip
+  },
+
+  updateTextClip: (id, patch) => {
+    const state = get()
+    const current = (state.project.textClips ?? []).find((clip) => clip.id === id)
+    if (!current) return
+    // 与字幕条同一口径：整份候选 → normalize（夹取/去非法），再比较决定是否产生撤销步
+    const candidate = { ...current, ...patch }
+    const normalized = normalizeTextElementClip(candidate, state.project.fps)
+    if (!normalized) return
+    const before = JSON.stringify(current)
+    const after = JSON.stringify(normalized)
+    if (before === after) return
+    const project = withTextClips(
+      state.project,
+      (state.project.textClips ?? []).map((clip) => (clip.id === id ? normalized : clip))
+    )
+    set({ project, revision: state.revision + 1 })
+  },
+
+  removeTextClip: (id) => {
+    const state = get()
+    const textClips = (state.project.textClips ?? []).filter((clip) => clip.id !== id)
+    if (textClips.length === (state.project.textClips ?? []).length) return
+    const next: Project = { ...state.project }
+    if (textClips.length > 0) next.textClips = textClips
+    else delete next.textClips
+    const removedSelected = state.selectedTextClipId === id
+    set({
+      project: next,
+      ...(removedSelected
+        ? {
+            selectedTextClipId: textClips[0]?.id ?? null,
+            ...(textClips.length === 0 && state.selectionKind === 'text' ? { selectionKind: 'subtitle' as const } : {})
+          }
+        : {}),
+      revision: state.revision + 1
+    })
+  },
+
+  selectTextClip: (id) =>
+    set({
+      selectedTextClipId: id,
+      ...(id ? { selectionKind: 'text' as const } : {})
+    }),
+
   // ---------------------------------------------------------------- v2 素材池
 
   addMedia: (item) => {
@@ -673,6 +1133,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const state = get()
     const removeClips = options?.removeClips !== false
     const media = state.project.media.filter((m) => m.id !== mediaId)
+    const removedClipIds = new Set(
+      state.project.mediaClips.filter((c) => c.mediaId === mediaId).map((c) => c.id)
+    )
     const mediaClips = removeClips
       ? state.project.mediaClips.filter((c) => c.mediaId !== mediaId)
       : state.project.mediaClips
@@ -681,11 +1144,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         ? state.selectedMediaClipId
         : (mediaClips[0]?.id ?? null)
     const nextProject = withMediaClips({ ...state.project, media }, mediaClips)
+    const removedSelectedTransition =
+      removeClips && state.selectedTransitionClipId !== null && removedClipIds.has(state.selectedTransitionClipId)
     set({
       // removeClips=false 是「重新定位」的临时态：片段还在但素材暂时不在池里，
       // 此时不做手柄清理，避免把有效转场误删。
       project: removeClips ? cleanupInvalidTransitions(nextProject, state.project.fps) : nextProject,
       selectedMediaClipId,
+      ...(removedSelectedTransition
+        ? {
+            selectedTransitionClipId: null,
+            ...(state.selectionKind === 'transition'
+              ? { selectionKind: (selectedMediaClipId === null ? 'subtitle' : 'media') as SelectionKind }
+              : {})
+          }
+        : {}),
       revision: state.revision + 1
     })
   },
@@ -839,7 +1312,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   // ---------------------------------------------------------------- v2 媒体轨
 
-  selectMediaClip: (id) => set({ selectedMediaClipId: id, ...(id ? { selectionKind: 'media' as const } : {}) }),
+  selectMediaClip: (id) =>
+    set({
+      selectedMediaClipId: id,
+      selectedTransitionClipId: null,
+      ...(id ? { selectionKind: 'media' as const } : {})
+    }),
 
   insertMediaClip: (input) => {
     const state = get()
@@ -1010,16 +1488,209 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (isTrackLocked(trackById(state.project.mediaTracks, current.trackId))) return
     const mediaClips = state.project.mediaClips.filter((c) => c.id !== id)
     const removedSelected = state.selectedMediaClipId === id
+    const removedTransition = state.selectedTransitionClipId === id
     const selectedMediaClipId = removedSelected ? (mediaClips[0]?.id ?? null) : state.selectedMediaClipId
     // v8.1：片段没了，它的防抖代理账本与磁盘缓存一起回收（fire-and-forget，不阻塞删轨）
     useStabPreviewStore.getState().clearForClip(id, true)
     set({
       project: cleanupInvalidTransitions(withMediaClips(state.project, mediaClips), state.project.fps),
       selectedMediaClipId,
+      // 删掉的片段承载着当前选中的转场：选中态一起清，检查器退回字幕/视频视图
+      ...(removedTransition
+        ? {
+            selectedTransitionClipId: null,
+            ...(state.selectionKind === 'transition'
+              ? { selectionKind: (selectedMediaClipId === null ? 'subtitle' : 'media') as SelectionKind }
+              : {})
+          }
+        : {}),
       // 删掉了正在编辑的那条且再无媒体段：检查器退回字幕编辑器，不留一个空视频面板
       ...(removedSelected && selectedMediaClipId === null ? { selectionKind: 'subtitle' as const } : {}),
       revision: state.revision + 1
     })
+  },
+
+  // ---------------------------------------------------------------- M5 剪辑操作
+  rippleDeleteMediaClip: (id) => {
+    const state = get()
+    const current = state.project.mediaClips.find((c) => c.id === id)
+    if (!current) return false
+    if (isTrackLocked(trackById(state.project.mediaTracks, current.trackId))) return false
+    const result = applyRippleDelete(state.project.mediaClips, id, state.project.fps)
+    if (!result) return false
+    const removedSelected = state.selectedMediaClipId === id
+    const removedTransition = state.selectedTransitionClipId === id
+    // 选中态交还给同轨最靠前的剩余片段（没有就退到任意片段，再没有才空）
+    const selectedMediaClipId = removedSelected
+      ? (result.clips.find((clip) => clip.trackId === current.trackId)?.id ?? result.clips[0]?.id ?? null)
+      : state.selectedMediaClipId
+    useStabPreviewStore.getState().clearForClip(id, true)
+    set({
+      project: cleanupInvalidTransitions(withMediaClips(state.project, result.clips), state.project.fps),
+      selectedMediaClipId,
+      ...(removedTransition
+        ? {
+            selectedTransitionClipId: null,
+            ...(state.selectionKind === 'transition'
+              ? { selectionKind: (selectedMediaClipId === null ? 'subtitle' : 'media') as SelectionKind }
+              : {})
+          }
+        : {}),
+      ...(removedSelected && selectedMediaClipId === null ? { selectionKind: 'subtitle' as const } : {}),
+      revision: state.revision + 1
+    })
+    return true
+  },
+
+  mergeMediaClipWithNext: (id) => {
+    const state = get()
+    const first = state.project.mediaClips.find((c) => c.id === id)
+    if (!first) return false
+    if (isTrackLocked(trackById(state.project.mediaTracks, first.trackId))) return false
+    const next = nextMediaClipOnTrack(state.project.mediaClips, id)
+    if (!next) return false
+    const result = mergeMediaClips(state.project.mediaClips, id, next.id, state.project.fps)
+    if (!result) return false
+    // 被抹掉的内部切点可能正承载着选中的转场：一并清掉，检查器回到片段本身
+    const removedTransition = state.selectedTransitionClipId === next.id
+    useStabPreviewStore.getState().clearForClip(next.id, true)
+    set({
+      project: cleanupInvalidTransitions(withMediaClips(state.project, result.clips), state.project.fps),
+      selectedMediaClipId: result.merged.id,
+      ...(removedTransition ? { selectedTransitionClipId: null } : {}),
+      selectionKind: 'media',
+      revision: state.revision + 1
+    })
+    return true
+  },
+
+  freezeFrameAt: async (atSec, options) => {
+    const state = get()
+    const fps = state.project.fps
+    const at = snapTimeToFrame(Math.max(0, atSec ?? 0), fps)
+    const project = state.project
+    // 目标片段：显式指定优先，否则取播放头处「最上层可见媒体轨」上的那一段
+    const target =
+      (options?.clipId ? project.mediaClips.find((clip) => clip.id === options.clipId) : undefined) ??
+      topMediaClipAt(project, at)
+    if (!target) return null
+    if (isTrackLocked(trackById(project.mediaTracks, target.trackId))) return null
+    const item = project.media.find((media) => media.id === target.mediaId)
+    if (!item) return null
+    // 切点必须在段内且两侧都留得下最短时长（与拆分同一口径）
+    if (at <= target.timelineStartSec + MIN_MEDIA_CLIP_SEC - 1e-9) return null
+    if (at >= target.timelineEndSec - MIN_MEDIA_CLIP_SEC + 1e-9) return null
+    const sourceSec = sourceTimeAt(target, at)
+    const durationSec = Math.max(MIN_MEDIA_CLIP_SEC, options?.durationSec ?? FREEZE_FRAME_DEFAULT_SEC)
+
+    // 主进程抽帧（不可用时给 null：不抛错，UI 提示即可）
+    const extract = window.socut?.media?.extractFrame
+    if (typeof extract !== 'function') return null
+    const extracted = await extract({
+      path: item.path,
+      atSec: sourceSec,
+      key: item.id,
+      width: item.meta.width,
+      height: item.meta.height
+    })
+    if (!extracted?.path) return null
+
+    // 抽出来的 PNG 按普通 image 素材入池：导出侧走 `-loop 1`，与用户导入的图片同一口径
+    const freezeMediaId = get().addMedia({
+      path: extracted.path,
+      name: `${item.name.replace(/\.[^.]+$/, '')} 冻结帧`,
+      kind: 'image',
+      meta: {
+        ...item.meta,
+        path: extracted.path,
+        containerName: 'png',
+        videoCodec: 'png',
+        audioCodec: null,
+        audioChannels: null,
+        pixFmt: 'rgba',
+        width: extracted.width > 0 ? extracted.width : item.meta.width,
+        height: extracted.height > 0 ? extracted.height : item.meta.height,
+        durationSec: Math.max(IMAGE_STILL_SEC, durationSec + 1)
+      },
+      non169Ack: item.non169Ack,
+      hdrAck: item.hdrAck,
+      vfrPolicy: 'none',
+      compactMode: item.compactMode,
+      thumbnailUrl: '',
+      importedAt: new Date().toISOString()
+    })
+
+    const current = get()
+    const plan = planFreezeFrame({
+      clips: current.project.mediaClips,
+      clipId: target.id,
+      atSec: at,
+      fps,
+      freezeMediaId,
+      durationSec,
+      newClipId: createId('mclip'),
+      newRightId: createId('mclip')
+    })
+    if (!plan) return null
+    set({
+      project: cleanupInvalidTransitions(withMediaClips(current.project, plan.clips), fps),
+      selectedMediaClipId: plan.freezeClip.id,
+      selectedTransitionClipId: null,
+      selectionKind: 'media',
+      revision: current.revision + 1
+    })
+    return plan.freezeClip.id
+  },
+
+  // ---------------------------------------------------------------- v4 多序列
+  addSequence: (name) => {
+    const state = get()
+    const added = addSequenceToProject(state.project, name)
+    if (!added) return null
+    set({ project: added.project, revision: state.revision + 1 })
+    return added.id
+  },
+
+  removeSequence: (id) => {
+    const state = get()
+    const wasActive = id === (state.project.activeSequenceId ?? DEFAULT_SEQUENCE_ID)
+    const next = removeSequenceFromProject(state.project, id)
+    if (!next || next === state.project) return false
+    set({
+      project: next,
+      // 删的是活动序列 → 已切到别的序列，选中态必须清空
+      ...(wasActive ? CLEARED_SELECTION : {}),
+      revision: state.revision + 1
+    })
+    return true
+  },
+
+  renameSequence: (id, name) => {
+    const state = get()
+    const next = renameSequenceInProject(state.project, id, name)
+    if (next === state.project) return false
+    set({ project: next, revision: state.revision + 1 })
+    return true
+  },
+
+  selectSequence: (id) => {
+    const state = get()
+    const next = switchSequenceInProject(state.project, id)
+    if (!next || next === state.project) return false
+    set({
+      project: next,
+      ...CLEARED_SELECTION,
+      revision: state.revision + 1
+    })
+    return true
+  },
+
+  duplicateSequence: (id, name) => {
+    const state = get()
+    const added = duplicateSequenceInProject(state.project, id, name)
+    if (!added) return null
+    set({ project: added.project, revision: state.revision + 1 })
+    return added.id
   },
 
   splitTargetAt: (atSec) => {
@@ -1034,7 +1705,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (!clip) return null
       const result = splitSubtitleClipAt(clip, atSec, fps, () => createId('clip'))
       if (!result) return null
-      const clips = state.project.clips.filter((item) => item.id !== clip.id).concat(result.left, result.right)
+      // M6：关键帧的 t 是"片段内进度"，切点之后不该继承前半段的曲线（与转场同一纪律：内部切点不继承）
+      const right: SubtitleClip = { ...result.right }
+      delete right.keyframes
+      const clips = state.project.clips.filter((item) => item.id !== clip.id).concat(result.left, right)
       set({
         project: withClips(state.project, clips),
         selectedClipId: result.right.id,
@@ -1089,6 +1763,25 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   removeSelected: () => {
     const state = get()
+    // M7：文本元素选中时 Delete 只删文本元素
+    if (state.selectionKind === 'text' && state.selectedTextClipId !== null) {
+      state.removeTextClip(state.selectedTextClipId)
+      return true
+    }
+    // v11：转场选中优先——Delete/退格键在「缝隙图标高亮」时删的是转场，不是右侧片段
+    if (state.selectionKind === 'transition' && state.selectedTransitionClipId !== null) {
+      const clip = state.project.mediaClips.find((item) => item.id === state.selectedTransitionClipId)
+      if (clip?.transitionIn) {
+        const removed = state.setMediaClipTransition(clip.id, null)
+        // 删除后把检查器交还给该片段，用户接着能看到片段参数而不是空面板
+        set({
+          selectedTransitionClipId: null,
+          selectedMediaClipId: clip.id,
+          selectionKind: 'media'
+        })
+        return removed
+      }
+    }
     const target = findSelectedRef(tracksOf(state.project), selectionOf(state))
     if (!target) return false
     removeTargetRef(state, target)
@@ -1096,6 +1789,69 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   // ---------------------------------------------------------------- v6 画面编辑
+
+  /**
+   * M6-E：媒体段关键帧（与字幕条同一套归一/去重口径）。
+   * 值相同不产生撤销步；全空/全非法 → 整键删除。
+   */
+  setMediaClipKeyframes: (id, keyframes) => {
+    const state = get()
+    const current = state.project.mediaClips.find((clip) => clip.id === id)
+    if (!current) return
+    const normalized = normalizeKeyframeTracks(keyframes)
+    const before = JSON.stringify(current.keyframes ?? null)
+    const after = JSON.stringify(normalized ?? null)
+    if (before === after) return
+    const next: MediaClip = { ...current }
+    if (normalized) next.keyframes = normalized
+    else delete next.keyframes
+    const mediaClips = state.project.mediaClips.map((clip) => (clip.id === id ? next : clip))
+    set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
+
+  /**
+   * M8：媒体段手绘遮罩（同一套归一/去重口径）。
+   * 同值（JSON 逐字节相同）不产生撤销步；空遮罩 → 整键删除。
+   */
+  setMediaClipMask: (id, mask) => {
+    const state = get()
+    const current = state.project.mediaClips.find((clip) => clip.id === id)
+    if (!current) return
+    const normalized = normalizeMediaClipMask(mask ?? undefined)
+    const before = JSON.stringify(current.mask ?? null)
+    const after = JSON.stringify(normalized ?? null)
+    if (before === after) return
+    const next: MediaClip = { ...current }
+    if (normalized) next.mask = normalized
+    else delete next.mask
+    const mediaClips = state.project.mediaClips.map((clip) => (clip.id === id ? next : clip))
+    set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
+
+  /**
+   * M8-P0：外部 matte（与 setMediaClipMask 同口径）。
+   * 只接受归一化后的 `{ path, kind }`：path 为空 = 移除；同值（两键 JSON 相同）不产生撤销步。
+   */
+  setMediaClipMatte: (id, matte) => {
+    const state = get()
+    const current = state.project.mediaClips.find((clip) => clip.id === id)
+    if (!current) return
+    const pathValue = typeof matte?.path === 'string' ? matte.path.trim() : ''
+    const kind = matte?.kind === 'image' || matte?.kind === 'video' ? matte.kind : undefined
+    const next: MediaClip = { ...current }
+    if (pathValue.length > 0 && kind) {
+      next.mattePath = pathValue
+      next.matteKind = kind
+    } else {
+      delete next.mattePath
+      delete next.matteKind
+    }
+    const before = JSON.stringify([current.mattePath ?? null, current.matteKind ?? null])
+    const after = JSON.stringify([next.mattePath ?? null, next.matteKind ?? null])
+    if (before === after) return
+    const mediaClips = state.project.mediaClips.map((clip) => (clip.id === id ? next : clip))
+    set({ project: withMediaClips(state.project, mediaClips), revision: state.revision + 1 })
+  },
 
   updateMediaClipVideo: (id, patch) => {
     const state = get()
@@ -1156,14 +1912,31 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   // ---------------------------------------------------------------- v10 转场
 
+  selectTransition: (id) => {
+    if (id === null) {
+      set({ selectedTransitionClipId: null })
+      return
+    }
+    const clip = get().project.mediaClips.find((item) => item.id === id)
+    // 只有真的挂着转场才切过去，避免右键/拖拽落点误触后检查器出现空面板
+    if (!clip?.transitionIn) return
+    set({
+      selectedTransitionClipId: id,
+      selectedMediaClipId: id,
+      selectionKind: 'transition'
+    })
+  },
+
   setMediaClipTransition: (id, transition) => {
     const state = get()
     const fps = state.project.fps
     const clip = state.project.mediaClips.find((item) => item.id === id)
-    if (!clip) return
+    if (!clip) return false
+    // 锁定轨道：只读，不允许增删转场（与片段拖拽/修剪同一规则）
+    if (isTrackLocked(trackById(state.project.mediaTracks, clip.trackId))) return false
 
     if (transition === null) {
-      if (!clip.transitionIn) return
+      if (!clip.transitionIn) return false
       const mediaClips = state.project.mediaClips.map((item) => {
         if (item.id !== id) return item
         const next: MediaClip = { ...item }
@@ -1172,14 +1945,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       })
       set({
         project: withMediaClips(state.project, mediaClips),
+        // 删掉的正是当前选中的转场：选中态一并清掉，免得检查器停在空气上
+        ...(state.selectedTransitionClipId === id ? { selectedTransitionClipId: null } : {}),
         revision: state.revision + 1
       })
-      return
+      return true
     }
 
     // 类型 / 时长合法性统一走 schema 归一（与读盘时同一口径），无效数据直接丢弃
     const normalized = normalizeTransition(transition, fps)
-    if (!normalized) return
+    if (!normalized) return false
 
     const prev = previousMediaClipOnTrack(state.project.mediaClips, clip)
     const resolution = resolveTransitionDuration({
@@ -1190,8 +1965,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       requestedSec: normalized.durationSec,
       fps
     })
-    // 首段 / 有空隙 / 手柄不足：不写入无效数据（检查器给原因）
-    if (!resolution.ok) return
+    // 首段 / 有空隙 / 手柄不足：不写入无效数据（拖拽面板给原因）
+    if (!resolution.ok) return false
 
     const nextTransition: MediaClipTransition = {
       type: normalized.type,
@@ -1201,7 +1976,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       clip.transitionIn?.type === nextTransition.type &&
       Math.abs(clip.transitionIn.durationSec - nextTransition.durationSec) < 1e-9
     ) {
-      return
+      return true
     }
     const mediaClips = state.project.mediaClips.map((item) =>
       item.id === id ? { ...item, transitionIn: nextTransition } : item
@@ -1211,6 +1986,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       project: cleanupInvalidTransitions(withMediaClips(state.project, mediaClips), fps),
       revision: state.revision + 1
     })
+    return true
   },
 
   // ---------------------------------------------------------------- v9 音频与变速
@@ -1327,10 +2103,41 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ project: next, revision: state.revision + 1 })
   },
 
+  setGraphicsZ: (graphicsZ) => {
+    const state = get()
+    const next: Project = { ...state.project }
+    if (graphicsZ === 'belowMedia') next.graphicsZ = 'belowMedia'
+    else delete next.graphicsZ
+    set({ project: next, revision: state.revision + 1 })
+  },
+
+  setClipKey: (id, key) => {
+    const state = get()
+    const current = state.project.mediaClips.find((clip) => clip.id === id)
+    if (!current) return
+    const normalized = normalizeMediaClipKey(key)
+    // 值相同不产生撤销步（与 setClipKeyframes 同一纪律）
+    const before = current.key ? JSON.stringify(current.key) : ''
+    const after = normalized ? JSON.stringify(normalized) : ''
+    if (before === after) return
+    const clips = state.project.mediaClips.map((clip) => {
+      if (clip.id !== id) return clip
+      const next: MediaClip = { ...clip }
+      if (normalized) next.key = normalized
+      else delete next.key
+      return next
+    })
+    set({ project: { ...state.project, mediaClips: clips }, revision: state.revision + 1 })
+  },
+
   // ---------------------------------------------------------------- v7 音频轨
 
   selectAudioClip: (id) =>
-    set({ selectedAudioClipId: id, ...(id ? { selectionKind: 'audio' as const } : {}) }),
+    set({
+      selectedAudioClipId: id,
+      selectedTransitionClipId: null,
+      ...(id ? { selectionKind: 'audio' as const } : {})
+    }),
 
   insertAudioClip: (input) => {
     const state = get()

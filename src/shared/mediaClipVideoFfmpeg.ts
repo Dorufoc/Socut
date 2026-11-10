@@ -5,6 +5,17 @@ import {
   lightToneSaturate,
   normalizeMediaVideo
 } from './mediaClipVideo'
+import { buildEffectFilters } from './effectPackages'
+import { defaultMediaVideo } from './mediaClipVideo'
+import {
+  mediaKeyframesActive,
+  mediaParamExpr,
+  mediaTrackOf,
+  MEDIA_KEYFRAME_EXPR_SAMPLES
+} from './mediaClipKeyframes'
+import { keyframeValueAt, type KeyframeTrack } from './keyframes'
+import { keyFilters, normalizeMediaClipKey } from './keying'
+import type { MediaClipKey } from './keying'
 import { fpsToArg } from './fps'
 import type { Fps, MediaClipVideo } from './types'
 
@@ -34,6 +45,10 @@ export interface MediaClipVideoFxInput {
   durationSec: number
   /** 多轨图层 = true（透明底）；单轨基座 = false（黑底） */
   transparentBackground: boolean
+  /** M8：抠像（缺省 = 不抠像；仅导出侧生效） */
+  key?: MediaClipKey
+  /** M6-E：媒体段关键帧（缺省 = 静态几何，与旧版逐字节一致） */
+  keyframes?: KeyframeTrack[]
 }
 
 export interface MediaClipVideoFxPlan {
@@ -119,24 +134,43 @@ function curvePoints(video: MediaClipVideo, channel: 'r' | 'g' | 'b'): string {
  * 默认值（`undefined` 或全部等于默认）→ 空语句，输出标签原样返回（零回归）。
  */
 export function buildMediaClipVideoFx(input: MediaClipVideoFxInput): MediaClipVideoFxPlan {
-  const video = normalizeMediaVideo(input.video)
-  if (!video || isDefaultMediaVideo(video)) {
+  const normalizedVideo = normalizeMediaVideo(input.video)
+  // M8：键控（全默认 → undefined → 不注入任何滤镜）
+  const key = normalizeMediaClipKey(input.key)
+  // M6-E：媒体段关键帧（全默认 + 无关键帧时才允许"零语句"早退）
+  const keyframes = input.keyframes
+  const useKeyframes = mediaKeyframesActive(keyframes)
+  if ((!normalizedVideo || isDefaultMediaVideo(normalizedVideo)) && !key && !useKeyframes) {
     return { statements: [], outputLabel: input.baseLabel }
   }
+  const video = normalizedVideo ?? defaultMediaVideo()
+  const keying = keyFilters(key)
 
   const { frame, fps, transparentBackground, durationSec } = input
   const finalFormat = transparentBackground ? 'rgba' : 'yuv420p'
   const grade = gradeFilters(video)
   const geometry = geometryChanged(video)
+  // M7-E：特效包滤镜挂在调色之后（vignette/颗粒等作用在最终画面上）；
+  // 无特效时 effects=[]，下面的语句与旧版逐字节一致。
+  const effects = buildEffectFilters(video.effects)
 
   // 只有调色：帧仍是整幅 W×H，不需要补底与 overlay。
-  if (!geometry) {
+  if (!geometry && !useKeyframes) {
     const chain = [
       `[${input.baseLabel}]format=rgba`,
       ...grade,
+      ...effects,
+      // M8：抠像放在调色/特效之后（用户调的是最终颜色），无 keying 时不多一个逗号
+      ...keying,
       `format=${finalFormat}[${input.outputLabel}]`
     ].join(',')
     return { statements: [chain], outputLabel: input.outputLabel }
+  }
+
+  // M6-E：关键帧 → 表达式路径（scale/rotate/overlay 的数值换成 t 表达式，不透明度用 alpha 掩膜）。
+  // 无关键帧时**不进入**这里：静态路径的字符串必须逐字节不变（有 argv 快照测试锁定）。
+  if (useKeyframes) {
+    return buildKeyframeAfx(input, video, { grade, effects, keying, finalFormat })
   }
 
   const scale = video.scalePercent / 100
@@ -169,7 +203,118 @@ export function buildMediaClipVideoFx(input: MediaClipVideoFxInput): MediaClipVi
     `color=c=black${transparentBackground ? '@0.0' : ''}:s=${size}:r=${fpsToArg(fps)}:d=${formatSec(
       Math.max(0.01, durationSec)
     )}[bg]`,
-    `[bg][fg]overlay=x=${x}:y=${y}:format=auto:eof_action=pass:shortest=0,format=${finalFormat}[${input.outputLabel}]`
+    // 特效在 overlay 之后作用于整幅画面（与预览的近似顺序一致）；M8 抠像再往后
+    `[bg][fg]overlay=x=${x}:y=${y}:format=auto:eof_action=pass:shortest=0` +
+      `${effects.length > 0 ? `,${effects.join(',')}` : ''}` +
+      `${keying.length > 0 ? `,${keying.join(',')}` : ''},format=${finalFormat}[${input.outputLabel}]`
   ]
+  return { statements, outputLabel: input.outputLabel }
+}
+
+/** 关键帧路径要复用的几条滤镜（已由调用方算好，避免重复归一化）。 */
+interface KeyframePassThrough {
+  grade: string[]
+  effects: string[]
+  keying: string[]
+  finalFormat: 'rgba' | 'yuv420p'
+}
+
+/**
+ * M6-E：媒体段关键帧的表达式滤镜图（真机验证过的组合）。
+ *
+ * 口径（与预览 `mediaKeyframeCssAt` 同源）：
+ * - 缩放 `scale=...:eval=frame`（表达式除以 100 = 倍率）；
+ * - 旋转 `rotate=angle='(...)*PI/180':ow/oh=<整段最大包围盒>:eval=frame`（固定输出尺寸，
+ *   旋转后的空边透明/黑，再由 overlay 居中）；
+ * - 位移 `overlay=x='(W-w)/2+(Ox(t)/100)*W'`（`w` 跟随当前帧缩放后的宽度）；
+ * - 不透明度：8×8 白底 → `geq(a=clip(255*O(T)))` → `alphaextract` → 放大 → `alphamerge`
+ *   （掩膜空间均匀，8×8 足够；避免 1080p 逐像素 geq 的性能坑）。
+ *
+ * 注意 `geq` 的时间变量是 **`T`**（大写），overlay/scale/rotate 是 `t`——真机踩过。
+ */
+function buildKeyframeAfx(
+  input: MediaClipVideoFxInput,
+  video: MediaClipVideo,
+  pass: KeyframePassThrough
+): MediaClipVideoFxPlan {
+  const { frame, fps, transparentBackground } = input
+  const duration = Math.max(0.01, input.durationSec)
+  const durationArg = formatSec(duration)
+  const rate = fpsToArg(fps)
+  const scaleExpr = mediaParamExpr(mediaTrackOf(input.keyframes, 'scalePct'), duration)
+  const rotateExpr = mediaParamExpr(mediaTrackOf(input.keyframes, 'rotationDeg'), duration)
+  const offsetXExpr = mediaParamExpr(mediaTrackOf(input.keyframes, 'offsetXPct'), duration)
+  const offsetYExpr = mediaParamExpr(mediaTrackOf(input.keyframes, 'offsetYPct'), duration)
+  const opacityExpr = mediaParamExpr(mediaTrackOf(input.keyframes, 'opacity'), duration, MEDIA_KEYFRAME_EXPR_SAMPLES, 'T')
+
+  // 旋转包围盒必须在构建期定成固定尺寸：整段采样取最大外接框（表达式本身无法在构建期取极值）。
+  const scaleTrack = mediaTrackOf(input.keyframes, 'scalePct')
+  const rotateTrack = mediaTrackOf(input.keyframes, 'rotationDeg')
+  let boxWidth = 0
+  let boxHeight = 0
+  for (let index = 0; index <= MEDIA_KEYFRAME_EXPR_SAMPLES; index += 1) {
+    const progress = index / MEDIA_KEYFRAME_EXPR_SAMPLES
+    const scale = (scaleTrack ? keyframeValueAt(scaleTrack, progress) : video.scalePercent) / 100
+    const degrees = rotateTrack ? keyframeValueAt(rotateTrack, progress) : video.rotationDeg
+    const radians = (degrees * Math.PI) / 180
+    const cos = Math.abs(Math.cos(radians))
+    const sin = Math.abs(Math.sin(radians))
+    boxWidth = Math.max(boxWidth, frame.width * scale * cos + frame.height * scale * sin)
+    boxHeight = Math.max(boxHeight, frame.width * scale * sin + frame.height * scale * cos)
+  }
+  const rotatedWidth = even(Math.max(2, boxWidth))
+  const rotatedHeight = even(Math.max(2, boxHeight))
+
+  const fgParts: string[] = ['format=rgba']
+  if (video.flipH) fgParts.push('hflip')
+  if (video.flipV) fgParts.push('vflip')
+  if (scaleExpr) {
+    fgParts.push(
+      `scale=w='trunc(iw*(${scaleExpr})/100/2)*2':h='trunc(ih*(${scaleExpr})/100/2)*2':eval=frame:flags=bicubic`
+    )
+  } else if (Math.abs(video.scalePercent - 100) > 1e-6) {
+    const factor = num(video.scalePercent / 100)
+    fgParts.push(`scale=trunc(iw*${factor}/2)*2:trunc(ih*${factor}/2)*2:flags=bicubic`)
+  }
+  const rotateColor = transparentBackground ? 'black@0.0' : 'black'
+  if (rotateExpr) {
+    // 真机：本机 FFmpeg 9 的 rotate **没有 eval 选项**（传 eval=frame 会 "Option not found"）。
+    // `angle` 带 T 标记（运行期可变），表达式按帧求值即可，不需要额外开关。
+    fgParts.push(`rotate=angle='(${rotateExpr})*PI/180':ow=${rotatedWidth}:oh=${rotatedHeight}:c=${rotateColor}`)
+  } else if (Math.abs(video.rotationDeg) > 1e-6) {
+    fgParts.push(
+      `rotate=${num((video.rotationDeg * Math.PI) / 180)}:ow=${rotatedWidth}:oh=${rotatedHeight}:c=${rotateColor}`
+    )
+  }
+  fgParts.push(...pass.grade)
+
+  const statements: string[] = []
+  const size = `${frame.width}x${frame.height}`
+  if (opacityExpr) {
+    // fg 先落到临时标签，再与 alpha 掩膜合并
+    statements.push(`[${input.baseLabel}]${fgParts.join(',')}[fgc]`)
+    statements.push(
+      `color=c=white:s=8x8:r=${rate}:d=${durationArg},format=rgba,` +
+        `geq=r='255':g='255':b='255':a='clip(255*(${opacityExpr}),0,255)',` +
+        `format=rgba,alphaextract,format=gray,scale=${rotatedWidth}:${rotatedHeight}:flags=neighbor[am]`
+    )
+    statements.push(`[fgc][am]alphamerge,format=rgba[fg]`)
+  } else {
+    statements.push(`[${input.baseLabel}]${fgParts.join(',')}[fg]`)
+  }
+
+  const x = offsetXExpr
+    ? `'(W-w)/2+((${offsetXExpr})/100)*W'`
+    : num((frame.width - rotatedWidth) / 2 + (video.offsetXPercent / 100) * frame.width, 3)
+  const y = offsetYExpr
+    ? `'(H-h)/2+((${offsetYExpr})/100)*H'`
+    : num((frame.height - rotatedHeight) / 2 + (video.offsetYPercent / 100) * frame.height, 3)
+
+  statements.push(`color=c=black${transparentBackground ? '@0.0' : ''}:s=${size}:r=${rate}:d=${durationArg}[bg]`)
+  statements.push(
+    `[bg][fg]overlay=x=${x}:y=${y}:format=auto:eof_action=pass:shortest=0` +
+      `${pass.effects.length > 0 ? `,${pass.effects.join(',')}` : ''}` +
+      `${pass.keying.length > 0 ? `,${pass.keying.join(',')}` : ''},format=${pass.finalFormat}[${input.outputLabel}]`
+  )
   return { statements, outputLabel: input.outputLabel }
 }

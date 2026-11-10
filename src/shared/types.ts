@@ -8,6 +8,11 @@
 // 基础：分辨率 / 帧率
 // ---------------------------------------------------------------------------
 
+import type { KeyframeTrack } from './keyframes'
+import type { ActiveEffect } from './effectPackages'
+import type { MediaClipKey } from './keying'
+export type { MediaClipKey } from './keying'
+
 export interface Resolution {
   width: number
   height: number
@@ -307,6 +312,83 @@ export interface SubtitleClip {
   content: ClipContent
   animation: AnimationSpec
   fontId: string
+  /** M6：片段级参数关键帧（缺省 = 不生效，渲染走旧路径） */
+  keyframes?: KeyframeTrack[]
+}
+
+// ---------------------------------------------------------------------------
+// M7：文本元素（与"包装里的字幕条"是两种东西）
+// ---------------------------------------------------------------------------
+
+/** 文本元素起始预设（新闻标题 / 人名条 / 引语 / 数字 / 地点 / 时间戳 / 角标）。 */
+export type TextElementPresetId =
+  | 'newsHeadline'
+  | 'personTag'
+  | 'quoteCard'
+  | 'numberStat'
+  | 'locationTag'
+  | 'timestamp'
+  | 'cornerBadge'
+
+/** 文本元素的可编辑样式（像素单位一律按 1080p 基准，渲染时按画高缩放）。 */
+export interface TextElementStyle {
+  fontId: string
+  sizePx: number
+  weight: number
+  color: string
+  trackingPx: number
+  lineHeight: number
+  maxLines: number
+  align: 'left' | 'center' | 'right'
+  /** 锚点（画面百分比）：文本盒的左边/顶边所对的位置；align 只影响文本在盒内的对齐 */
+  anchorXPct: number
+  anchorYPct: number
+  strokeWidthPx: number
+  strokeColor: string
+  shadowBlurPx: number
+  shadowColor: string
+  shadowOffsetXPx: number
+  shadowOffsetYPx: number
+  plate: {
+    enabled: boolean
+    color: string
+    opacity: number
+    paddingXPx: number
+    paddingYPx: number
+    radiusPx: number
+  }
+}
+
+/** 文本元素入场/出场（淡入 + 上浮，不做擦除；与字幕条的电视感擦除是两套语言）。 */
+export interface TextElementAnimation {
+  inDurationSec: number
+  outDurationSec: number
+  easing: EasingKey
+  /** 入场起始的纵向偏移（px@1080p，正值 = 从下方浮上来） */
+  risePx: number
+}
+
+/**
+ * 文本元素样式覆盖：逐字段可选；`plate` 允许只覆盖其中几项
+ * （例如只改透明度，不动预设的底色/圆角）。
+ */
+export type TextElementStyleOverrides = Partial<Omit<TextElementStyle, 'plate'>> & {
+  plate?: Partial<TextElementStyle['plate']>
+}
+
+/** 文本元素：一条独立叠加在画面上的文字（标题、人名条、角标……），不属于字幕条预设体系。 */
+export interface TextElementClip {
+  id: string
+  text: string
+  presetId: TextElementPresetId
+  /** 只覆盖预设的显式字段（未覆盖的取预设解析值） */
+  styleOverrides: TextElementStyleOverrides
+  startTime: number
+  endTime: number
+  /** 文本轨固定一条（M7 第一阶段），恒在媒体层之上、字幕条之下 */
+  trackId: string
+  animation: TextElementAnimation
+  keyframes?: KeyframeTrack[]
 }
 
 export type VfrPolicy = 'none' | 'converted' | 'raw'
@@ -412,33 +494,52 @@ export type Track = MediaTrack | AudioTrack | SubtitleTrack
 // 转场（v10：落在切点右侧片段上）
 // ---------------------------------------------------------------------------
 
-export type TransitionFamily = 'basic' | 'blur' | 'wind' | 'push' | 'pull' | 'camera'
-export type TransitionDirection = 'left' | 'right' | 'up' | 'down' | 'none'
-export type TransitionType =
-  | 'dissolve'
-  | 'fadeBlack'
-  | 'fadeWhite'
-  | 'lightFlash'
-  | 'blurH'
-  | 'blurV'
-  | 'windLeft'
-  | 'windRight'
-  | 'windUp'
-  | 'windDown'
-  | 'pushLeft'
-  | 'pushRight'
-  | 'pushUp'
-  | 'pushDown'
-  | 'pullLeft'
-  | 'pullRight'
-  | 'pullUp'
-  | 'pullDown'
-  | 'zoomIn'
+// M7-E：转场类型/元数据真值在 `transitionCatalog.ts`（58 种 xfade + 旧工程别名），
+// 这里只做再导出，保证既有 `from '@shared/types'` 的 import 不变。
+import type {
+  TransitionDirection as TransitionDirectionType,
+  TransitionFamily as TransitionFamilyType,
+  TransitionType as TransitionTypeType
+} from './transitionCatalog'
+
+export type TransitionFamily = TransitionFamilyType
+export type TransitionDirection = TransitionDirectionType
+export type TransitionType = TransitionTypeType
 
 /** 转场参数：时长以秒存储，写入前吸附到帧边界并夹到合法区间。 */
 export interface MediaClipTransition {
   type: TransitionType
   durationSec: number
+}
+
+/**
+ * M8：手绘遮罩的一笔轨迹。
+ *
+ * 坐标一律**归一化到画面**（0..1，与分辨率/预览缩放无关），预览与导出共用同一份数据；
+ * `hide` = 抹掉（该区域变透明），`restore` = 擦回（把已有遮罩恢复成可见）。
+ */
+export interface MaskStroke {
+  mode: 'hide' | 'restore'
+  /** 笔刷半径（画面宽度的百分比，0.1..50） */
+  radiusPct: number
+  points: Array<{ x: number; y: number }>
+}
+
+/** M8：媒体段的手绘遮罩（静态，不随时间变化；缺省 = 整段可见）。 */
+export interface MediaClipMask {
+  strokes: MaskStroke[]
+  /**
+   * M8：羽化强度（画面宽度的百分比，0..20；缺省/0 = 硬边不落盘）。
+   * 只影响光栅化那一张 mask PNG（预览 CSS mask 与导出 alphamerge 用的是同一张图），
+   * 所以两边柔边程度天然一致；数值越大边缘越糊。
+   */
+  featherPct?: number
+  /**
+   * M8：反向遮罩（黑白互换）。`true` = 已画的 hide 区域变可见、其余变隐藏。
+   * 只在光栅化时把整张 mask 取反（预览 CSS mask 与导出 alphamerge 仍共用同一张 PNG），
+   * 缺省/`false` = 不落盘（零回归）。
+   */
+  invert?: boolean
 }
 
 /**
@@ -473,10 +574,38 @@ export interface MediaClip {
   speed?: ClipSpeed
   /** v10：入场转场（缺省 = 硬切；必须落在同轨紧邻的切点上，见 Task 5 的适用性判定） */
   transitionIn?: MediaClipTransition
+  /** M8：抠像（色度键/亮度键；缺省 = 不抠像，仅导出侧生效） */
+  key?: MediaClipKey
+  /**
+   * M8-P0：外部 matte（蒙版）文件绝对路径 —— 灰度越高越可见，与手绘遮罩走同一条 alpha 相乘链。
+   * 仅导出侧生效（预览仍显示原片，与降噪/防抖同一口径）；缺省 = 不用外部 matte。
+   */
+  mattePath?: string
+  /** M8-P0：外部 matte 的类型（缺省按扩展名推断：图片 = 静态 matte，视频 = 逐帧 matte） */
+  matteKind?: 'image' | 'video'
+  /**
+   * M6-E：媒体段参数关键帧（`t` = 片段内进度；参数为绝对覆盖静态 `video` 字段）。
+   * 缺省 = 静态几何（预览 CSS 与导出数值逐字节与旧版一致）。
+   */
+  keyframes?: KeyframeTrack[]
+  /**
+   * M8：手绘遮罩（静态，画面空间归一化坐标）。
+   * 缺省 = 不遮罩；预览用 CSS mask、导出用 mask PNG + alphamerge（两边同一份笔画数据）。
+   */
+  mask?: MediaClipMask
 }
 
-/** v10：导出侧降噪档位（预览不生效）。 */
-export type AudioDenoiseLevel = 'light' | 'standard' | 'strong'
+/**
+ * v10：导出侧降噪档位（预览不生效）。
+ *
+ * `light/standard/strong` 走 FFmpeg 频域降噪 `afftdn`；`ai` 走 `arnndn`（RNNoise 神经网络降噪，
+ * 需要随包的 `std.rnnn` 模型，缺失时导出前直接报错，**不会**静默退化成 afftdn）。
+ */
+export type AudioDenoiseLevel = 'light' | 'standard' | 'strong' | 'ai'
+/** M8：人声增强档位（导出侧，高通 + 存在感 + 轻压缩；缺省 = 关闭）。 */
+export type VoiceEnhanceLevel = 'light' | 'standard' | 'strong'
+/** M8：变声特效（导出侧，时长 1:1；缺省 = 关闭）。 */
+export type VoiceChangeKind = 'chipmunk' | 'robot' | 'phone' | 'deep'
 
 /**
  * v9：片段的音频参数（媒体段与音频段共用同一套语义）。
@@ -494,6 +623,10 @@ export interface ClipAudio {
   fadeOutSec: number
   /** v10：降噪档位（缺省 = 关闭；仅导出时生效） */
   denoise?: AudioDenoiseLevel
+  /** M8：人声增强档位（缺省 = 关闭；仅导出时生效；在降噪之后、变速之前） */
+  voiceEnhance?: VoiceEnhanceLevel
+  /** M8：变声特效（缺省 = 关闭；仅导出时生效；rubberband 保证时长 1:1） */
+  voiceChange?: VoiceChangeKind
 }
 
 /**
@@ -604,6 +737,35 @@ export interface MediaClipVideo {
   vibrance: number
   /** 四条自由曲线（默认直线 = 恒等映射） */
   curves: MediaClipCurves
+  /** M7-E：特效包（缺省 = 无；仅导出侧生效，预览用 CSS 近似） */
+  effects?: ActiveEffect[]
+}
+
+/**
+ * M5：冻结帧抽帧请求 —— 从源视频某一时刻抽一帧，落盘成全分辨率 PNG，
+ * 供「冻结帧」插入时间轴（走既有的图像片段语义，不新增 MediaClip 字段）。
+ *
+ * 与缩略图/预览条同一纪律：**产物是运行时派生文件**，落在 userData/freezes 下，
+ * 不进工程 JSON（工程只引用抽出来的 PNG 路径，作为普通 image 素材）。
+ */
+export interface FreezeFrameRequest {
+  /** 抽帧用的实际文件（VFR 转 CFR 后为转换产物） */
+  path: string
+  /** 源视频内的取帧时间（秒）；写入前已吸附帧边界 */
+  atSec: number
+  /** 文件名与回收用的稳定前缀（通常是源素材 mediaId） */
+  key: string
+  /** 期望尺寸（取自源素材 meta；仅用于回传给渲染层建 MediaItem，不做缩放） */
+  width?: number
+  height?: number
+}
+
+/** 冻结帧抽帧结果：失败（源不在 / FFmpeg 缺失 / 抽帧报错）统一 path=null。 */
+export interface FreezeFrameResult {
+  /** 落盘的 PNG 绝对路径；失败为 null */
+  path: string | null
+  width: number
+  height: number
 }
 
 /**
@@ -685,10 +847,37 @@ export interface WatermarkSettings {
 }
 
 /**
- * 左侧栏 Tab（P6）：字幕与水印合并成「包装」。
+ * 左侧栏 Tab（P6）：字幕与水印合并成「包装」；v11 新增「转场」。
  * 这里是唯一一份清单——工程持久化、UI 壳、归一化都从这里取，避免三处各写一份 enum。
  */
-export type LeftTabValue = 'media' | 'wrap' | 'export' | 'progress'
+export type LeftTabValue = 'media' | 'transition' | 'wrap' | 'export' | 'progress'
+
+/**
+ * v4：一个序列（多段剪辑 / 多 sequence）的完整内容快照。
+ *
+ * 口径（避免"双份真相"）：
+ * - **活动序列**的片段与轨道就存在 `Project` 的平铺字段里（`clips`/`mediaClips`/`mediaTracks`…），
+ *   预览、导出、CLI 等既有消费面完全不需要感知序列；
+ * - `Project.sequences` 只存**非活动序列**的快照；切换序列 = 快照当前平铺字段 → 取回目标快照。
+ * 这样 423 处既有读取点零改动，同时工程文件里仍然是「一份活动内容 + N 份非活动内容」。
+ */
+export type GraphicsZ = 'aboveMedia' | 'belowMedia'
+
+export interface SequenceSnapshot {
+  id: string
+  name: string
+  clips: SubtitleClip[]
+  mediaClips: MediaClip[]
+  mediaTracks: MediaTrack[]
+  audioTracks: AudioTrack[]
+  subtitleTrack: SubtitleTrack
+  audioClips?: AudioClip[]
+  /** M7：文本元素（与活动序列同形；切换序列时一起搬） */
+  textClips?: TextElementClip[]
+  audioMastering?: AudioMastering
+  /** M7：图形层整体 z 档（aboveMedia 缺省 = 在所有媒体层之上；belowMedia = 垫在媒体层下） */
+  graphicsZ?: GraphicsZ
+}
 
 export interface Project {
   version: number
@@ -713,14 +902,27 @@ export interface Project {
   subtitleTrack: SubtitleTrack
   /** v7：音频轨（缺省 = 空轨；与媒体轨/Caption 轨并列） */
   audioClips?: AudioClip[]
+  /** M7：文本元素（媒体层之上、字幕条之下；缺省 = 没有文本元素） */
+  textClips?: TextElementClip[]
   /** 水印设置；缺省 = 未导入水印（合成链与旧工程逐字节一致） */
   watermark?: WatermarkSettings
   /** v10：成片响度标准化（缺省 = off，不落盘） */
   audioMastering?: AudioMastering
+  /** M7-E：图形层（字幕条+文本元素）整体 z 档；缺省 aboveMedia（不落盘） */
+  graphicsZ?: GraphicsZ
   /** v10：素材分组（缺省 = 未分组功能未启用，不落盘） */
   mediaBins?: MediaBin[]
   /** UI 状态（不参与渲染）；leftTab 记住上次离开左侧栏的位置，随工程走 */
   ui?: { leftTab?: LeftTabValue } & Record<string, unknown>
+  /**
+   * v4：非活动序列快照（活动序列内容在平铺字段里，见 `SequenceSnapshot` 注释）。
+   * 默认单序列工程不落这个键。
+   */
+  sequences?: SequenceSnapshot[]
+  /** v4：活动序列 id（缺省 = DEFAULT_SEQUENCE_ID，不落盘） */
+  activeSequenceId?: string
+  /** v4：活动序列显示名（缺省 = DEFAULT_SEQUENCE_NAME，不落盘） */
+  activeSequenceName?: string
   /**
    * @deprecated v1 遗留字段，`normalizeProject` 自动迁移到 `media/mediaClips`，写入时不再产出。
    * 保留类型为 ftype 旧工程 JSON 能直接反序列化。
@@ -850,6 +1052,27 @@ export interface ResolvedClip {
   animation: ResolvedAnimation
   /** 是否参与本次导出（单片段导出时用于过滤） */
   selected: boolean
+  /** M6：片段级参数关键帧（缺省 = 不套变换，渲染与旧版逐像素一致） */
+  keyframes?: KeyframeTrack[]
+}
+
+/** M7：渲染侧已解析的文本元素（颜色/字号/锚点都已合并预设与覆盖，renderer 不再查预设表）。 */
+export interface ResolvedTextElement {
+  id: string
+  text: string
+  style: TextElementStyle
+  /** 已注册的字体 family（按 fontId 解析后的结果；渲染不再查字体索引） */
+  fontFamily: string
+  animation: {
+    inFrames: number
+    outFrames: number
+    totalFrames: number
+    easing: EasingKey
+    risePx: number
+  }
+  startFrame: number
+  endFrame: number
+  keyframes?: KeyframeTrack[]
 }
 
 export interface RenderJobSpec {
@@ -862,6 +1085,8 @@ export interface RenderJobSpec {
   startFrame: number
   endFrame: number
   clips: ResolvedClip[]
+  /** M7：文本元素（画在字幕条之下、媒体层之上） */
+  textClips?: ResolvedTextElement[]
   /** 紧凑分支实际生效值，便于 UI 显示 */
   aspectMode: AspectMode
 }
@@ -881,11 +1106,20 @@ export type ExportKind = 'transparentMov' | 'overlayMp4' | 'pngSequence'
 export type ExportCanvasKind = 'landscape' | 'portrait' | 'square'
 export type ExportFit = 'cover' | 'contain'
 export type ExportQuality = 'high' | 'standard' | 'small'
-export type ExportResolutionTier = '1080' | '720'
+/** 分辨率档位：以短边定义（480/720/1080/1440(2K)/2160(4K)）。 */
+export type ExportResolutionTier = '480' | '720' | '1080' | '1440' | '2160'
+/** 分辨率选择：跟随素材或具体档位。 */
+export type ExportResolutionChoice = 'source' | ExportResolutionTier
+/** 视频编码格式：AVC (H.264) / HEVC (H.265) / AV1（M9）。 */
+export type VideoCodec = 'avc' | 'hevc' | 'av1'
+/** 码率档位：较低 / 标准 / 较高 / 自定义。 */
+export type ExportBitrateTier = 'low' | 'standard' | 'high' | 'custom'
 
 /** 目标画布选择：landscape 跟随首个可见底层素材（现有行为）。 */
 export interface ExportCanvasSelection {
   kind: ExportCanvasKind
+  /** 全局分辨率选择；缺省 = 跟随素材（兼由 tier 向后兼容） */
+  resolution?: ExportResolutionChoice
   /** portrait/square only; landscape follows the base media */
   tier?: ExportResolutionTier
   fit?: ExportFit
@@ -948,6 +1182,17 @@ export interface OverlaySegment {
   transitionIn?: MediaClipTransition
   /** v10：源素材总时长（转场手柄夹取用；图像视为无限手柄） */
   sourceDurationSec?: number
+  /**
+   * M8：手绘遮罩（归一化笔画）。渲染侧原样透传，主进程负责光栅化成 mask PNG 并接 alphamerge。
+   * 缺省 = 不遮罩（argv 与旧版逐字节一致）。
+   */
+  mask?: MediaClipMask
+  /** M8：主进程光栅化后的 mask PNG 路径（绝对路径；由主进程在写盘后填，渲染侧不填） */
+  maskPath?: string
+  /** M8-P0：外部 matte 文件（灰度图/视频；渲染侧透传绝对路径，主进程校验存在性） */
+  mattePath?: string
+  /** M8-P0：外部 matte 类型（缺省按扩展名推断） */
+  matteKind?: 'image' | 'video'
 }
 
 /**
@@ -1027,8 +1272,6 @@ export interface ExportRequest {
   target: ExportTarget
   /** 帧来源规格；渲染进程按同一 jobId 保存完整 RenderJobSpec 并按帧应答 */
   frameSpec: FrameSpec
-  /** 透明 MOV：image2pipe 主路径 / PNG 序列回退 */
-  frameDelivery: 'pipe' | 'pngSequence'
   /**
    * v7：音频轨（可选）。两个出口都吃：
    * - overlay：与参考视频原声 amix；
@@ -1037,6 +1280,11 @@ export interface ExportRequest {
   audioClips?: AudioMixClipRequest[]
   /** v10：成片响度标准化（off/缺省 = 不注入 loudnorm，argv 与旧版逐字节一致） */
   audioMastering?: AudioMastering
+  /**
+   * M8：手绘遮罩的光栅化结果（渲染进程在导出前用 Canvas 画好，PNG 字节；缺省 = 无遮罩）。
+   * 主进程只负责写临时文件并把路径接到对应媒体段的 maskPath 上。
+   */
+  mediaMasks?: Array<{ clipId: string; png: Uint8Array }>
   /** 管道内的帧形式（默认 raw：实测 PNG 编码是 1080p 吞吐率瓶颈） */
   pipeTransport?: 'raw' | 'png'
   /** 透明出口编码（默认 ProRes 4444；qtrle 为兼容模式回退） */
@@ -1049,6 +1297,8 @@ export interface ExportRequest {
      * 阶段 7 前，导出管线仍从 `refVideoPath` 读取单输入，`segments` 作为新模型下的补充入口。
      */
     segments?: OverlaySegment[]
+    /** M7-E：图形层 z 档（belowMedia = 字幕/文本垫在媒体层下）；缺省 aboveMedia */
+    graphicsZ?: GraphicsZ
     /** v1 遗留字段：主进程导出入口（新模型下 = `segments[0]?.refVideoPath`）；阶段 7 将删除。 */
     refVideoPath: string
     /** 各段共享的参考元数据（首段为准；导出前已在渲染侧对 media 拉平） */
@@ -1058,8 +1308,6 @@ export interface ExportRequest {
     /** span 秒区间（计划 C7） */
     spanStartSec: number
     spanEndSec: number
-    /** 直接管道合成后端（默认 false：临时透明 MOV 两阶段） */
-    directPipe: boolean
     /**
      * 水印：合成在字幕条之上（最后一层 overlay）。
      * 缺省即不追加输入与滤镜链，argv 与无水印路径逐字节一致。
@@ -1072,6 +1320,20 @@ export interface ExportRequest {
     canvas?: { width: number; height: number; fit: ExportFit }
     /** v10：画质档（缺省 = high；high = CRF 18，与现有默认一致） */
     quality?: ExportQuality
+    /** 视频编码格式（缺省 = AVC/H.264） */
+    videoCodec?: VideoCodec
+    /** 视频码率（kbps）；有值时走码率模式，缺省保持 CRF 路径 */
+    videoBitrateKbps?: number
+    /** 音频码率（kbps）；有值时强制 AAC 重编码 */
+    audioBitrateKbps?: number
+    /** M9：CRF 直给（0–51）；缺省按画质档（high 18 / standard 23 / small 28） */
+    crf?: number
+    /** M9：软件编码 preset（x264/x265 名称；AV1 内部映射到 SVT-AV1 0–13） */
+    encoderPreset?: string
+    /** M9：输出位深；10 走 `yuv420p10le`（HEVC/AV1 有效，H.264 由 UI 侧禁用） */
+    bitDepth?: 8 | 10
+    /** M9：色彩范围标签；full 输出带 `-color_range pc` 元数据 */
+    colorRange?: 'limited' | 'full'
   }
 }
 

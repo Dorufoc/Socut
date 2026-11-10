@@ -55,6 +55,8 @@ export interface MediaClipCardProps {
   onCommit?: () => void
   /** 按下时的回调：上层在这一刻快照吸附候选边缘，拖拽途中不再重算 */
   onDragStart?: () => void
+  /** M6：点关键帧菱形跳到该帧在时间轴上的位置（片段入点 + t × 时长） */
+  onSeekKeyframe?: (atSec: number) => void
 }
 
 type Edge = 'in' | 'out' | 'move'
@@ -80,7 +82,8 @@ export function MediaClipCard({
   onMove,
   onTrim,
   onCommit,
-  onDragStart
+  onDragStart,
+  onSeekKeyframe
 }: MediaClipCardProps): ReactElement {
   const dragRef = useRef<DragState | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
@@ -98,6 +101,12 @@ export function MediaClipCard({
 
   const left = secToPx(clip.timelineStartSec, durationSec, widthPx)
   const right = secToPx(clip.timelineEndSec, durationSec, widthPx)
+  // M6：媒体段关键帧菱形（所有参数轨的 t 并集；同 t 只画一个）。t 是片段内 0..1 进度。
+  const keyframeTs = [
+    ...new Set((clip.keyframes ?? []).flatMap((track) => track.points.map((point) => Math.round(point.t * 1000) / 1000)))
+  ].sort((a, b) => a - b)
+  // 菱形的水平落点按「卡片实际画出来的宽度」算（与 style.width 的 24px 下限一致）
+  const keyframeSpanPx = Math.max(24, right - left)
   const name = item?.name ?? '（素材已移出）'
 
   /** 指针位置 → 时间（源坐标给 tooltip，时间轴坐标给 seek） */
@@ -213,7 +222,7 @@ export function MediaClipCard({
       }${locked ? ' media-clip-card--locked' : ''}${bars.length > 0 ? ' media-clip-card--spectrum' : ''}`}
       style={{
         left,
-        width: Math.max(24, right - left)
+        width: cardWidthPx
       }}
       onPointerDown={begin('move')}
       onPointerMove={onPointerMove}
@@ -262,6 +271,22 @@ export function MediaClipCard({
         className={`media-clip-card__hint${hovering && stripReady ? ' media-clip-card__hint--visible' : ''}`}
         aria-hidden="true"
       />
+      {/* M6：关键帧菱形（与字幕条卡片同一交互：点菱形把播放头带到该帧；不启动整段拖动） */}
+      {keyframeTs.map((t) => (
+        <button
+          key={t}
+          type="button"
+          className="clip-card__keyframe media-clip-card__keyframe"
+          data-keyframe-t={t}
+          style={{ left: Math.max(2, Math.min(keyframeSpanPx - 2, t * keyframeSpanPx)) }}
+          title={`关键帧 ${Math.round(t * 100)}% · 点击跳到该帧`}
+          aria-label={`关键帧 ${Math.round(t * 100)}%`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() =>
+            onSeekKeyframe?.(clip.timelineStartSec + t * (clip.timelineEndSec - clip.timelineStartSec))
+          }
+        />
+      ))}
       {/* 频谱条：底部 1/3，不碰手柄区与文字行（见文件头纪律说明） */}
       {bars.length > 0 ? (
         <div ref={spectrumRef} className="media-clip-card__spectrum" data-bars={bars.length} aria-hidden="true">

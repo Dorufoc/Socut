@@ -2,14 +2,15 @@ import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { CHANNELS } from '../shared/ipcChannels'
-import { APP_NAME, WINDOW_TITLE } from '../shared/constants'
+import { APP_NAME, IMPORTABLE_VIDEO_EXTENSIONS, WATERMARK_IMAGE_EXTENSIONS, WINDOW_TITLE } from '../shared/constants'
 import { validateAllPresets } from '../shared/presets'
 import type { AudioPeaksRequest, AudioPeaksResult, CoverExportRequest, ExportRequest, Fps, MediaProxyRequest, MediaProxyResult, MediaProxyStatusResult, MediaStripRequest, MediaStripResult, Project, StabPreviewRequest, StabPreviewResult, VideoMeta } from '../shared/types'
-import type { AppInfo, CoverCaptureRect, EstimateInput, SaveProjectResult } from '../shared/api'
+import type { AppInfo, AiMatteRequest, CaptionTranscribeResult, CoverCaptureRect, EstimateInput, MattePickResult, SaveProjectResult, VoiceAssetPatch, VoiceAssetStatus } from '../shared/api'
 import type { CliResponse } from '../shared/cliProtocol'
 import type { CliControlServer } from './cliServer'
 import { AUTOSAVE_ENTRY_ID, RECENT_ENTRY_ID_PATTERN, recentEntryIdForPath } from '../shared/recentProjects'
-import { describeBinarySource, resolveFfmpegBinaries, userFontsDir } from './paths'
+import { describeBinarySource, resolveFfmpegBinaries, resourcesRoot, rnnoiseModelDirs, userFontsDir } from './paths'
+import { resolveRnnoiseModel } from './rnnoise'
 import { ffmpegVersion } from './ffrun'
 import { log } from './log'
 import { importFontDialog, listFonts, readFontBytes, removeFont } from './fontStore'
@@ -35,6 +36,8 @@ import {
   updateEntryFromProject
 } from './recentProjectStore'
 import { pickAndProbeWatermark, probeImageSize } from './watermark'
+import { inferMatteKind } from '../shared/ffmpegArgs'
+import { aiMatteStatus, applyAiMatte, cancelAiMatte } from './aiMatte'
 import { createPreviewUrl } from './media'
 import { ensureThumbRegistered, generateThumbnail, removeThumbnail, thumbUrlFor } from './thumbProtocol'
 import { generateStrip, removeStripsFor } from './stripProtocol'
@@ -42,14 +45,19 @@ import { generateAudioPeaks, removePeaksFor } from './audioPeaks'
 import { cancelCfr, convertToCfr } from './cfrTranscode'
 import { applyStabPreview, cancelStabPreview, removeStabPreviewForClip } from './stabPreview'
 import { applyMediaProxy, cancelMediaProxy, removeMediaProxy, statusMediaProxy } from './mediaProxy'
+import { extractFreezeFrame, removeFreezeFrames } from './freezeFrame'
 import { smokeConfig, verifySmokeReport, writeSmokeReport } from './smoke'
 import { getGpuDiagnostics } from './gpu'
 import { getRenderSettings, getStartupPreference, saveRenderSettings } from './renderSettings'
 import type { GpuDiagnostics, RenderSettings } from '../shared/gpu'
+import type { FreezeFrameResult } from '../shared/types'
 import { installFrameIpc } from './export/frameChannel'
 import { exportCover } from './export/cover'
 import type { SmokeReport } from '../shared/api'
 import type { ExportEngine } from './export/engine'
+import { createWhisperManager, type WhisperManager } from './whisper'
+import { createCaptionTranscribeService, normalizeCaptionTranscribeRequest } from './captionTranscribe'
+import { createWindowProjectLock } from './windowProjectLock'
 
 /** IPC 注册总入口（唯一使用 ipcMain 的位置）。所有 handler 均为异步。 */
 
@@ -76,9 +84,71 @@ function resolveDevPath(filePath: string, action: '读取' | '写入'): string {
   return target
 }
 
+/**
+ * 语音资产配置补丁的入参校验（渲染进程是 JS，不能信类型）：
+ * - 字符串：必须非空（路径由 `saveConfig` 再校验真实存在）；
+ * - `null`：清除该项（自动检测 / 忘记已选）；
+ * - 数字（threads）：正整数；
+ * - 未知键或非法类型：整份补丁拒绝（返回 null），避免「看着保存成功、其实没生效」。
+ */
+function normalizeVoiceAssetPatch(raw: unknown): VoiceAssetPatch | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const record = raw as Record<string, unknown>
+  const patch: VoiceAssetPatch = {}
+  let invalid = false
+  const readPath = (key: 'binaryPath' | 'modelPath'): void => {
+    const value = record[key]
+    if (value === undefined) return
+    if (value === null) {
+      patch[key] = null
+      return
+    }
+    if (typeof value === 'string' && value.trim().length > 0) {
+      patch[key] = value.trim()
+      return
+    }
+    invalid = true
+  }
+  readPath('binaryPath')
+  readPath('modelPath')
+  const language = record['language']
+  if (language !== undefined) {
+    if (language === null) patch.language = null
+    else if (typeof language === 'string') patch.language = language.trim().length > 0 ? language.trim() : null
+    else invalid = true
+  }
+  const threads = record['threads']
+  if (threads !== undefined) {
+    if (threads === null) patch.threads = null
+    else if (typeof threads === 'number' && Number.isFinite(threads) && threads > 0) patch.threads = Math.round(threads)
+    else invalid = true
+  }
+  const allowed = new Set(['binaryPath', 'modelPath', 'language', 'threads'])
+  for (const key of Object.keys(record)) if (!allowed.has(key)) invalid = true
+  return invalid ? null : patch
+}
+
 export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null): void {
   // 帧回执监听只需注册一次（pull 模式的渲染侧应答入口）
   installFrameIpc()
+
+  /**
+   * M10：窗口侧工程锁。打开/另存为/CLI 指定路径保存成功后立即持锁，
+   * 这样 Agent 之后保存同一工程会被明确拒绝（错误信息带 pid + mode=window）。
+   * 冲突时**不阻止用户打开工程**（只记日志、退回无锁旧行为）；退出应用时释放。
+   */
+  const windowLock = createWindowProjectLock()
+  app.on('will-quit', () => {
+    void windowLock.release()
+  })
+  const bindWindowLock = async (projectPath: string): Promise<void> => {
+    const bound = await windowLock.bind(projectPath)
+    if (!bound.ok) {
+      console.warn(
+        `[lock] 窗口未持有工程锁（${bound.reason}${bound.holder ? `，holder pid ${bound.holder.pid}/${bound.holder.mode}` : ''}）：${bound.path}`
+      )
+    }
+  }
 
   // CLI 控制面：渲染侧命令路由的就绪握手与逐条结果回执
   ipcMain.on(CHANNELS.cliReady, () => {
@@ -240,6 +310,8 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
   ipcMain.handle(CHANNELS.projectOpen, async (event) => {
     const loaded = await openProjectDialog(senderWindow(event))
     if (!loaded) return null
+    // M10：打开成功后窗口持锁（Agent 已持新鲜锁时只记日志，不阻止打开）
+    await bindWindowLock(loaded.path)
     // 历史登记失败不能阻断「打开工程」本身：退化为按路径即时算 id 返回
     try {
       const entry = await registerFileProject(loaded.path, loaded.project, { touchOpened: true })
@@ -253,6 +325,8 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
   ipcMain.handle(CHANNELS.projectSaveAs, async (event, project: Project) => {
     const savedPath = await saveProjectAs(senderWindow(event), project)
     if (!savedPath) return null
+    // M10：另存为后窗口锁跟着切到新文件（旧锁撤掉，避免旧工程一直被标为占用）
+    await bindWindowLock(savedPath)
     try {
       const entry = await registerFileProject(savedPath, project, { touchOpened: true })
       return { path: savedPath, entryId: entry.id }
@@ -268,6 +342,8 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
     async (_event, target: string, project: Project): Promise<SaveProjectResult> => {
       if (typeof target !== 'string' || target.length === 0) throw new Error('缺少工程保存路径')
       const savedPath = await writeProjectFile(target, project)
+      // M10：CLI 指定路径保存同样把窗口锁切到该工程
+      await bindWindowLock(savedPath)
       try {
         const entry = await registerFileProject(savedPath, project, { touchOpened: true })
         return { path: savedPath, entryId: entry.id }
@@ -301,11 +377,18 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
   // ---------------------------------------------------------------- 最近工程（启动页）
   ipcMain.handle(CHANNELS.projectRecentList, async () => listRecentProjects())
 
-  ipcMain.handle(CHANNELS.projectRecentCreate, async () => createRecentProject())
+  ipcMain.handle(CHANNELS.projectRecentCreate, async () => {
+    // 新建 = 没有绑定文件：释放当前窗口锁（旧工程不再被窗口占用）
+    await windowLock.release()
+    return createRecentProject()
+  })
 
-  ipcMain.handle(CHANNELS.projectRecentOpen, async (_event, id: string) =>
-    openRecentProject(String(id))
-  )
+  ipcMain.handle(CHANNELS.projectRecentOpen, async (_event, id: string) => {
+    const opened = await openRecentProject(String(id))
+    // M10：从启动页打开同样是"窗口打开了一个工程文件" → 持锁
+    if (opened) await bindWindowLock(opened.path)
+    return opened
+  })
 
   ipcMain.handle(CHANNELS.projectRecentRename, async (_event, id: string, name: string) =>
     renameRecentProject(String(id), String(name))
@@ -406,6 +489,59 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
     return reregistered ?? thumbUrlFor(mediaId)
   })
 
+  /**
+   * M8-P0：外部 matte 导入。
+   * 只做最小探测：文件存在且非空 → 按扩展名判 image/video（判断不出就报错让用户换文件）；
+   * 静态图顺带用 ffprobe 探原图宽高（供检查器显示），视频不探元数据（导出时 FFmpeg 自己解）。
+   * 取消/关窗返回 null（与视频、水印导入同一惯例）。
+   */
+  ipcMain.handle(CHANNELS.mediaPickMatte, async (event): Promise<MattePickResult | null> => {
+    const options = {
+      title: '选择 matte 文件（PNG/JPG 等静态图，或 mp4/mov 等视频）',
+      properties: ['openFile'] as ['openFile'],
+      filters: [
+        {
+          name: '所有 matte 文件',
+          extensions: [...WATERMARK_IMAGE_EXTENSIONS, ...IMPORTABLE_VIDEO_EXTENSIONS]
+        },
+        { name: '图片 matte', extensions: [...WATERMARK_IMAGE_EXTENSIONS] },
+        { name: '视频 matte', extensions: [...IMPORTABLE_VIDEO_EXTENSIONS] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    }
+    const parent = senderWindow(event)
+    const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    const target = result.filePaths[0] as string
+    const stat = await fs.stat(target).catch(() => null)
+    if (!stat?.isFile() || stat.size === 0) {
+      throw new Error(`matte 文件不可读：${path.basename(target)}`)
+    }
+    const kind = inferMatteKind(target)
+    if (!kind) {
+      throw new Error(
+        `无法判断 matte 类型：${path.basename(target)}（请使用 png/jpg 等静态图，或常见视频格式）`
+      )
+    }
+    const picked = { path: target, name: path.basename(target), kind }
+    if (kind === 'image') {
+      const size = await probeImageSize(target)
+      return { ...picked, width: size.width, height: size.height }
+    }
+    return picked
+  })
+
+  /**
+   * M8-P1：AI matte 体检 / 生成。
+   * 生成是后台 job（jobId 前缀 matte-）：本 handler 只返回 {status, jobId}，进度与结果走 job 事件；
+   * 取消与导出共用 `export.cancel` 入口（见上方 handler）。
+   */
+  ipcMain.handle(CHANNELS.aiMatteStatus, async () => aiMatteStatus())
+
+  ipcMain.handle(CHANNELS.aiMatteGenerate, async (event, request: AiMatteRequest) =>
+    applyAiMatte(request, senderWindow(event))
+  )
+
   /** v2：素材移出池时回收缩略图、时间帧预览条与频谱取样（userData/thumbs 与 userData/strips）。 */
   ipcMain.handle(CHANNELS.mediaThumbRemove, async (_event, mediaId: string): Promise<void> => {
     if (typeof mediaId === 'string' && mediaId.length > 0) {
@@ -414,7 +550,17 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
       await removeStripsFor(mediaId)
       // 频谱取样只活在内存里（同一口径：按 mediaId 前缀整批回收）
       removePeaksFor(mediaId)
+      // M5：冻结帧抽出来的 PNG 也按 mediaId 前缀整批回收
+      await removeFreezeFrames(mediaId)
     }
+  })
+
+  /**
+   * M5：冻结帧抽帧。源不在 / FFmpeg 缺失 / 抽帧失败时返回 `{ path: null }`，
+   * 由渲染层给提示，不抛错（一次失败不该打断用户剪辑）。
+   */
+  ipcMain.handle(CHANNELS.mediaExtractFrame, async (_event, request: unknown): Promise<FreezeFrameResult> => {
+    return extractFreezeFrame(request)
   })
 
   /**
@@ -516,6 +662,111 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
     return saveRenderSettings({ ...getRenderSettings(), videoEncoder: mode })
   })
 
+  // ---------------------------------------------------------------- 语音资产（M11 whisper / M8 RNNoise）
+  /**
+   * whisper 管理器与 CLI 各持有一份实例，但共享同一份 `userData/whisper.json` 配置；
+   * 这里懒创建：用户不点「自动字幕」、不进设置页就不会读配置/资产。
+   */
+  let whisper: WhisperManager | null = null
+  const ensureWhisper = (): WhisperManager => {
+    whisper ??= createWhisperManager({
+      userDataDir: app.getPath('userData'),
+      resourcesDir: resourcesRoot(),
+      // whisper-cli 只吃 16k 单声道 WAV：用随包 FFmpeg 先把视频/音频抽成 wav
+      ffmpegPath: async () => (await resolveFfmpegBinaries()).ffmpeg,
+      // 抽音阶段的真实进度靠 ffprobe 读时长换算
+      ffprobePath: async () => (await resolveFfmpegBinaries()).ffprobe
+    })
+    return whisper
+  }
+
+  /** 设置页要看的「语音资产」全景：whisper 二进制/模型 + RNNoise 模型（都是离线资产）。 */
+  const voiceAssetStatus = async (): Promise<VoiceAssetStatus> => {
+    const manager = ensureWhisper()
+    const [status, rnnoise] = await Promise.all([
+      manager.status(),
+      resolveRnnoiseModel({ ...rnnoiseModelDirs(), env: process.env })
+    ])
+    return { ...status, rnnoise }
+  }
+
+  /** 弹文件选择框（窗口可能已关闭，退化为无父窗口的对话框）。 */
+  const pickFile = async (
+    event: Electron.IpcMainInvokeEvent,
+    options: Electron.OpenDialogOptions
+  ): Promise<string | null> => {
+    const window = senderWindow(event)
+    const result = window
+      ? await dialog.showOpenDialog(window, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled) return null
+    return result.filePaths[0] ?? null
+  }
+
+  ipcMain.handle(CHANNELS.whisperStatus, async (): Promise<VoiceAssetStatus> => voiceAssetStatus())
+
+  ipcMain.handle(CHANNELS.whisperSaveConfig, async (_event, raw: unknown): Promise<VoiceAssetStatus> => {
+    const patch = normalizeVoiceAssetPatch(raw)
+    if (!patch) throw new Error('无效的语音资产配置（只接受字符串/数字/null 字段）')
+    // 路径不存在时 saveConfig 抛 WhisperError（错误码原样给渲染侧展示）
+    await ensureWhisper().saveConfig(patch)
+    return voiceAssetStatus()
+  })
+
+  ipcMain.handle(CHANNELS.whisperPickBinary, async (event): Promise<string | null> =>
+    pickFile(event, {
+      title: '选择 whisper.cpp 可执行文件（whisper-cli.exe）',
+      properties: ['openFile'],
+      filters:
+        process.platform === 'win32'
+          ? [{ name: 'whisper.cpp 可执行文件', extensions: ['exe'] }]
+          : [{ name: 'whisper.cpp 可执行文件', extensions: ['*'] }]
+    })
+  )
+
+  ipcMain.handle(CHANNELS.whisperPickModel, async (event): Promise<string | null> =>
+    pickFile(event, {
+      title: '选择 whisper 模型（ggml-*.bin）',
+      properties: ['openFile'],
+      filters: [{ name: 'whisper 模型', extensions: ['bin'] }]
+    })
+  )
+
+  ipcMain.handle(CHANNELS.whisperReset, async (): Promise<VoiceAssetStatus> => {
+    await ensureWhisper().resetConfig()
+    return voiceAssetStatus()
+  })
+
+  const captionTranscribe = createCaptionTranscribeService({
+    transcribe: async (request) => ensureWhisper().transcribe(request)
+  })
+
+  ipcMain.handle(
+    CHANNELS.captionTranscribe,
+    async (event, raw: unknown): Promise<CaptionTranscribeResult> => {
+      const request = normalizeCaptionTranscribeRequest(raw)
+      if (!request) {
+        return {
+          requestId: '',
+          ok: false,
+          cues: [],
+          language: null,
+          errorCode: 'BAD_REQUEST',
+          errorMessage: '自动字幕请求参数无效（缺少 requestId 或 mediaPath）'
+        }
+      }
+      return captionTranscribe.transcribe(request, (progress) => {
+        // 进度只发给发起这次转写的窗口；窗口在转写中途被关掉时忽略
+        if (!event.sender.isDestroyed()) event.sender.send(CHANNELS.captionProgress, progress)
+      })
+    }
+  )
+
+  /** 取消在跑的自动字幕：abort → whisper 管理器 kill 子进程 → 转写以 CANCELLED 结束。 */
+  ipcMain.handle(CHANNELS.captionCancel, async (_event, requestId: unknown): Promise<boolean> => {
+    return typeof requestId === 'string' && requestId.length > 0 && captionTranscribe.cancel(requestId)
+  })
+
   ipcMain.handle(CHANNELS.exportCancel, async (_event, jobId: string) => {
     await engine.cancel(String(jobId))
     await cancelCfr(String(jobId))
@@ -523,6 +774,8 @@ export function registerIpc(engine: ExportEngine, cli?: CliControlServer | null)
     await cancelStabPreview(String(jobId))
     // v10：预览代理作业（jobId 前缀 proxy-）同一取消入口；未命中注册表时无副作用
     await cancelMediaProxy(String(jobId))
+    // M8-P1：AI matte 生成作业（jobId 前缀 matte-）同一取消入口
+    await cancelAiMatte(String(jobId))
   })
 
   // ---------------------------------------------------------------- 导出

@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
 import { CaptionListPanel } from './CaptionListPanel'
+import { TextElementsPanel } from './TextElementsPanel'
 import { WatermarkPanel } from './WatermarkPanel'
 
 /**
@@ -19,6 +20,9 @@ export function WrapPanel(): ReactElement {
       <section className="wrap-section wrap-section--captions">
         <CaptionListPanel />
       </section>
+
+      {/* M7：文本元素（自由叠加文字，与上面的包装字幕条是两套体系） */}
+      <TextElementsPanel />
 
       <section className="group wrap-section wrap-section--ending">
         <div className="group__head">

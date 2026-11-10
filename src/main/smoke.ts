@@ -73,7 +73,6 @@ export function initSmoke(): void {
     // 门禁取证需要真实夹具视频（make-probe-fixtures 的中间产物）
     fixtureDir: process.env.SOCUT_SMOKE_FIXTURES ?? path.join(app.getAppPath(), 'spikes', 'fixtures-tmp'),
     exportKind: process.env.SOCUT_SMOKE_KIND === 'pngSequence' ? 'pngSequence' : 'transparentMov',
-    frameDelivery: process.env.SOCUT_SMOKE_DELIVERY === 'pngSequence' ? 'pngSequence' : 'pipe',
     forceCopyAudio: process.env.SOCUT_SMOKE_AUDIO === 'force-copy'
   }
   void log(
@@ -607,16 +606,11 @@ export async function verifySmokeReport(report: SmokeReport): Promise<SmokeVerif
     const equivalent1080p30_10s = (report.elapsedMs / 1000) * scale
     checks.extrapolated1080p30_10sSec = Number(equivalent1080p30_10s.toFixed(1))
     /**
-     * ≤30s 只适用于默认交付路径（rawvideo 直送 stdin）。
-     * pngSequence 回退本质上多一次逐帧 PNG 压缩 + 一次落盘 + 二次编码（计划 C17 已记该开销），
-     * 拿默认路径的阈值去量它会得出假阳性失败（实测外推 68.6s）。
-     * 但也不能不管：给它一个宽得多但仍能拦住病态回归的上界。
+     * 两种出口都是内存直送编码（v11 起不再有 PNG 中间帧落盘），
+     * 因此统一适用 30s 上界。
      */
-    const limit = cfg.frameDelivery === 'pngSequence' ? 150 : 30
-    if (equivalent1080p30_10s > limit) {
-      failures.push(
-        `外推 1080p30/10s 耗时 ${equivalent1080p30_10s.toFixed(1)}s > ${limit}s（验收第 2 条，交付方式=${cfg.frameDelivery}）`
-      )
+    if (equivalent1080p30_10s > 30) {
+      failures.push(`外推 1080p30/10s 耗时 ${equivalent1080p30_10s.toFixed(1)}s > 30s（验收第 2 条）`)
     }
   }
 

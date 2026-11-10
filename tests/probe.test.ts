@@ -346,37 +346,33 @@ describe('体积预估（规格 §2.3）', () => {
    * 计划 §5 的硬预检（主进程写盘前拦，不只是 UI 提示）。
    * 重点验证两个“不该拦”的分支：误拒比不拒更难发现。
    */
-  it('硬预检：透明 MOV 与两阶段叠加会拦，PNG 序列与直管道不拦', () => {
+  it('硬预检：只有透明 MOV 拦，叠加（流式）/PNG 序列不拦', () => {
     const estimate = estimateProres4444Bytes(1920, 1080, FPS_30, 300)
     const common = { width: 1920, height: 1080, fps: FPS_30, frames: 300 }
 
-    const mov = diskPrecheck({ ...common, kind: 'transparentMov', directPipe: false, freeBytes: estimate * 1.2 })
+    const mov = diskPrecheck({ ...common, kind: 'transparentMov', freeBytes: estimate * 1.2 })
     expect(mov.enforced).toBe(true)
     expect(mov.ok).toBe(false)
     expect(mov.requiredBytes).toBe(Math.round(estimate * 1.5))
     expect(mov.reason).toContain('目标盘可用')
 
-    const overlay = diskPrecheck({ ...common, kind: 'overlayMp4', directPipe: false, freeBytes: estimate * 1.2 })
-    expect(overlay.enforced).toBe(true)
-    expect(overlay.ok).toBe(false)
+    // 叠加出口全程流式编码、不落中间文件，产物是 H.264，ProRes 系数不适用
+    const overlay = diskPrecheck({ ...common, kind: 'overlayMp4', freeBytes: estimate * 1.2 })
+    expect(overlay.enforced).toBe(false)
+    expect(overlay.ok).toBe(true)
 
     // PNG 序列本身就是磁盘紧张时的推荐出口，拿 ProRes 口径量它必然误拒
-    const png = diskPrecheck({ ...common, kind: 'pngSequence', directPipe: false, freeBytes: 1024 })
+    const png = diskPrecheck({ ...common, kind: 'pngSequence', freeBytes: 1024 })
     expect(png.enforced).toBe(false)
     expect(png.ok).toBe(true)
 
-    // 直管道不落中间 MOV，产物是 H.264，ProRes 系数不适用
-    const direct = diskPrecheck({ ...common, kind: 'overlayMp4', directPipe: true, freeBytes: 1024 })
-    expect(direct.enforced).toBe(false)
-    expect(direct.ok).toBe(true)
-
     // 空间充足时不拦
-    const roomy = diskPrecheck({ ...common, kind: 'transparentMov', directPipe: false, freeBytes: estimate * 4 })
+    const roomy = diskPrecheck({ ...common, kind: 'transparentMov', freeBytes: estimate * 4 })
     expect(roomy.ok).toBe(true)
     expect(roomy.reason).toBeUndefined()
 
     // statfs 不可用：不拦，但必须说明“已跳过”，不能把未校验当成已校验
-    const unknown = diskPrecheck({ ...common, kind: 'transparentMov', directPipe: false, freeBytes: undefined })
+    const unknown = diskPrecheck({ ...common, kind: 'transparentMov', freeBytes: undefined })
     expect(unknown.ok).toBe(true)
     expect(unknown.enforced).toBe(true)
     expect(unknown.reason).toContain('跳过')

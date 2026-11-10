@@ -1,3 +1,4 @@
+import { effectPreviewFilter, normalizeActiveEffects } from './effectPackages'
 import type { CurvePoint, MediaClipCurves, MediaClipVideo } from './types'
 
 /**
@@ -129,6 +130,7 @@ export function normalizeMediaVideo(raw: unknown): MediaClipVideo | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const record = raw as Record<string, unknown>
   const curvesRaw = typeof record['curves'] === 'object' && record['curves'] !== null ? (record['curves'] as Record<string, unknown>) : {}
+  const effects = normalizeActiveEffects(record['effects'])
   const next: MediaClipVideo = {
     scalePercent: round1(clamp(num(record['scalePercent'], 100), MEDIA_VIDEO_RANGE.scale.min, MEDIA_VIDEO_RANGE.scale.max)),
     offsetXPercent: round1(clamp(num(record['offsetXPercent'], 0), MEDIA_VIDEO_RANGE.offset.min, MEDIA_VIDEO_RANGE.offset.max)),
@@ -147,7 +149,8 @@ export function normalizeMediaVideo(raw: unknown): MediaClipVideo | undefined {
       r: normalizeCurve(curvesRaw['r']),
       g: normalizeCurve(curvesRaw['g']),
       b: normalizeCurve(curvesRaw['b'])
-    }
+    },
+    ...(effects ? { effects } : {})
   }
   return isDefaultMediaVideo(next) ? undefined : next
 }
@@ -184,6 +187,7 @@ export function isDefaultMediaVideo(video: MediaClipVideo | undefined): boolean 
     Math.abs(video.saturation) < 1e-6 &&
     Math.abs(video.warmth) < 1e-6 &&
     Math.abs(video.vibrance) < 1e-6 &&
+    (video.effects?.length ?? 0) === 0 &&
     isStraightCurves(video.curves)
   )
 }
@@ -458,5 +462,8 @@ export function mediaVideoFilter(
   if (Math.abs(video.saturation) > 1e-6 || Math.abs(video.vibrance) > 1e-6) parts.push(`saturate(${withLight.toFixed(3)})`)
   // 多候选预览时每段各有自己的曲线表，id 由调用方给；默认仍用全局 id（旧调用不变）
   if (needsChannelTable(video)) parts.push(`url(#${channelTableId})`)
+  // M7-E：特效包的 CSS 近似（黑白/暖光/暗角等可近似项；其余靠导出）
+  const effectFilter = effectPreviewFilter(video.effects)
+  if (effectFilter) parts.push(effectFilter)
   return parts.length === 0 ? 'none' : parts.join(' ')
 }

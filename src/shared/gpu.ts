@@ -306,62 +306,137 @@ export function parseHardwareEncoders(stdout: string): HardwareEncoderInfo[] {
 
 /**
  * 选出最终要用的硬件编码器：
- * - software 模式 → null（强制 libx264）
- * - auto → 优先匹配偏好显卡厂商的 H.264 编码器；否则按 NVENC/QSV/AMF 顺序取第一个
- * 只选 H.264：当前叠加出口固定输出 H.264 MP4，HEVC/AV1 会改变兼容性。
+ * - software 模式 → null（强制软件编码）
+ * - auto → 优先匹配偏好显卡厂商的对应编码器；否则按 NVENC/QSV/AMF 顺序取第一个
+ * codec 缺省 h264（当前叠加出口默认 H.264 MP4）。
  */
 export function pickHardwareEncoder(
   available: HardwareEncoderInfo[],
-  options: { mode: VideoEncoderMode; preferredVendor?: GpuVendor }
+  options: { mode: VideoEncoderMode; preferredVendor?: GpuVendor; codec?: 'h264' | 'hevc' | 'av1' }
 ): HardwareEncoderInfo | null {
   if (options.mode === 'software') return null
-  const h264 = available.filter((encoder) => encoder.codec === 'h264')
-  if (h264.length === 0) return null
+  const codec = options.codec ?? 'h264'
+  const candidates = available.filter((encoder) => encoder.codec === codec)
+  if (candidates.length === 0) return null
   if (options.preferredVendor && options.preferredVendor !== 'unknown') {
-    const matched = h264.find((encoder) => encoder.vendor === options.preferredVendor)
+    const matched = candidates.find((encoder) => encoder.vendor === options.preferredVendor)
     if (matched) return matched
   }
-  return h264[0] ?? null
+  return candidates[0] ?? null
+}
+
+/** 码率模式参数（-b:v / -maxrate / -bufsize）。 */
+/**
+ * 动态码率（VBR）：`-b:v` 是**目标平均码率**，编码器按画面复杂度自行分配，
+ * 不设 `-maxrate` / `-bufsize` 上限，避免把动态码率压成恒定码率。
+ */
+function bitrateArgs(bitrateKbps: number): string[] {
+  const k = Math.max(1, Math.round(bitrateKbps))
+  return ['-b:v', `${k}k`]
 }
 
 /**
- * 硬件编码参数（H.264）。质量口径对齐现有 libx264 crf：NVIDIA 用 VBR+CQ，
- * QSV 用 global_quality，AMF 用 CQP。返回 null 表示不认识这个编码器。
+ * 硬件编码参数（H.264 / HEVC）。质量口径对齐现有 libx264 crf：NVIDIA 用 VBR+CQ，
+ * QSV 用 global_quality，AMF 用 CQP；给 bitrateKbps 时切换为码率模式。
+ * 返回 null 表示不认识这个编码器。
  */
-export function hardwareVideoEncodeArgs(encoderName: string, quality: number): string[] | null {
+export function hardwareVideoEncodeArgs(
+  encoderName: string,
+  quality: number,
+  bitrateKbps?: number
+): string[] | null {
   const q = Math.max(1, Math.min(51, Math.round(quality)))
-  if (encoderName === 'h264_nvenc') {
-    return ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', String(q), '-b:v', '0']
+  const rate = bitrateKbps !== undefined ? bitrateArgs(bitrateKbps) : null
+  if (encoderName === 'h264_nvenc' || encoderName === 'hevc_nvenc' || encoderName === 'av1_nvenc') {
+    const name = encoderName
+    if (rate) return ['-c:v', name, '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', ...rate]
+    return ['-c:v', name, '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', String(q), '-b:v', '0']
   }
-  if (encoderName === 'h264_qsv') {
-    return ['-c:v', 'h264_qsv', '-preset', 'medium', '-global_quality', String(q)]
+  if (encoderName === 'h264_qsv' || encoderName === 'hevc_qsv' || encoderName === 'av1_qsv') {
+    const name = encoderName
+    if (rate) return ['-c:v', name, '-preset', 'medium', ...rate]
+    return ['-c:v', name, '-preset', 'medium', '-global_quality', String(q)]
   }
-  if (encoderName === 'h264_amf') {
+  if (encoderName === 'h264_amf' || encoderName === 'hevc_amf' || encoderName === 'av1_amf') {
+    const name = encoderName
+    if (rate) return ['-c:v', name, '-quality', 'balanced', '-rc', 'vbr_peak', ...rate]
     const qp = String(Math.max(1, Math.min(51, q + 2)))
-    return ['-c:v', 'h264_amf', '-quality', 'balanced', '-rc', 'cqp', '-qp_i', String(q), '-qp_p', qp, '-qp_b', qp]
+    return ['-c:v', name, '-quality', 'balanced', '-rc', 'cqp', '-qp_i', String(q), '-qp_p', qp, '-qp_b', qp]
   }
   return null
 }
 
-/** 软件编码参数（现状逐字节保持：libx264 + crf + preset）。 */
-export function softwareVideoEncodeArgs(quality: number, preset: string): string[] {
-  return ['-c:v', 'libx264', '-crf', String(quality), '-preset', preset]
+/**
+ * x264/x265 的 preset 名 → libaom-av1 的 `-cpu-used` 档位（0 最慢最好、8 最快）。
+ *
+ * 为什么用 libaom 而不是 SVT-AV1：随包 FFmpeg（gyan essentials）只带 libaom-av1，
+ * 不带 libsvtav1；用 libaom 能保证「装了就能编」。SVT 更快，但属于可选升级项。
+ * 只做粗映射：目标是「用户选的快慢方向一致」，不追求与 x264 档位一一对应。
+ */
+const AOM_CPU_USED_BY_NAME: Record<string, number> = {
+  ultrafast: 8,
+  superfast: 8,
+  veryfast: 7,
+  faster: 7,
+  fast: 6,
+  medium: 5,
+  slow: 4,
+  slower: 3,
+  veryslow: 2
+}
+
+export function aomCpuUsed(preset: string): number {
+  return AOM_CPU_USED_BY_NAME[preset] ?? 5
+}
+
+/** M9：软件编码器名（AV1 → libaom-av1；编码与"硬件失败回退"提示共用同一份映射）。 */
+export function softwareEncoderName(codec: 'h264' | 'hevc' | 'av1' | undefined): 'libx264' | 'libx265' | 'libaom-av1' {
+  if (codec === 'av1') return 'libaom-av1'
+  if (codec === 'hevc') return 'libx265'
+  return 'libx264'
+}
+
+/** 软件编码参数：CRF 模式逐字节保持现状；码率模式改为 -b:v/-maxrate/-bufsize。 */
+export function softwareVideoEncodeArgs(
+  quality: number,
+  preset: string,
+  options?: { codec?: 'h264' | 'hevc' | 'av1'; bitrateKbps?: number }
+): string[] {
+  const codec = options?.codec ?? 'h264'
+  // M9：AV1 走 libaom-av1（随包 FFmpeg 自带；SVT-AV1 属可选升级项）
+  const name = softwareEncoderName(codec)
+  if (options?.bitrateKbps !== undefined) return ['-c:v', name, ...bitrateArgs(options.bitrateKbps)]
+  if (codec === 'av1') {
+    // libaom-av1 用 `-cpu-used 0..8`（0 最慢最好）；CRF 语义与 x264 接近（0–63）
+    return ['-c:v', name, '-crf', String(quality), '-cpu-used', String(aomCpuUsed(preset))]
+  }
+  return ['-c:v', name, '-crf', String(quality), '-preset', preset]
 }
 
 /**
- * 统一入口：给定编码器（null = 软件）与画质档，产出 `-c:v` 段。
- * 未知硬件编码器名一律回退软件编码，绝不产出无法执行的 argv。
+ * 统一入口：给定编码器（null = 软件）与画质/码率，产出 `-c:v` 段。
+ * 编码器族与请求的 codec 不一致时（如请求 HEVC 却拿到 h264_nvenc）直接回退软件编码，
+ * 绝不产出 `-c:v h264_*` 却宣称 HEVC 的错配 argv。
  */
 export function videoEncodeArgs(options: {
   encoder: string | null
   quality: number
   preset: string
+  codec?: 'h264' | 'hevc' | 'av1'
+  bitrateKbps?: number
 }): string[] {
+  const codec = options.codec ?? 'h264'
   if (options.encoder) {
-    const hardware = hardwareVideoEncodeArgs(options.encoder, options.quality)
-    if (hardware) return hardware
+    const family = options.encoder.split('_')[0]
+    if (family === codec) {
+      const hardware = hardwareVideoEncodeArgs(options.encoder, options.quality, options.bitrateKbps)
+      if (hardware) return hardware
+    }
   }
-  return softwareVideoEncodeArgs(options.quality, options.preset)
+  return softwareVideoEncodeArgs(options.quality, options.preset, {
+    codec,
+    ...(options.bitrateKbps !== undefined ? { bitrateKbps: options.bitrateKbps } : {})
+  })
 }
 
 /** 设置文件反序列化：任何脏值都安全回落到默认，绝不因配置损坏而拒绝启动。 */

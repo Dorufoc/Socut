@@ -17,11 +17,19 @@ import {
   AUTOSAVE_FILE,
   DEFAULT_ANIMATION_IN_SEC,
   DEFAULT_ANIMATION_OUT_SEC,
+  TRACK_SOFT_LIMIT,
   TRANSITION_DURATION
 } from '@shared/constants'
 import { durationSecToFrames, framesToDurationSec, snapTimeToFrame, timeToFrameAtOrAfter } from '@shared/fps'
 import { DEFAULT_PRESET_ID } from '@shared/presets'
 import { PRESETS } from '@shared/presets'
+import {
+  AUDIO_TRACK_ID_PREFIX,
+  MEDIA_TRACK_ID_PREFIX,
+  makeAudioTrack,
+  makeMediaTrack,
+  mediaTrackOrder
+} from '@shared/tracks'
 import type { Project, SubtitleClip } from '@shared/types'
 
 /** 工程 JSON 归一化与自动保存前的合法性（规格 §4.6 / §8）。 */
@@ -307,8 +315,82 @@ describe('v8 防抖参数归一', () => {
     expect(JSON.stringify(parsed.mediaClips[0])).not.toContain('stab')
   })
 
-  it('v3 轨道模型是必填结构：PROJECT_VERSION 随之上调到 3', () => {
-    expect(PROJECT_VERSION).toBe(3)
+  it('v4 多序列容器是必填结构：PROJECT_VERSION 随之上调到 4', () => {
+    expect(PROJECT_VERSION).toBe(4)
+  })
+
+  /**
+   * M5-A 无限轨（第一阶段软上限 50）：
+   * 旧「每类最多 8 条」已废除，但导出图与时间轴行数仍需有限保护。
+   */
+  it('轨道软上限：12 条媒体轨 + 12 条音频轨原样归一，mediaTrackOrder 顺序正确', () => {
+    const mediaTracks = Array.from({ length: 12 }, (_, index) => makeMediaTrack(index))
+    const audioTracks = Array.from({ length: 12 }, (_, index) => makeAudioTrack(index))
+    const parsed = normalizeProject({
+      version: PROJECT_VERSION,
+      name: '多轨工程',
+      resolution: { width: 1920, height: 1080 },
+      fps: FPS,
+      clips: [],
+      fonts: [],
+      mediaTracks,
+      audioTracks
+    })!
+
+    expect(parsed.mediaTracks.map((track) => track.id)).toEqual(mediaTracks.map((track) => track.id))
+    expect(parsed.audioTracks.map((track) => track.id)).toEqual(audioTracks.map((track) => track.id))
+    // 导出/预览用的顺序表：12 条全在，0 = 最底层、11 = 最顶层
+    expect([...mediaTrackOrder(parsed.mediaTracks)]).toEqual(mediaTracks.map((track, index) => [track.id, index]))
+    // round-trip 不漂移（自动存档/历史快照读回同一份顺序）
+    const again = normalizeProject(JSON.parse(JSON.stringify(parsed)))!
+    expect(again.mediaTracks.map((track) => track.id)).toEqual(parsed.mediaTracks.map((track) => track.id))
+  })
+
+  it('轨道软上限：>8 可加——只有 12 条被引用的 trackId 时补出 12 条轨道（旧硬上限 8 不再截断）', () => {
+    const mediaClips = Array.from({ length: 12 }, (_, index) => ({
+      id: `c${index}`,
+      mediaId: 'm1',
+      timelineStartSec: index,
+      timelineEndSec: index + 1,
+      sourceInSec: 0,
+      sourceOutSec: 1,
+      trackId: `${MEDIA_TRACK_ID_PREFIX}${index}`
+    }))
+    const audioClips = Array.from({ length: 12 }, (_, index) => ({
+      id: `a${index}`,
+      mediaId: 'm1',
+      timelineStartSec: index,
+      timelineEndSec: index + 1,
+      sourceInSec: 0,
+      sourceOutSec: 1,
+      trackId: `${AUDIO_TRACK_ID_PREFIX}${index}`
+    }))
+    const parsed = normalizeProject({ ...projectWithMediaClip(), mediaClips, audioClips })!
+
+    expect(parsed.mediaTracks).toHaveLength(12)
+    expect(parsed.audioTracks).toHaveLength(12)
+    expect(parsed.mediaTracks[11]!.id).toBe(`${MEDIA_TRACK_ID_PREFIX}11`)
+    expect(parsed.audioTracks[11]!.id).toBe(`${AUDIO_TRACK_ID_PREFIX}11`)
+  })
+
+  it('轨道软上限：51 条轨道夹到 50 条，保留前 50 条的顺序', () => {
+    const mediaTracks = Array.from({ length: 51 }, (_, index) => makeMediaTrack(index))
+    const audioTracks = Array.from({ length: 51 }, (_, index) => makeAudioTrack(index))
+    const parsed = normalizeProject({
+      version: PROJECT_VERSION,
+      name: '超软上限工程',
+      resolution: { width: 1920, height: 1080 },
+      fps: FPS,
+      clips: [],
+      fonts: [],
+      mediaTracks,
+      audioTracks
+    })!
+
+    expect(parsed.mediaTracks).toHaveLength(TRACK_SOFT_LIMIT)
+    expect(parsed.audioTracks).toHaveLength(TRACK_SOFT_LIMIT)
+    expect(parsed.mediaTracks[TRACK_SOFT_LIMIT - 1]!.id).toBe(`${MEDIA_TRACK_ID_PREFIX}${TRACK_SOFT_LIMIT - 1}`)
+    expect(parsed.audioTracks[TRACK_SOFT_LIMIT - 1]!.id).toBe(`${AUDIO_TRACK_ID_PREFIX}${TRACK_SOFT_LIMIT - 1}`)
   })
 })
 
@@ -398,8 +480,8 @@ describe('v9 音频与变速参数归一', () => {
  * 迁移必须在「读入工程」这一步做完，而不是留到 UI 里猜，否则恢复现场会落进一个空 Tab。
  */
 describe('leftTab 归一化与旧值迁移（P6）', () => {
-  it('当前左侧 Tab 集合：素材库 / 包装 / 导出 / 进度（不再有独立的水印与字幕 Tab）', () => {
-    expect(LEFT_TABS).toEqual(['media', 'wrap', 'export', 'progress'])
+  it('当前左侧 Tab 集合：素材库 / 转场 / 包装 / 导出 / 进度（不再有独立的水印与字幕 Tab）', () => {
+    expect(LEFT_TABS).toEqual(['media', 'transition', 'wrap', 'export', 'progress'])
   })
 
   it('旧工程的 captions 与 watermark 都落到 wrap', () => {
@@ -410,6 +492,8 @@ describe('leftTab 归一化与旧值迁移（P6）', () => {
   it('认识的值原样返回；不认识或缺省返回 undefined（由调用方退回默认）', () => {
     expect(normalizeLeftTab('export')).toBe('export')
     expect(normalizeLeftTab('progress')).toBe('progress')
+    // v11：转场是当前认识的 Tab，旧工程恢复时能原样回到转场面板
+    expect(normalizeLeftTab('transition')).toBe('transition')
     expect(normalizeLeftTab('bogus')).toBeUndefined()
     expect(normalizeLeftTab(undefined)).toBeUndefined()
   })
@@ -648,8 +732,8 @@ describe('v10 素材分组与标签', () => {
 })
 
 describe('v10 版本与旧工程兼容', () => {
-  it('新增可选字段不改变 PROJECT_VERSION', () => {
-    expect(PROJECT_VERSION).toBe(3)
+  it('新增可选字段不改变 PROJECT_VERSION（当前 v4：多序列容器）', () => {
+    expect(PROJECT_VERSION).toBe(4)
     const parsed = normalizeProject({
       version: PROJECT_VERSION,
       name: 'v10 兼容',
@@ -659,5 +743,8 @@ describe('v10 版本与旧工程兼容', () => {
       audioMastering: 'social'
     })!
     expect(parsed.version).toBe(PROJECT_VERSION)
+    // 单序列工程不写序列键（可选字段不落盘）
+    expect(parsed.sequences).toBeUndefined()
+    expect(parsed.activeSequenceId).toBeUndefined()
   })
 })

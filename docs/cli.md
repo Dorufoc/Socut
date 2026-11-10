@@ -78,9 +78,50 @@ socut-cli app health --no-launch
   "pid": 12345,
   "appVersion": "0.1.0",
   "startedAt": "2026-11-08T...",
-  "userDataPath": "C:\\Users\\...\\AppData\\Roaming\\Socut"
+  "userDataPath": "C:\\Users\\...\\AppData\\Roaming\\Socut",
+  "rpc": { "tcpPort": 43128, "pipePath": "\\\\.\\pipe\\socut-12345" }
 }
 ```
+
+`rpc`（M10）是 JSON-RPC 行协议入口：TCP 回环 + Windows 命名管道，二选一即可。
+同一个 token 通用；命令名与 HTTP CLI 完全一致（`project.get` / `clip.add` / `export.start` …）。
+
+```jsonc
+// 首行必须是 auth；之后一行一个请求，响应带同一个 id
+{"jsonrpc":"2.0","id":0,"method":"auth","params":{"token":"<token>"}}
+{"jsonrpc":"2.0","id":1,"method":"version"}
+{"jsonrpc":"2.0","id":2,"method":"project.get","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"preview.frame","params":{"at":1.5}}
+```
+
+- `version` 返回 `capabilities`；`commands.list` 返回完整命令表；
+- 业务错误是 JSON-RPC 错误对象，`data.code` 保留本协议的稳定错误码（`BAD_PARAMS` / `NOT_FOUND` / `GATE_BLOCKED`…）；
+- 单连接按到达顺序串行执行，响应顺序可预测。
+
+### 项目锁（M10）
+
+```bash
+socut-cli project lock --path D:\work\daily.socut --mode agent   # 返回 token
+socut-cli project lock-status --path D:\work\daily.socut
+socut-cli project unlock --path D:\work\daily.socut --token <token>
+```
+
+锁文件是 `<工程路径>.lock`；心跳 5s、超过 15s 或持有进程已退出即可被接管（崩溃不锁死）。
+窗口侧接线（GUI 打开即持锁）在下一批。
+
+### 取帧（M10）
+
+```bash
+socut-cli preview frame --at 1.5 --pretty   # 返回 { pngBase64, width, height, frame, atSec, bytes }
+```
+
+走生产渲染管线（字幕条 + 文本元素 + 关键帧），不落盘、不占导出队列。
+
+### MCP（AI Agent 直连）
+
+Socut 自带 MCP stdio server：`node cli/socut-mcp.mjs`（打包版 `cli\socut-mcp.cmd`）。
+60+ 工具覆盖工程/序列/素材/字幕条/关键帧/时间轴/文本元素/导出/取帧/项目锁；
+配置与推荐工作流见 [mcp.md](./mcp.md)。
 
 客户端会自动扫描以下位置：
 
@@ -237,10 +278,30 @@ socut-cli media import \
 - 媒体段：`timeline.media.insert | move | trim | remove | split | select | removeSelected | removeAt`
 - 音频段：`timeline.audio.insert | move | trim | remove | split | select`
 - 字幕条：`clip.add | update | remove | duplicate | select | split | applyStyleToAll | resetStyle | setTimes`
-- 媒体段效果：`clip.video | clip.video.reset | clip.stab | clip.audio | clip.speed | clip.transition`
+- 关键帧（M6/M6-E）：`clip.keyframes | clip.keyframes.reset`
+  （`keyframes` 传 `[{ param, points:[{t,value,easing,bezier?}] }]`，t 为片段内 0–1 进度；
+  `id` 可指向字幕条**或媒体段**，返回里 `kind: 'subtitle' | 'media'` 区分；
+  媒体段支持 `opacity | offsetXPct | offsetYPct | scalePct | rotationDeg`，轨道值**绝对覆盖**静态 video 字段）
+- 文本元素（M7）：`text.presets | text.list | text.add | text.update | text.remove | text.select`（与包装字幕条是两套体系）
+- 媒体段效果：`clip.video | clip.video.reset | clip.stab | clip.audio | clip.speed | clip.transition | clip.key | clip.mask | clip.matte`
+  （`clip.mask` 传 `{ strokes: [{ mode: 'hide'|'restore', radiusPct, points: [{x,y}] }], featherPct?: 0..20, invert?: boolean }`，
+  坐标是画面归一化 0..1、`featherPct` 是画面宽度百分比的柔边半径、`invert` 为反向遮罩（黑白互换）；`null` 清除遮罩）
+  （`clip.matte` 传 `{ id, path: string | null, kind?: 'image' | 'video' }`：`path` 必须是 **matte 文件的绝对路径**
+  且文件存在；`path: null`（或省略/空串）清除。`kind` 缺省按扩展名判断（`.png/.jpg/.jpeg/.webp/.bmp` 等 = image，
+  `mp4/mov/mkv/webm/avi…` = video，判断不出会要求显式 `kind`）。外部 matte **仅导出生效**、预览仍显示原片；
+  视频 matte 暂不支持变速片段、转场切点与图像片段（会返回可读错误）；返回
+  `{ id, mattePath, matteKind }`）
+- AI 抠像（M8-P1）：`ai.matte | ai.matte.status`
+  （`ai.matte { id }` 用本机 `onnxruntime-node` + Selfie Segmenter 逐帧推理生成 matte 视频并挂到该媒体段，
+  **仅导出生效**、预览仍显示原片。命令等到生成结束再返回 `{ id, jobId, mattePath, cached }`；
+  生成中途可 `socut-cli export cancel --job-id matte-<id>`；同源同区间二次调用命中缓存、不再推理；
+  暂不支持变速片段（`BAD_PARAMS`）。`ai.matte.status` 返回
+  `{ runtime: { ok, reason? }, model: { ok, path, sizeBytes?, sha256?, reason? }, ready }`，
+  运行时/模型缺失时 `ready:false` 并给出可执行修复提示）
 - 音频效果：`audio.fx | audio.speed | audio.role | audio.ducking | audio.reset`
 - 轨道：`track.addMedia | addAudio | removeMedia | removeAudio | moveMedia | moveAudio | rename | mute | hidden | locked | select`
-- 时间轴：`timeline.compact`
+- 时间轴：`timeline.compact | timeline.media.rippleDelete | timeline.media.mergeNext | timeline.media.freeze`
+- 多序列（v4）：`sequence.list | add | select | rename | remove | duplicate`
 
 示例：
 
@@ -249,6 +310,10 @@ socut-cli timeline media insert --media-id m1 --at 0
 socut-cli clip add --at 2.5 --duration 4
 socut-cli clip update --id clip-1 --params '{"content":{"main":"今日头条"}}'
 socut-cli audio role --id a1 --role bgm
+# v4 多序列：新建第二段并切过去（活动序列的拍平字段即当前编辑内容）
+socut-cli sequence add --name 第二段
+socut-cli sequence select --id <上一步返回的 id>
+socut-cli sequence list --pretty
 ```
 
 ### watermark / ui
@@ -286,6 +351,20 @@ socut-cli export run \
 - `overlayMp4`：透明叠层 + 参考视频合成 MP4；
 - `transparentMov`：透明 MOV（ProRes 4444 / Qtrle）；
 - `pngSequence`：PNG 序列。
+
+M9 编码参数（仅叠加出口生效；缺省 = 旧行为）：
+
+```bash
+# AV1 + CRF 直给 + 10bit + 全范围
+socut-cli export run --kind overlayMp4 --output-dir D:\out --file-name demo \
+  --video-codec av1 --crf 32 --bit-depth 10 --color-range full --progress
+```
+
+- `--video-codec avc|hevc|av1`（AV1 软件走 libaom-av1，硬件视显卡支持）
+- `--crf 0..51`（缺省按 `--quality` 档：high 18 / standard 23 / small 28）
+- `--encoder-preset`（x264/x265 preset 名；AV1 映射到 `-cpu-used`）
+- `--bit-depth 8|10`（10 仅 HEVC/AV1）
+- `--color-range limited|full`（full 输出 `-color_range pc` 标签）
 
 CLI 的 `export.run` 已自动确认体积提示；磁盘不足仍会直接失败。VFR raw 的二次确认自动通过。
 `export.run` 返回最终任务结果（含 `ok`、输出路径等），不是任务快照；要观察进度请用

@@ -459,6 +459,18 @@ textarea {
   pointer-events: none;
 }
 
+/* M6-E：媒体段关键帧包裹层。
+ * 几何/不透明度逐帧命令式写在它身上（transform-origin 居中 = 画布中心），
+ * 元素自身的 opacity 仍由"切段可见性/转场"占用，两层相乘互不覆盖。 */
+.stage__media-keyframes {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  transform-origin: center center;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+
 /* 目标画布预览的 cover 适配：与导出归一链的 cover 语义一致（放大后居中裁切） */
 .stage__frame--cover .stage__ref-video {
   object-fit: cover;
@@ -858,6 +870,22 @@ label.field,
   font-size: 10.5px;
   color: var(--text-tertiary);
   font-weight: 400;
+}
+
+/* 自定义码率 / 音频码率输入行 */
+.export-custom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.export-custom .input {
+  width: 128px;
+}
+
+.export-custom__unit {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
 }
 
 .input,
@@ -1579,33 +1607,103 @@ input[type='color']:disabled {
   color: var(--text-tertiary);
 }
 
-/* v10：转场类型分组网格（按基础 / 模糊 / 运动模糊平移 / 推入 / 拉出 / 运镜分组） */
-.transition-family {
+/*
+ * v11：左侧「转场」Tab。
+ * 每个样式是一张可长按拖拽的卡片：按住 280ms 进入拖拽，指针移动时跟随幽灵元素；
+ * 松手由时间轴缝隙决定落点。普通单击则用于「替换已选中转场的类型」。
+ */
+.transition-panel {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 10px;
 }
 
-.transition-grid {
+.transition-panel__count,
+.transition-panel__hint {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.transition-panel__group {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 4px;
 }
 
-.transition-duration-row {
+.transition-panel__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.transition-style {
+  display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.transition-duration {
-  width: 72px;
-  padding: 3px 6px;
+  gap: 6px;
+  padding: 8px 8px;
   border: 1px solid var(--stroke-control);
   border-radius: var(--radius-control);
   background: var(--bg-input);
   color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: grab;
+  user-select: none;
+  touch-action: pan-y;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.transition-style:hover {
+  border-color: var(--accent);
+  background: var(--subtle-hover);
+}
+
+.transition-style--pressed {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-ring);
+  cursor: grabbing;
+}
+
+.transition-style__glyph {
+  flex: none;
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.transition-style__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 拖拽幽灵：固定在指针中心，绝不接收指针事件（否则 elementFromPoint 会被自己挡住） */
+.transition-drag-ghost {
+  position: fixed;
+  z-index: 9999;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 6px 12px;
+  transform: translate(-50%, -140%);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: rgba(16, 18, 20, 0.95);
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* 拖拽期间左侧面板微亮，提示「正在拖动一个转场」 */
+.transition-panel--dragging .group {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-ring);
 }
 
 /* 检查器 */
@@ -1750,6 +1848,136 @@ input[type='color']:disabled {
 .kv__row > span:last-child {
   color: var(--text-primary);
   text-align: right;
+}
+
+/* 导出面板 · 剪映式分区（导出位置 / 画布 / 摘要 / 主按钮） */
+
+.export-dir {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.canvas-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--stroke-control);
+  border-radius: var(--radius-control);
+  background: var(--bg-input);
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.canvas-row--checked {
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+}
+
+.canvas-row__main {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.canvas-row__icon {
+  flex: none;
+  display: block;
+  border: 1.5px solid var(--text-tertiary);
+  border-radius: 2px;
+}
+
+.canvas-row--checked .canvas-row__icon {
+  border-color: var(--accent);
+}
+
+.canvas-row__icon--landscape {
+  width: 22px;
+  height: 12.4px;
+}
+
+.canvas-row__icon--portrait {
+  width: 12px;
+  height: 21px;
+}
+
+.canvas-row__icon--square {
+  width: 16px;
+  height: 16px;
+}
+
+.canvas-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.canvas-row__label {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.canvas-row__meta {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.canvas-row__settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.canvas-row__settings .field {
+  gap: 3px;
+}
+
+.canvas-row__settings .field__label {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
+.canvas-row__settings .select {
+  min-height: 26px;
+  padding: 3px 24px 3px 7px;
+  font-size: 11.5px;
+}
+
+.export-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--stroke-card);
+  border-radius: var(--radius-control);
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.export-summary__line {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.export-summary__line--strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.export-summary__line--muted {
+  color: var(--text-tertiary);
+}
+
+.export-cta {
+  min-height: 38px;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 /* 进度与任务 */
@@ -1904,6 +2132,20 @@ input[type='color']:disabled {
   gap: 10px;
   min-width: 0;
   font-size: 10.5px;
+}
+
+/* v4 多序列：切换下拉 + 新建/删除按钮（窄侧栏里名字过长时省略，不撑破工具栏） */
+.timeline__sequence {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.timeline__sequence .select {
+  max-width: 132px;
+  font-size: 10.5px;
+  padding: 2px 6px;
 }
 
 .timeline__timecode {
@@ -3363,20 +3605,30 @@ input[type='color']:disabled {
 }
 
 /*
- * v10：切点转场标记。
- * 挂在车道坐标上（left = secToPx(切点)），translateX(-50%) 让标记中心落在切点；
- * z-index 高于卡片（卡片没有层级），保证标记不被两侧卡片盖住。
+ * v11：切点「连接标识」。
+ * 外层是缝隙命中区（left = secToPx(切点)，translateX(-50%) 让中心落在切点；
+ * z-index 高于卡片，保证图标不被两侧卡片盖住）。它默认不收指针事件，
+ * 只有内部的图标可点；转场拖拽期间整条命中区打开指针事件，作为落点。
  */
-.timeline__transition-marker {
+.timeline__transition-junction {
   position: absolute;
-  top: 50%;
+  top: 4px;
+  bottom: 4px;
   z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.timeline__transition-marker {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   height: 18px;
   padding: 0 6px;
-  transform: translate(-50%, -50%);
   border: 1px solid var(--accent);
   border-radius: 999px;
   background: rgba(16, 18, 20, 0.92);
@@ -3388,13 +3640,54 @@ input[type='color']:disabled {
   pointer-events: auto;
 }
 
+.timeline__transition-marker__label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
 .timeline__transition-marker:hover {
   background: rgba(76, 194, 255, 0.2);
 }
 
-.timeline__transition-marker--selected {
+.timeline__transition-marker--selected,
+.timeline__transition-junction--selected .timeline__transition-marker {
   background: rgba(76, 194, 255, 0.3);
   box-shadow: 0 0 0 1px var(--accent-ring);
+}
+
+/* 还没有转场的缝隙：平时不显示，只在拖拽转场时露出虚线落点 */
+.timeline__transition-junction__dot {
+  display: none;
+  width: 12px;
+  height: 12px;
+  border: 1px dashed var(--accent);
+  border-radius: 50%;
+  background: rgba(76, 194, 255, 0.18);
+}
+
+/* 转场拖拽期间：缝隙命中区整体显形并接管指针，便于 elementFromPoint / 指针命中 */
+.timeline--transition-dragging .timeline__transition-junction {
+  width: 34px;
+  border-radius: 6px;
+  pointer-events: auto;
+  background: rgba(76, 194, 255, 0.1);
+}
+
+.timeline--transition-dragging .timeline__transition-junction__dot {
+  display: block;
+}
+
+/* 指针下的合法切点：高亮成「可以松手」的样子 */
+.timeline__transition-junction--drop {
+  background: rgba(76, 194, 255, 0.24) !important;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.timeline--transition-dragging .timeline__transition-junction--drop .timeline__transition-junction__dot {
+  width: 16px;
+  height: 16px;
+  border-style: solid;
+  background: var(--accent);
 }
 
 .timeline__divider {
@@ -4248,6 +4541,14 @@ input[type='color']:disabled {
   color: var(--text-secondary);
 }
 
+/* M11/M8：语音资产分区的操作按钮行（选择二进制/模型、重新检测、清除配置） */
+.settings__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .settings__list {
   display: flex;
   flex-direction: column;
@@ -4613,4 +4914,216 @@ input[type='color']:disabled {
 .timeline__track .media-clip-card--locked,
 .timeline__track .audio-clip-card--locked {
   cursor: not-allowed;
+}
+
+/* M6：关键帧面板（右侧检查器） */
+.keyframe__track {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.keyframe__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.keyframe__row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.keyframe__t {
+  width: 38px;
+  text-align: right;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+
+.keyframe__value {
+  width: 64px;
+}
+
+.keyframe__easing {
+  flex: 1;
+  min-width: 0;
+  font-size: 10.5px;
+}
+
+.keyframe__bezier {
+  display: flex;
+  gap: 2px;
+}
+
+.keyframe__bezier-input {
+  width: 44px;
+  font-size: 10px;
+}
+
+/* M7：文本元素轨（固定一条，与字幕条的示意条同高） */
+.timeline__track--text {
+  background: rgba(240, 180, 80, 0.04);
+}
+
+.clip-card.clip-card--text {
+  background: rgba(240, 180, 80, 0.22);
+  border-color: rgba(240, 180, 80, 0.55);
+}
+
+.clip-card.clip-card--text.clip-card--selected {
+  background: rgba(240, 180, 80, 0.34);
+  border-color: rgba(255, 210, 120, 0.95);
+}
+
+.textarea {
+  min-height: 48px;
+  resize: vertical;
+  font: inherit;
+}
+
+/* M11：字幕导入入口（两枚小按钮，排在字幕列表上方） */
+.caption-import {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.caption-import .btn {
+  flex: 1;
+}
+
+/* M7-E：特效包行（开关 + 参数滑杆） */
+.effect-pack {
+  margin: 6px 0;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
+/* M6：字幕条上的关键帧菱形（多参数同 t 只画一个） */
+.clip-card__keyframe {
+  position: absolute;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  transform: translateX(-50%) rotate(45deg);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  border-radius: 1px;
+  /* 菱形是 <button>：必须真的能点到（此前是 none，视觉上在、点击被卡片吞掉） */
+  pointer-events: auto;
+  z-index: 3;
+}
+
+.clip-card__keyframe {
+  padding: 0;
+  cursor: pointer;
+}
+
+.clip-card__keyframe:hover {
+  background: #ffd479;
+}
+
+/* M6：媒体段卡片的菱形贴顶（卡片下半部是预览条/频谱/文字，放中间会压住读数） */
+.media-clip-card__keyframe {
+  top: 6px;
+  margin-top: 0;
+}
+
+/*
+ * M7-E：图形层 z 档 = belowMedia 时，字幕/文本 Canvas 垫到媒体视频之下
+ * （导出侧同一语义：透明帧层作为基座、媒体基座叠在上面）。
+ */
+.stage__frame--graphics-below .stage__canvas {
+  z-index: 1;
+}
+
+.stage__frame--graphics-below .stage__ref-video {
+  z-index: 2;
+}
+
+/* M6-D：关键帧贝塞尔曲线编辑器（SVG，可拖两个控制点） */
+.keyframe__row {
+  flex-wrap: wrap;
+}
+
+.bezier-editor {
+  flex: 0 0 100%;
+  margin: 4px 0 6px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  touch-action: none;
+}
+
+.bezier-editor__grid line {
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+}
+
+.bezier-editor__handle-line {
+  stroke: rgba(255, 214, 120, 0.55);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.bezier-editor__curve {
+  fill: none;
+  stroke: #ffd479;
+  stroke-width: 2;
+}
+
+.bezier-editor__anchor {
+  fill: rgba(255, 255, 255, 0.75);
+}
+
+.bezier-editor__control {
+  fill: #8fc7ff;
+  stroke: rgba(0, 0, 0, 0.6);
+  stroke-width: 1;
+  cursor: grab;
+}
+
+.bezier-editor__control:active {
+  cursor: grabbing;
+}
+
+/*
+ * M8：手绘遮罩画笔层。
+ * 覆盖整个画面框（与媒体层同坐标），只在画笔模式渲染：z-index 高于字幕 Canvas(z2)
+ * 与画面交互层(z3)，因此画笔模式下点选片段/拖拽手柄不会误触；退出画笔即卸载。
+ */
+.stage__mask-paint {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+.stage__mask-paint svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* 画笔模式的常驻提示：不挡指针（整层都吃指针事件） */
+.stage__mask-paint__hint {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(20, 20, 20, 0.82);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  pointer-events: none;
 }

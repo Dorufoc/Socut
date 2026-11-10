@@ -32,6 +32,8 @@ export interface ClipCardProps {
   /** 按下时回调：上层在这一刻快照吸附候选边缘，拖拽途中不再重算 */
   onDragStart?: () => void
   onCommit?: () => void
+  /** M6-D：点菱形跳到该关键帧在时间轴上的位置（片段入点 + t × 时长） */
+  onSeekKeyframe?: (atSec: number) => void
 }
 
 type Edge = 'in' | 'out' | 'move'
@@ -55,7 +57,8 @@ export function ClipCard({
   onSelect,
   onChangeTimes,
   onDragStart,
-  onCommit
+  onCommit,
+  onSeekKeyframe
 }: ClipCardProps): ReactElement {
   const dragRef = useRef<DragState | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
@@ -127,6 +130,10 @@ export function ClipCard({
   /** 播放头落在本条区间内：在示意条上画一条细游标，当前位置与出入点的关系一目了然 */
   const onAir = playheadSec >= clip.startTime && playheadSec < clip.endTime
   const cursorLeft = onAir ? Math.max(0, Math.min(barWidth - 2, secToPx(playheadSec, durationSec, widthPx) - left)) : 0
+  // M6：关键帧菱形（所有参数轨的 t 并集，0..1 片段进度 → 条内相对位置）
+  const keyframeTs = [
+    ...new Set((clip.keyframes ?? []).flatMap((track) => track.points.map((point) => Math.round(point.t * 1000) / 1000)))
+  ].sort((a, b) => a - b)
   const readout = TEXT.timeline.stripHint(
     secondsToTimecode(clip.startTime, fps),
     secondsToTimecode(clip.endTime, fps),
@@ -151,6 +158,20 @@ export function ClipCard({
       {/* 标签只放主标题：副标题与时间读数进 title，轨道上不再挤成多行 */}
       <span className="clip-card__label">{clip.content.title || TEXT.captions.noTitle}</span>
       {onAir ? <span className="clip-card__cursor" style={{ left: cursorLeft }} aria-hidden="true" /> : null}
+      {/* M6：参数关键帧菱形（多参数同一 t 只画一个；点击进右侧关键帧编辑器） */}
+      {keyframeTs.map((t) => (
+        <button
+          key={t}
+          type="button"
+          className="clip-card__keyframe"
+          data-keyframe-t={t}
+          style={{ left: Math.max(2, Math.min(barWidth - 2, t * barWidth)) }}
+          title={`关键帧 ${Math.round(t * 100)}% · 点击跳到该帧`}
+          aria-label={`关键帧 ${Math.round(t * 100)}%`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => onSeekKeyframe?.(clip.startTime + t * (clip.endTime - clip.startTime))}
+        />
+      ))}
       <div
         className="clip-card__handle clip-card__handle--left"
         title={TEXT.timeline.inPoint}

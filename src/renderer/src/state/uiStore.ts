@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { ExportCanvasKind, ExportFit, LeftTabValue, MediaItem } from '@shared/types'
+import type { ExportCanvasKind, ExportFit, LeftTabValue, MaskStroke, MediaItem, TransitionType } from '@shared/types'
 import { detectCompat } from '@shared/probe'
 import { TIMELINE_MAX_ZOOM, TIMELINE_MIN_ZOOM } from '@shared/constants'
 
@@ -17,7 +17,7 @@ function clampZoom(zoom: number): number {
 }
 
 /**
- * 左侧栏 Tab（P6）：素材库 / 包装（字幕 + 片尾 + 水印）/ 导出 / 进度；
+ * 左侧栏 Tab（P6）：素材库 / 包装（字幕 + 片尾 + 水印）/ 导出 / 进度；v11 增加「转场」。
  * 写入 project.ui.leftTab 持久化。清单在 shared/types（LeftTabValue），这里只做别名。
  */
 export type LeftTab = LeftTabValue
@@ -38,9 +38,33 @@ export interface DialogPrompt {
   resolve: (answer: DialogAnswer) => void
 }
 
-/** 时间轴工具栏的三个开关 */
-export type TimelineTool = 'snapTogether' | 'magneticSnap' | 'hoverPreview'
+/** 时间轴工具栏的四个开关（v4 增加"磁性删除"） */
+export type TimelineTool = 'snapTogether' | 'magneticSnap' | 'rippleDelete' | 'hoverPreview'
 export type TimelineTools = Record<TimelineTool, boolean>
+
+/**
+ * v11：正在从左侧「转场」Tab 拖出的样式。
+ * 只存在于一次长按拖拽期间（不持久化）；时间轴的缝隙命中结果写在 `transitionDropClipId`。
+ */
+export interface TransitionDragState {
+  type: TransitionType
+  label: string
+}
+
+/** M8：手绘遮罩的画笔半径范围（画面宽度的百分比；数据层 schema 的允许范围更宽）。 */
+export const MASK_BRUSH_RANGE = { min: 0.5, max: 20 } as const
+
+/**
+ * M8：手绘遮罩的画笔会话状态（不持久化）。
+ * `clipId` 非空 = 画笔模式开启且锁定在这一段上；笔刷大小/模式在同一会话内保留。
+ */
+export interface MaskPaintState {
+  /** 正在画的媒体段 id；null = 不在画笔模式 */
+  clipId: string | null
+  mode: MaskStroke['mode']
+  /** 笔刷半径（画面宽度百分比，0.5..20） */
+  radiusPct: number
+}
 
 export interface UiState {
   /** 顶层视图：启动页 / 编辑器（默认启动页，开发取证分支会立刻切到编辑器） */
@@ -100,9 +124,24 @@ export interface UiState {
   /** 预览里的画面交互层（拖拽缩放/平移/旋转）：关掉后字幕点选恢复原样 */
   stageInteract: boolean
   toggleStageInteract: () => void
+  /** M8：手绘遮罩画笔会话（进入/退出、笔刷大小、抹掉/擦回） */
+  maskPaint: MaskPaintState
+  beginMaskPaint: (clipId: string) => void
+  endMaskPaint: () => void
+  setMaskBrush: (patch: Partial<Pick<MaskPaintState, 'mode' | 'radiusPct'>>) => void
   /** 时间轴工具栏三个开关（不跨会话记忆，默认全关 = 与旧行为一致） */
   timelineTools: TimelineTools
   toggleTimelineTool: (tool: TimelineTool) => void
+  /**
+   * v11：从「转场」Tab 长按拖出的样式；null = 没有正在拖拽。
+   * 拖拽期间时间轴会打开缝隙命中区并高亮指针下的合法切点。
+   */
+  transitionDrag: TransitionDragState | null
+  /** 拖拽时指针下合法切点所属的**右侧片段** id（Timeline 写入，null = 不在任何缝隙上） */
+  transitionDropClipId: string | null
+  beginTransitionDrag: (drag: TransitionDragState) => void
+  setTransitionDropTarget: (clipId: string | null) => void
+  endTransitionDrag: () => void
   /**
    * 时间轴比例尺缩放（100% = 1 秒 72px）。只在本会话记忆，不写工程、不写 localStorage：
    * 同一份工程在不同机器/不同窗口大小下重新打开时从 100% 起更可预测。
@@ -163,9 +202,27 @@ export const useUiStore = create<UiState>((set) => ({
   // 默认开：选中媒体段就是来调画面的；万一挡住字幕点选，面板上一键关掉
   stageInteract: true,
   toggleStageInteract: () => set((state) => ({ stageInteract: !state.stageInteract })),
-  timelineTools: { snapTogether: false, magneticSnap: false, hoverPreview: false },
+  maskPaint: { clipId: null, mode: 'hide', radiusPct: 4 },
+  beginMaskPaint: (clipId) => set((state) => ({ maskPaint: { ...state.maskPaint, clipId } })),
+  endMaskPaint: () =>
+    set((state) => (state.maskPaint.clipId === null ? state : { maskPaint: { ...state.maskPaint, clipId: null } })),
+  setMaskBrush: (patch) =>
+    set((state) => {
+      const radiusRaw = patch.radiusPct ?? state.maskPaint.radiusPct
+      const radiusPct = Number.isFinite(radiusRaw)
+        ? Math.min(MASK_BRUSH_RANGE.max, Math.max(MASK_BRUSH_RANGE.min, radiusRaw))
+        : state.maskPaint.radiusPct
+      return { maskPaint: { ...state.maskPaint, ...patch, radiusPct } }
+    }),
+  timelineTools: { snapTogether: false, magneticSnap: false, rippleDelete: false, hoverPreview: false },
   toggleTimelineTool: (tool) =>
     set((state) => ({ timelineTools: { ...state.timelineTools, [tool]: !state.timelineTools[tool] } })),
+  transitionDrag: null,
+  transitionDropClipId: null,
+  beginTransitionDrag: (drag) => set({ transitionDrag: drag, transitionDropClipId: null }),
+  setTransitionDropTarget: (clipId) =>
+    set((state) => (state.transitionDropClipId === clipId ? state : { transitionDropClipId: clipId })),
+  endTransitionDrag: () => set({ transitionDrag: null, transitionDropClipId: null }),
   timelineZoom: 1,
   setTimelineZoom: (zoom) =>
     set((state) => {

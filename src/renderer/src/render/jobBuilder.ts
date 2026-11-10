@@ -1,12 +1,16 @@
 import { buildProjectPlan, type PlanInput } from '@shared/presetResolver'
 import { classifyAspect } from '@shared/aspect'
+import { DEFAULT_FONT_ID } from '@shared/constants'
+import { clipEndFrame, clipStartFrame, durationSecToFrames } from '@shared/fps'
+import { resolveTextStyle } from '@shared/textPresets'
 import type {
   AspectMode,
   Fps,
   FrameFormat,
   Project,
   RenderJobSpec,
-  ResolvedClip
+  ResolvedClip,
+  ResolvedTextElement
 } from '@shared/types'
 import { computeClipBoxes } from './layoutTree'
 import { renderFrame } from './renderer'
@@ -65,6 +69,8 @@ export async function buildRenderJob(input: BuildJobInput): Promise<RenderJobSpe
   const clips: ResolvedClip[] = []
   for (const clipPlan of plan.clips) {
     const boxes = await computeClipBoxes(clipPlan)
+    // M6：关键帧属于"片段"而不是"预设"，从工程里按 id 取（plan 只负责布局与动画）
+    const source = project.clips.find((clip) => clip.id === clipPlan.id)
     clips.push({
       id: clipPlan.id,
       presetId: clipPlan.presetId,
@@ -72,9 +78,38 @@ export async function buildRenderJob(input: BuildJobInput): Promise<RenderJobSpe
       endFrame: clipPlan.endFrame,
       boxes,
       animation: clipPlan.animation,
-      selected: true
+      selected: true,
+      ...(source?.keyframes && source.keyframes.length > 0 ? { keyframes: source.keyframes } : {})
     })
   }
+
+  // M7：文本元素（画在字幕条之下）；字号等按 1080p 声明，渲染层按画高缩放
+  const familyById = new Map<string, string>()
+  for (const record of input.fontIndex) familyById.set(record.fontId, record.family)
+  const fallbackFamily = familyById.get(DEFAULT_FONT_ID) ?? 'Noto Sans SC'
+  const textClips: ResolvedTextElement[] = (project.textClips ?? []).map((clip) => {
+    const startFrame = clipStartFrame(clip.startTime, fps)
+    const endFrame = clipEndFrame(clip.endTime, fps)
+    const totalFrames = Math.max(1, endFrame - startFrame)
+    const half = Math.max(1, Math.floor(totalFrames / 2))
+    const style = resolveTextStyle(clip.presetId, clip.styleOverrides)
+    return {
+      id: clip.id,
+      text: clip.text,
+      style,
+      fontFamily: familyById.get(style.fontId) ?? fallbackFamily,
+      animation: {
+        inFrames: Math.min(durationSecToFrames(clip.animation.inDurationSec, fps), half),
+        outFrames: Math.min(durationSecToFrames(clip.animation.outDurationSec, fps), half),
+        totalFrames,
+        easing: clip.animation.easing,
+        risePx: clip.animation.risePx
+      },
+      startFrame,
+      endFrame,
+      ...(clip.keyframes ? { keyframes: clip.keyframes } : {})
+    }
+  })
 
   return {
     width,
@@ -84,6 +119,7 @@ export async function buildRenderJob(input: BuildJobInput): Promise<RenderJobSpe
     startFrame: input.restrictToActiveSpan ? plan.activeStartFrame : plan.startFrame,
     endFrame: input.restrictToActiveSpan ? plan.activeEndFrame : plan.endFrame,
     clips,
+    ...(textClips.length > 0 ? { textClips } : {}),
     aspectMode: plan.mode
   }
 }

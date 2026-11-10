@@ -19,7 +19,7 @@ import {
 import type { TransitionExportInputSegment } from '@shared/transitions'
 import { FPS_23_976, FPS_30, TRANSITION_DURATION } from '@shared/constants'
 import { durationSecToFrames, frameIntervalSec, framesToDurationSec } from '@shared/fps'
-import type { MediaClip, Project, TransitionDirection, TransitionFamily, TransitionType } from '@shared/types'
+import type { MediaClip, Project } from '@shared/types'
 
 /** v10：19 种转场的元数据、相邻判定与手柄夹取（纯函数，不依赖窗口/IPC）。 */
 
@@ -38,52 +38,67 @@ function clip(over: Partial<MediaClip> = {}): MediaClip {
 
 const META = { durationSec: 10 }
 
-describe('转场元数据（19 种）', () => {
-  it('19 种类型全部映射到 xfade 原语，且族/方向/中文名完整', () => {
-    const expected: Record<TransitionType, [string, TransitionFamily, TransitionDirection, string]> = {
-      dissolve: ['fade', 'basic', 'none', '溶解'],
-      fadeBlack: ['fadeblack', 'basic', 'none', '黑场'],
-      fadeWhite: ['fadewhite', 'basic', 'none', '白场'],
-      lightFlash: ['fadegrays', 'basic', 'none', '光效闪灰'],
-      blurH: ['hblur', 'blur', 'none', '横向模糊'],
-      blurV: ['vblur', 'blur', 'none', '纵向模糊'],
-      windLeft: ['hlwind', 'wind', 'left', '风感左移'],
-      windRight: ['hrwind', 'wind', 'right', '风感右移'],
-      windUp: ['vuwind', 'wind', 'up', '风感上移'],
-      windDown: ['vdwind', 'wind', 'down', '风感下移'],
-      pushLeft: ['coverleft', 'push', 'left', '推入左侧'],
-      pushRight: ['coverright', 'push', 'right', '推入右侧'],
-      pushUp: ['coverup', 'push', 'up', '推入上方'],
-      pushDown: ['coverdown', 'push', 'down', '推入下方'],
-      pullLeft: ['revealleft', 'pull', 'left', '拉出左侧'],
-      pullRight: ['revealright', 'pull', 'right', '拉出右侧'],
-      pullUp: ['revealup', 'pull', 'up', '拉出上方'],
-      pullDown: ['revealdown', 'pull', 'down', '拉出下方'],
-      zoomIn: ['zoomin', 'camera', 'none', '运镜推近']
+describe('转场元数据（58 种 xfade + blurV 别名）', () => {
+  /** FFmpeg 9 `xfade` 的 58 个具名 transition（不含 custom）；目录必须一一覆盖。 */
+  const FFMPEG9_XFADE = [
+    'fade', 'wipeleft', 'wiperight', 'wipeup', 'wipedown', 'slideleft', 'slideright', 'slideup', 'slidedown',
+    'circlecrop', 'rectcrop', 'distance', 'fadeblack', 'fadewhite', 'radial', 'smoothleft', 'smoothright',
+    'smoothup', 'smoothdown', 'circleopen', 'circleclose', 'vertopen', 'vertclose', 'horzopen', 'horzclose',
+    'dissolve', 'pixelize', 'diagtl', 'diagtr', 'diagbl', 'diagbr', 'hlslice', 'hrslice', 'vuslice', 'vdslice',
+    'hblur', 'fadegrays', 'wipetl', 'wipetr', 'wipebl', 'wipebr', 'squeezeh', 'squeezev', 'zoomin', 'fadefast',
+    'fadeslow', 'hlwind', 'hrwind', 'vuwind', 'vdwind', 'coverleft', 'coverright', 'coverup', 'coverdown',
+    'revealleft', 'revealright', 'revealup', 'revealdown'
+  ]
+
+  it('58 个 xfade 原语全覆盖；旧 19 种 id 保持映射（纵向模糊改用 hblur 近似）', () => {
+    const xfades = new Set(TRANSITIONS.map((meta) => meta.xfade))
+    expect(xfades.size).toBe(58)
+    expect([...xfades].sort()).toEqual([...FFMPEG9_XFADE].sort())
+
+    // 旧工程 id 全部保留，且每个都指向合法 xfade
+    for (const type of [
+      'dissolve', 'fadeBlack', 'fadeWhite', 'lightFlash', 'blurH', 'blurV',
+      'windLeft', 'windRight', 'windUp', 'windDown',
+      'pushLeft', 'pushRight', 'pushUp', 'pushDown',
+      'pullLeft', 'pullRight', 'pullUp', 'pullDown', 'zoomIn'
+    ] as const) {
+      expect(TRANSITION_MAP[type]).toBeTruthy()
+      expect(FFMPEG9_XFADE).toContain(TRANSITION_MAP[type].xfade)
+      expect(TRANSITION_MAP[type].label.length).toBeGreaterThan(0)
     }
-    expect(TRANSITIONS).toHaveLength(19)
+    expect(TRANSITION_MAP.blurV.xfade).toBe('hblur')
+    expect(TRANSITION_MAP.dissolve.xfade).toBe('fade')
+    expect(TRANSITION_MAP.pushLeft.xfade).toBe('coverleft')
+  })
+
+  it('59 条目录：类型唯一、中文名唯一、每个类型都进 TRANSITION_MAP', () => {
+    expect(TRANSITIONS).toHaveLength(59)
+    expect(new Set(TRANSITIONS.map((meta) => meta.type)).size).toBe(59)
+    expect(new Set(TRANSITIONS.map((meta) => meta.label)).size).toBe(59)
     for (const meta of TRANSITIONS) {
-      const [xfade, family, direction, label] = expected[meta.type]
-      expect(meta.xfade).toBe(xfade)
-      expect(meta.family).toBe(family)
-      expect(meta.direction).toBe(direction)
-      expect(meta.label).toBe(label)
       expect(TRANSITION_MAP[meta.type]).toBe(meta)
+      expect(meta.xfade.length).toBeGreaterThan(0)
     }
   })
 
-  it('按族分组：基础 4 / 模糊 2 / 运动模糊平移 4 / 推入 4 / 拉出 4 / 运镜 1', () => {
-    expect(TRANSITION_FAMILIES).toEqual(['basic', 'blur', 'wind', 'push', 'pull', 'camera'])
+  it('按族分组：基础 7 / 模糊 2 / 风感 4 / 推入 4 / 拉出 4 / 运镜 1 / 擦除 20 / 滑动 4 / 形状 10 / 特效 3', () => {
+    expect(TRANSITION_FAMILIES).toEqual([
+      'basic', 'blur', 'wind', 'push', 'pull', 'camera', 'wipe', 'slide', 'shape', 'effect'
+    ])
     const groups = transitionsByFamily()
     expect(groups.map((group) => [group.family, group.label, group.transitions.length])).toEqual([
-      ['basic', TRANSITION_FAMILY_LABELS.basic, 4],
+      ['basic', TRANSITION_FAMILY_LABELS.basic, 7],
       ['blur', TRANSITION_FAMILY_LABELS.blur, 2],
       ['wind', TRANSITION_FAMILY_LABELS.wind, 4],
       ['push', TRANSITION_FAMILY_LABELS.push, 4],
       ['pull', TRANSITION_FAMILY_LABELS.pull, 4],
-      ['camera', TRANSITION_FAMILY_LABELS.camera, 1]
+      ['camera', TRANSITION_FAMILY_LABELS.camera, 1],
+      ['wipe', TRANSITION_FAMILY_LABELS.wipe, 20],
+      ['slide', TRANSITION_FAMILY_LABELS.slide, 4],
+      ['shape', TRANSITION_FAMILY_LABELS.shape, 10],
+      ['effect', TRANSITION_FAMILY_LABELS.effect, 3]
     ])
-    expect(groups.flatMap((group) => group.transitions)).toHaveLength(19)
+    expect(groups.flatMap((group) => group.transitions)).toHaveLength(59)
   })
 
   it('默认时长 = 0.5s，范围常量来自 constants', () => {

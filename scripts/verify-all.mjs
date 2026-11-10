@@ -139,11 +139,20 @@ async function main() {
   for (const project of ['node', 'web', 'tests']) {
     await step(`typecheck:${project}`, node, [tsc, '--noEmit', '-p', `tsconfig.${project}.json`])
   }
-  await step('vitest（666 用例，node + dom 两套）', node, [vitest, 'run'])
+  await step('vitest（全量用例，node + dom 两套）', node, [vitest, 'run'])
 
   // --- CLI 集成冒烟（不依赖 Electron）---
   await step('CLI 冒烟：1080p30/10s 透明 MOV', node, ['scripts/smoke-export.mjs', '--width', '1920', '--height', '1080', '--fps', '30/1', '--seconds', '10'])
   await step('CLI 冒烟：720p 叠加合成（C3/C4 锁定）', node, ['scripts/smoke-export.mjs', '--overlay', '--width', '1280', '--height', '720', '--fps', '24000/1001', '--seconds', '5'])
+  // --- MCP 冒烟（真实 stdio server + 假控制服务：initialize / tools/list / tools/call 透传）---
+  // 这条与 vitest 里同一批用例，但它作为独立步骤出现在 verify:all 报告里：
+  // 门禁失败时能一眼看出是"MCP 面坏了"还是"剪辑/导出坏了"。
+  await step('MCP 冒烟：initialize / tools.list / tools.call（假控制服务）', node, [
+    vitest,
+    'run',
+    'tests/mcpTools.test.ts',
+    'tests/mcpServer.test.ts'
+  ])
 
   if (!QUICK) {
     // 隔离 profile：单实例锁会让冒烟实例秒退（退出码仍 0），上一轮报告会被当成本轮结果
@@ -165,7 +174,6 @@ async function main() {
     await step('应用内：取消透明 MOV（验收 8）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_CANCEL: '1', SOCUT_SMOKE_W: '640', SOCUT_SMOKE_H: '360', SOCUT_SMOKE_SEC: '20' }, 600_000, reportPick)
     await step('应用内：PNG 序列独立出口（C40）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_KIND: 'pngSequence', SOCUT_SMOKE_W: '640', SOCUT_SMOKE_H: '360', SOCUT_SMOKE_SEC: '2' }, 600_000, reportPick)
     await step('应用内：取消 PNG 序列（目录回收 C41）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_KIND: 'pngSequence', SOCUT_SMOKE_CANCEL: '1', SOCUT_SMOKE_W: '640', SOCUT_SMOKE_H: '360', SOCUT_SMOKE_SEC: '20' }, 600_000, reportPick)
-    await step('应用内：MOV 的 pngSequence 回退（C42）', node, [vite, 'dev'], { ...base, SOCUT_SMOKE_DELIVERY: 'pngSequence', SOCUT_SMOKE_W: '640', SOCUT_SMOKE_H: '360', SOCUT_SMOKE_SEC: '2' }, 600_000, reportPick)
     await step('应用内：叠加 720p23.976（验收 4/5/6/7）', node, [vite, 'dev'], {
       ...base, SOCUT_SMOKE_OVERLAY: '1', SOCUT_SMOKE_REF: path.join(artifacts, 'ref-720p23976.mp4')
     }, 600_000, reportPick)

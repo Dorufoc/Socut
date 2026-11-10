@@ -1,22 +1,9 @@
-import type { ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 import { TEXT } from '@shared/i18n'
 import { secondsToTimecode } from '@shared/timecode'
-import { durationSecToFrames, frameIntervalSec } from '@shared/fps'
-import { TRANSITION_DURATION } from '@shared/constants'
 import { MEDIA_VIDEO_RANGE, defaultMediaVideo, isDefaultMediaVideo } from '@shared/mediaClipVideo'
 import { clipAudioEdited, clipTimelineDurationSec } from '@shared/mediaClipAudio'
 import { STAB_LEVELS, stabProxyTimeOf } from '@shared/mediaStab'
-import {
-  DEFAULT_TRANSITION_DURATION_SEC,
-  TRANSITION_MAP,
-  isTransitionAdjacent,
-  previousMediaClipOnTrack,
-  resolveTransitionDuration,
-  transitionMaxDurationSec,
-  transitionMediaMetaOf,
-  transitionsByFamily,
-  type TransitionBlockReason
-} from '@shared/transitions'
 import type {
   ClipAudio,
   ClipSpeed,
@@ -24,16 +11,17 @@ import type {
   MediaClip,
   MediaClipStab,
   MediaClipVideo,
-  StabLevel,
-  TransitionType
+  StabLevel
 } from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
-import { useUiStore } from '../state/uiStore'
+import { MASK_BRUSH_RANGE, useUiStore } from '../state/uiStore'
 import { useExportStore } from '../state/exportStore'
+import { waitForResult } from '../state/jobEvents'
 import { stabSignatureFor, useStabPreviewStore } from '../state/stabPreviewStore'
 import { CurveEditor } from './CurveEditor'
 import { Slider } from './Slider'
-import { ClipAudioSection, ClipSpeedSection } from './ClipFxSections'
+import { ClipAudioSection, ClipEffectsSection, ClipKeySection, ClipSpeedSection } from './ClipFxSections'
+import { KeyframePanel } from './KeyframePanel'
 
 /**
  * 右侧「视频片段」编辑器（v6）：选中媒体段时替换字幕检查器。
@@ -68,63 +56,30 @@ const STAB_LEVEL_LABELS: Record<StabLevel, string> = {
 
 export function MediaClipInspector({ clip, mediaName, index, total, fps }: MediaClipInspectorProps): ReactElement {
   const updateVideo = useProjectStore((state) => state.updateMediaClipVideo)
+  const updateKey = useProjectStore((state) => state.setClipKey)
   const updateStab = useProjectStore((state) => state.updateMediaClipStab)
   const resetVideo = useProjectStore((state) => state.resetMediaClipVideo)
   const updateAudio = useProjectStore((state) => state.updateMediaClipAudio)
   const updateSpeed = useProjectStore((state) => state.updateMediaClipSpeed)
-  const setTransition = useProjectStore((state) => state.setMediaClipTransition)
-  const project = useProjectStore((state) => state.project)
+  const setMediaClipKeyframes = useProjectStore((state) => state.setMediaClipKeyframes)
+  const setMediaClipMask = useProjectStore((state) => state.setMediaClipMask)
+  const setMediaClipMatte = useProjectStore((state) => state.setMediaClipMatte)
   const compactTimeline = useProjectStore((state) => state.compactTimeline)
   const snapTogether = useUiStore((state) => state.timelineTools.snapTogether)
   const stageInteract = useUiStore((state) => state.stageInteract)
   const toggleStageInteract = useUiStore((state) => state.toggleStageInteract)
+  // M8：手绘遮罩——画笔会话在 uiStore（预览层要读同一份状态），这里只负责入口与参数
+  const maskPaint = useUiStore((state) => state.maskPaint)
+  const beginMaskPaint = useUiStore((state) => state.beginMaskPaint)
+  const endMaskPaint = useUiStore((state) => state.endMaskPaint)
+  const setMaskBrush = useUiStore((state) => state.setMaskBrush)
+  const setNotice = useUiStore((state) => state.setNotice)
+  const maskStrokes = clip.mask?.strokes ?? []
+  const paintingMask = maskPaint.clipId === clip.id
   const video = clip.video ?? defaultMediaVideo()
   const stab = clip.stab
   const stabOn = stab?.enabled === true
   const edited = !isDefaultMediaVideo(clip.video) || stabOn || clipAudioEdited(clip.audio, clip.speed)
-
-  // v10：入场转场——前段/空隙/手柄不足时只给原因，不渲染可写入口
-  const transitionPrev = previousMediaClipOnTrack(project.mediaClips, clip)
-  const transitionInput = {
-    prev: transitionPrev,
-    clip,
-    prevMeta: transitionMediaMetaOf(project, transitionPrev),
-    clipMeta: transitionMediaMetaOf(project, clip),
-    requestedSec: clip.transitionIn?.durationSec ?? DEFAULT_TRANSITION_DURATION_SEC,
-    fps
-  }
-  const transitionResolution = resolveTransitionDuration(transitionInput)
-  const transitionFirst = transitionPrev === null
-  const transitionHasGap = transitionPrev !== null && !isTransitionAdjacent(transitionPrev, clip, fps)
-  const transitionAvailableSec = transitionMaxDurationSec(transitionInput)
-  const transitionType = clip.transitionIn?.type
-  const transitionDurationSec = clip.transitionIn?.durationSec ?? transitionResolution.durationSec
-
-  const transitionBlockText = (reason: TransitionBlockReason): string => {
-    if (reason === 'no-tail') return TEXT.transition.noTail
-    if (reason === 'no-head') return TEXT.transition.noHead
-    if (reason === 'no-type') return TEXT.transition.noType
-    return TEXT.transition.tooShort
-  }
-
-  /** 选类型：沿用当前时长（没有时用解析出的默认值；store 会再按手柄夹一次） */
-  const chooseTransitionType = (type: TransitionType): void => {
-    setTransition(clip.id, {
-      type,
-      durationSec: clip.transitionIn?.durationSec ?? (transitionResolution.ok ? transitionResolution.durationSec : DEFAULT_TRANSITION_DURATION_SEC)
-    })
-  }
-
-  /** 改时长：先在面板侧解析（首段/空隙/手柄不足不写），再由 store 归一落盘 */
-  const changeTransitionDuration = (raw: string): void => {
-    const type = clip.transitionIn?.type
-    if (!type) return
-    const requested = Number(raw)
-    if (!Number.isFinite(requested)) return
-    const resolved = resolveTransitionDuration({ ...transitionInput, requestedSec: requested })
-    if (!resolved.ok) return
-    setTransition(clip.id, { type, durationSec: resolved.durationSec })
-  }
 
   // v8.1：防抖预览代理——当前签名与记账一致才算「已就绪」；参数一动自动回落原片。
   const mediaItem = useProjectStore((state) => state.project.media.find((m) => m.id === clip.mediaId) ?? null)
@@ -175,6 +130,150 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
     if (snapTogether) compactTimeline()
   }
 
+  /**
+   * M8：进入/退出遮罩画笔。
+   * 进入时先暂停并把播放头跳到本段中点——画笔层只在「这段真的显示在预览里」时出现，
+   * 否则用户会对着别的画面涂、却写进这一段的数据。
+   */
+  const toggleMaskPaint = (): void => {
+    if (paintingMask) {
+      endMaskPaint()
+      return
+    }
+    const ui = useUiStore.getState()
+    ui.setPlaying(false)
+    ui.seekHandler?.((clip.timelineStartSec + clip.timelineEndSec) / 2)
+    beginMaskPaint(clip.id)
+    setNotice(TEXT.mask.enterHint)
+  }
+
+  /** 清空遮罩：整键删除（store 归一后工程 JSON 里不会留空 strokes）。 */
+  const clearMask = (): void => {
+    setMediaClipMask(clip.id, undefined)
+    setNotice(TEXT.mask.clearHint)
+  }
+
+  /** M8-P0：外部 matte 文件名（只用于展示；真实路径由 clip.mattePath 保存）。 */
+  const matteName = clip.mattePath ? (clip.mattePath.split(/[\\/]/).pop() ?? clip.mattePath) : ''
+
+  /**
+   * M8-P0：导入外部 matte（图片或视频）。
+   * 预览不渲染外部 matte（与降噪/防抖同一口径：导出侧生效），所以这里必须给明确提示，
+   * 避免用户以为预览会跟着变。
+   */
+  const importMatte = async (): Promise<void> => {
+    try {
+      const picked = await window.socut.media.pickMatte()
+      if (!picked) return
+      setMediaClipMatte(clip.id, { path: picked.path, kind: picked.kind })
+      setNotice(TEXT.matte.applied(picked.name))
+    } catch (error) {
+      setNotice(TEXT.matte.pickFailed(error instanceof Error ? error.message : String(error)))
+    }
+  }
+
+  const removeMatte = (): void => {
+    setMediaClipMatte(clip.id, undefined)
+    setNotice(TEXT.matte.removed)
+  }
+
+  // ---- M8-P1：AI 人像抠像（主进程 ONNX 推理，进度走 export job 事件；仅导出生效） ----
+  const [aiStatus, setAiStatus] = useState<{
+    ready: boolean
+    runtimeOk: boolean
+    modelOk: boolean
+    reason: string
+  } | null>(null)
+  const aiJobId = `matte-${clip.id}`
+  const aiJob = useExportStore((state) => state.jobs[aiJobId])
+  const aiRunning =
+    aiJob !== undefined &&
+    aiJob.phase !== 'done' &&
+    aiJob.phase !== 'failed' &&
+    aiJob.phase !== 'cancelled'
+  // 老版本 preload / 测试桩可能没有 aiMatte 通道：缺 API 时按「运行时未就绪」降级，不能抛异常
+  const aiApi = window.socut?.aiMatte
+  useEffect(() => {
+    let alive = true
+    if (!aiApi) {
+      setAiStatus({
+        ready: false,
+        runtimeOk: false,
+        modelOk: false,
+        reason: TEXT.aiMatte.installHint
+      })
+      return () => {
+        alive = false
+      }
+    }
+    void aiApi
+      .status()
+      .then((status) => {
+        if (!alive) return
+        setAiStatus({
+          ready: status.ready,
+          runtimeOk: status.runtime.ok,
+          modelOk: status.model.ok,
+          reason: status.runtime.reason ?? status.model.reason ?? ''
+        })
+      })
+      .catch((error: unknown) => {
+        if (alive) {
+          setAiStatus({
+            ready: false,
+            runtimeOk: false,
+            modelOk: false,
+            reason: error instanceof Error ? error.message : String(error)
+          })
+        }
+      })
+    return () => {
+      alive = false
+    }
+  }, [clip.id, aiApi])
+
+  const generateAiMatte = async (): Promise<void> => {
+    if (!mediaItem) return
+    if (!aiApi) {
+      setNotice(TEXT.aiMatte.failed(TEXT.aiMatte.runtimeMissing))
+      return
+    }
+    try {
+      const queued = await aiApi.generate({
+        clipId: clip.id,
+        sourcePath: mediaItem.path,
+        sourceInSec: clip.sourceInSec,
+        sourceOutSec: clip.sourceOutSec,
+        fps: projectFps as Fps,
+        sourceWidth: mediaItem.meta.width,
+        sourceHeight: mediaItem.meta.height
+      })
+      let mattePath = queued.path
+      if (queued.status === 'cached' && mattePath) {
+        setMediaClipMatte(clip.id, { path: mattePath, kind: 'video' })
+        setNotice(TEXT.aiMatte.cached)
+        return
+      }
+      const result = await waitForResult(queued.jobId)
+      if (!result.ok || !result.outputPath) {
+        throw new Error(result.error?.message ?? 'AI 抠像失败')
+      }
+      mattePath = result.outputPath
+      setMediaClipMatte(clip.id, { path: mattePath, kind: 'video' })
+      setNotice(TEXT.aiMatte.done)
+    } catch (error) {
+      setNotice(TEXT.aiMatte.failed(error instanceof Error ? error.message : String(error)))
+    }
+  }
+
+  // 切到别的片段 / 关闭检查器时退出画笔：避免画笔层继续画在一个已经被切走的段上
+  useEffect(() => {
+    return () => {
+      const ui = useUiStore.getState()
+      if (ui.maskPaint.clipId !== null) ui.endMaskPaint()
+    }
+  }, [clip.id])
+
   return (
     <div className="inspector">
       <section className="inspector__head">
@@ -210,69 +309,6 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
             {TEXT.videoEditor.reset}
           </button>
         </div>
-      </section>
-
-      <section className="group">
-        <div className="group__head">
-          <span className="group__title">{TEXT.transition.title}</span>
-          {transitionType ? (
-            <span className="chip chip--accent">{TRANSITION_MAP[transitionType].label}</span>
-          ) : null}
-        </div>
-        {transitionFirst ? (
-          <span className="muted">{TEXT.transition.first}</span>
-        ) : transitionHasGap ? (
-          <span className="muted">{TEXT.transition.gap}</span>
-        ) : !transitionResolution.ok ? (
-          <>
-            <span className="chip chip--warn">{transitionBlockText(transitionResolution.reason)}</span>
-            <span className="muted">{TEXT.transition.insufficient(transitionAvailableSec.toFixed(2))}</span>
-          </>
-        ) : (
-          <>
-            {transitionsByFamily().map((group) => (
-              <div key={group.family} className="transition-family">
-                <div className="facet-label">{group.label}</div>
-                <div className="transition-grid" role="group" aria-label={group.label}>
-                  {group.transitions.map((meta) => (
-                    <button
-                      key={meta.type}
-                      type="button"
-                      className={`btn btn--sm${transitionType === meta.type ? ' btn--primary' : ''}`}
-                      aria-pressed={transitionType === meta.type}
-                      onClick={() => chooseTransitionType(meta.type)}
-                    >
-                      {meta.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-            {clip.transitionIn ? (
-              <div className="row transition-duration-row">
-                <input
-                  className="transition-duration"
-                  type="number"
-                  aria-label={TEXT.transition.duration}
-                  min={TRANSITION_DURATION.min}
-                  max={TRANSITION_DURATION.max}
-                  step={frameIntervalSec(fps)}
-                  value={transitionDurationSec}
-                  onChange={(event) => changeTransitionDuration(event.target.value)}
-                />
-                <span className="muted mono">{TEXT.transition.frames(durationSecToFrames(transitionDurationSec, fps, 0))}</span>
-                <button
-                  type="button"
-                  className="btn btn--sm btn--subtle"
-                  onClick={() => setTransition(clip.id, null)}
-                >
-                  {TEXT.transition.remove}
-                </button>
-              </div>
-            ) : null}
-          </>
-        )}
-        <span className="muted">{TEXT.transition.hint}</span>
       </section>
 
       <section className="group">
@@ -392,6 +428,8 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
 
         <div className="facet-label">{TEXT.videoEditor.curves}</div>
         <CurveEditor curves={video.curves} onChange={(curves) => set({ curves })} />
+        <ClipEffectsSection video={video} onChange={set} />
+        <ClipKeySection keyValue={clip.key} onChange={(key) => updateKey(clip.id, key)} />
       </section>
 
       {/* v9：音频与变速（与音频片段编辑器共用同一组控件） */}
@@ -401,6 +439,210 @@ export function MediaClipInspector({ clip, mediaName, index, total, fps }: Media
         onChange={setAudio}
       />
       <ClipSpeedSection speed={clip.speed} onChange={setSpeed} />
+
+      {/* M6-E：媒体段关键帧（与字幕条同一套面板；打点初始值取当前静态几何，避免"打点即跳变"） */}
+      <section className="group">
+        <div className="group__head">
+          <span className="group__title">{TEXT.keyframes.title}</span>
+        </div>
+        <KeyframePanel
+          clip={{
+            id: clip.id,
+            startTime: clip.timelineStartSec,
+            endTime: clip.timelineEndSec,
+            ...(clip.keyframes ? { keyframes: clip.keyframes } : {})
+          }}
+          onCommit={setMediaClipKeyframes}
+          defaults={{
+            scalePct: video.scalePercent,
+            offsetXPct: video.offsetXPercent,
+            offsetYPct: video.offsetYPercent,
+            rotationDeg: video.rotationDeg
+          }}
+        />
+      </section>
+
+      {/* M8：手绘遮罩（预览 CSS mask + 预览上的画笔层；坐标归一化，与画幅/缩放无关） */}
+      <section className="group">
+        <div className="group__head">
+          <span className="group__title">{TEXT.mask.title}</span>
+          <span className={`chip${maskStrokes.length > 0 ? ' chip--ok' : ''}`}>
+            {TEXT.mask.strokes(maskStrokes.length)}
+          </span>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          <button
+            type="button"
+            className={`btn btn--sm${paintingMask ? ' btn--primary' : ''}`}
+            aria-pressed={paintingMask}
+            title={paintingMask ? TEXT.mask.exit : TEXT.mask.enterHint}
+            onClick={toggleMaskPaint}
+          >
+            {paintingMask ? TEXT.mask.exit : TEXT.mask.enter}
+          </button>
+          <button
+            type="button"
+            className="btn btn--sm btn--subtle"
+            disabled={maskStrokes.length === 0}
+            title={TEXT.mask.clearHint}
+            onClick={clearMask}
+          >
+            {TEXT.mask.clear}
+          </button>
+        </div>
+        {/* M8：羽化（柔边）——写进 mask.featherPct，预览与导出共用同一张遮罩 PNG */}
+        {maskStrokes.length > 0 ? (
+          <>
+            <Slider
+              label={TEXT.mask.feather}
+              value={clip.mask?.featherPct ?? 0}
+              min={0}
+              max={20}
+              step={0.5}
+              unit="%"
+              title={TEXT.mask.featherHint}
+              onChange={(value) =>
+                setMediaClipMask(clip.id, {
+                  strokes: [...maskStrokes],
+                  ...(value > 0 ? { featherPct: value } : {}),
+                  ...(clip.mask?.invert === true ? { invert: true } : {})
+                })
+              }
+            />
+            {/* M8：反向遮罩（黑白互换）——光栅化最后一步整张取反，预览/导出仍同一张 PNG */}
+            <label className="switch" title={TEXT.mask.invertHint}>
+              <input
+                type="checkbox"
+                checked={clip.mask?.invert === true}
+                onChange={(event) => {
+                  const featherPct = clip.mask?.featherPct ?? 0
+                  setMediaClipMask(clip.id, {
+                    strokes: [...maskStrokes],
+                    ...(featherPct > 0 ? { featherPct } : {}),
+                    ...(event.target.checked ? { invert: true } : {})
+                  })
+                }}
+              />
+              <span>{TEXT.mask.invert}</span>
+            </label>
+          </>
+        ) : null}
+        {paintingMask ? (
+          <>
+            <div className="facet-label">{TEXT.mask.mode}</div>
+            <div className="row" style={{ gap: 6 }}>
+              <button
+                type="button"
+                className={`btn btn--sm${maskPaint.mode === 'hide' ? ' btn--primary' : ''}`}
+                aria-pressed={maskPaint.mode === 'hide'}
+                onClick={() => setMaskBrush({ mode: 'hide' })}
+              >
+                {TEXT.mask.hide}
+              </button>
+              <button
+                type="button"
+                className={`btn btn--sm${maskPaint.mode === 'restore' ? ' btn--primary' : ''}`}
+                aria-pressed={maskPaint.mode === 'restore'}
+                onClick={() => setMaskBrush({ mode: 'restore' })}
+              >
+                {TEXT.mask.restore}
+              </button>
+            </div>
+            <Slider
+              label={TEXT.mask.brush}
+              value={maskPaint.radiusPct}
+              min={MASK_BRUSH_RANGE.min}
+              max={MASK_BRUSH_RANGE.max}
+              step={0.5}
+              unit="%"
+              title={TEXT.mask.brushHint}
+              onChange={(value) => setMaskBrush({ radiusPct: value })}
+            />
+            <p className="hint">{TEXT.mask.paintHint}</p>
+          </>
+        ) : (
+          <p className="hint">{maskStrokes.length === 0 ? TEXT.mask.empty : TEXT.mask.hint}</p>
+        )}
+      </section>
+
+      {/* M8-P0：外部 matte（图片/视频；导出侧 alpha 相乘，预览仍显示原片） */}
+      <section className="group">
+        <div className="group__head">
+          <span className="group__title">{TEXT.matte.title}</span>
+          <span className={`chip${clip.mattePath ? ' chip--ok' : ''}`}>
+            {clip.mattePath ? (clip.matteKind === 'video' ? TEXT.matte.video : TEXT.matte.image) : TEXT.matte.none}
+          </span>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          <button
+            type="button"
+            className="btn btn--sm"
+            title={TEXT.matte.importHint}
+            onClick={() => void importMatte()}
+          >
+            {TEXT.matte.import}
+          </button>
+          <button
+            type="button"
+            className="btn btn--sm btn--subtle"
+            disabled={!clip.mattePath}
+            title={TEXT.matte.removeHint}
+            onClick={removeMatte}
+          >
+            {TEXT.matte.remove}
+          </button>
+        </div>
+        {clip.mattePath ? (
+          <p className="hint mono" title={clip.mattePath}>
+            {matteName}
+          </p>
+        ) : null}
+        <p className="hint">{TEXT.matte.exportingOnly}</p>
+      </section>
+
+      {/* M8-P1：AI 人像抠像（主进程 ONNX 推理生成 matte；仅导出生效，预览仍显示原片） */}
+      <section className="group">
+        <div className="group__head">
+          <span className="group__title">{TEXT.aiMatte.title}</span>
+          <span className={`chip${aiStatus?.ready ? ' chip--ok' : ' chip--warn'}`}>
+            {aiStatus === null
+              ? '…'
+              : aiStatus.ready
+                ? TEXT.aiMatte.ready
+                : aiStatus.runtimeOk
+                  ? TEXT.aiMatte.modelMissing
+                  : TEXT.aiMatte.runtimeMissing}
+          </span>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          <button
+            type="button"
+            className="btn btn--sm btn--primary"
+            disabled={!aiStatus?.ready || aiRunning || !mediaItem}
+            title={TEXT.aiMatte.generateHint}
+            onClick={() => void generateAiMatte()}
+          >
+            {TEXT.aiMatte.generate}
+          </button>
+          {aiRunning ? (
+            <button
+              type="button"
+              className="btn btn--sm btn--subtle"
+              onClick={() => void window.socut.export.cancel(aiJobId)}
+            >
+              {TEXT.aiMatte.cancel}
+            </button>
+          ) : null}
+        </div>
+        {aiRunning && aiJob ? (
+          <p className="hint">{TEXT.aiMatte.generating(aiJob.framesDone, aiJob.framesTotal)}</p>
+        ) : null}
+        <p className="hint">
+          {aiStatus?.ready
+            ? TEXT.aiMatte.readyHint
+            : aiStatus?.reason || TEXT.aiMatte.installHint}
+        </p>
+      </section>
 
       <section className="group">
         <div className="group__head">

@@ -10,6 +10,8 @@ import type {
   FrameEnd,
   FrameRequest,
   FrameResponse,
+  FreezeFrameRequest,
+  FreezeFrameResult,
   Fps,
   JobProgress,
   JobResult,
@@ -23,7 +25,7 @@ import type {
   StabPreviewResult,
   VideoMeta
 } from '../shared/types'
-import type { EstimateInput, SmokeReport, WatermarkPickResult, CoverCaptureRect, NewProjectResult, OpenProjectResult, SaveProjectResult } from '../shared/api'
+import type { EstimateInput, SmokeReport, WatermarkPickResult, MattePickResult, AiMatteRequest, AiMatteJobResult, AiMatteStatusResult, CoverCaptureRect, NewProjectResult, OpenProjectResult, SaveProjectResult, CaptionTranscribeRequest, CaptionProgressEvent, CaptionTranscribeResult, VoiceAssetPatch, VoiceAssetStatus } from '../shared/api'
 import type { GpuPreference, VideoEncoderMode } from '../shared/gpu'
 import type { RecentProjectCard } from '../shared/recentProjects'
 import type { CliCommandRequest, CliResponse } from '../shared/cliProtocol'
@@ -138,6 +140,13 @@ const api = {
     /** 保存导出编码模式（自动硬件编码 / 仅软件） */
     setEncoder: (mode: VideoEncoderMode) => ipcRenderer.invoke(CHANNELS.gpuSetEncoder, mode)
   },
+  aiMatte: {
+    /** M8-P1：运行时/模型体检（未安装/缺模型 → ready=false + 可读 reason） */
+    status: () => ipcRenderer.invoke(CHANNELS.aiMatteStatus) as Promise<AiMatteStatusResult>,
+    /** M8-P1：生成 AI matte（jobId 前缀 matte-；进度/结果走 job 事件） */
+    generate: (request: AiMatteRequest) =>
+      ipcRenderer.invoke(CHANNELS.aiMatteGenerate, request) as Promise<AiMatteJobResult>
+  },
   media: {
     /** v2：主进程 ffmpeg 抽帧缩略图，返回 socut-thumb://<mediaId>（失败 null） */
     generateThumb: (mediaId: string, videoPath: string, atSec?: number) =>
@@ -147,6 +156,14 @@ const api = {
       ipcRenderer.invoke(CHANNELS.mediaThumbUrl, mediaId, url) as Promise<string | null>,
     /** v2：素材移出池时回收缩略图文件 */
     removeThumb: (mediaId: string) => ipcRenderer.invoke(CHANNELS.mediaThumbRemove, mediaId) as Promise<void>,
+    /** M8-P0：选择外部 matte（图片/视频）；取消返回 null，类型由主进程按扩展名判定 */
+    pickMatte: () => ipcRenderer.invoke(CHANNELS.mediaPickMatte) as Promise<MattePickResult | null>,
+    /**
+     * M5：冻结帧抽帧。源视频某一时刻 → 全分辨率 PNG（userData/freezes），
+     * 返回绝对路径与尺寸；不可用时 path=null（渲染层提示，不抛错）。
+     */
+    extractFrame: (request: FreezeFrameRequest) =>
+      ipcRenderer.invoke(CHANNELS.mediaExtractFrame, request) as Promise<FreezeFrameResult>,
     /**
      * v5：时间帧预览条（Thumbnail Strip）。主进程一次抽帧并拼成一张长图，
      * 命中磁盘缓存不起子进程；失败时 url=null，卡片显示占位符。
@@ -190,6 +207,33 @@ const api = {
   job: {
     onProgress: (handler: (progress: JobProgress) => void) => on<JobProgress>(CHANNELS.jobProgress, handler),
     onResult: (handler: (result: JobResult) => void) => on<JobResult>(CHANNELS.jobResult, handler)
+  },
+  caption: {
+    /**
+     * M11：启动一次 whisper.cpp 转写（长任务）。
+     * 失败不抛异常：错误码/可读消息在返回值的 errorCode/errorMessage 里原样透传。
+     */
+    transcribe: (request: CaptionTranscribeRequest) =>
+      ipcRenderer.invoke(CHANNELS.captionTranscribe, request) as Promise<CaptionTranscribeResult>,
+    /** 订阅转写进度（payload.requestId 由调用方过滤）；返回取消订阅函数 */
+    onProgress: (handler: (progress: CaptionProgressEvent) => void) =>
+      on<CaptionProgressEvent>(CHANNELS.captionProgress, handler),
+    /** 按 requestId 取消在跑的转写；没有该请求时 resolve false */
+    cancel: (requestId: string) =>
+      ipcRenderer.invoke(CHANNELS.captionCancel, requestId) as Promise<boolean>
+  },
+  whisper: {
+    /** M11：语音资产状态（whisper 二进制/模型 + RNNoise 模型 + 候选路径） */
+    status: () => ipcRenderer.invoke(CHANNELS.whisperStatus) as Promise<VoiceAssetStatus>,
+    /** 保存配置（`null` 清除该项）；路径不存在时主进程抛错（错误码原样透传） */
+    saveConfig: (patch: VoiceAssetPatch) =>
+      ipcRenderer.invoke(CHANNELS.whisperSaveConfig, patch) as Promise<VoiceAssetStatus>,
+    /** 系统文件框挑 whisper 二进制；用户取消返回 null（不落配置） */
+    pickBinary: () => ipcRenderer.invoke(CHANNELS.whisperPickBinary) as Promise<string | null>,
+    /** 系统文件框挑 ggml 模型；用户取消返回 null（不落配置） */
+    pickModel: () => ipcRenderer.invoke(CHANNELS.whisperPickModel) as Promise<string | null>,
+    /** 清除已保存配置（回到候选探测） */
+    reset: () => ipcRenderer.invoke(CHANNELS.whisperReset) as Promise<VoiceAssetStatus>
   },
   cli: {
     /**

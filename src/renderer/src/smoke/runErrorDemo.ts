@@ -67,7 +67,6 @@ export async function runErrorDemo(fontIndex: FontRecord[]): Promise<ErrorDemoRe
     // 不存在的盘符：FFmpeg 打不开输出文件，必然失败并带上 argv
     target: { kind: 'transparentMov', outputDir: 'Z:\\socut-does-not-exist', fileName: 'err-demo.mov' },
     frameSpec: frameSpecOf(spec),
-    frameDelivery: 'pipe',
     codec: 'prores4444'
   }
   const startPromise = window.socut.export.start(request)

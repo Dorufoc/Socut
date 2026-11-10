@@ -421,3 +421,44 @@ describe('MediaClipCard 音频频谱条', () => {
     expect(peaksCalls[1]!.sourceOutSec).toBe(8)
   })
 })
+
+/**
+ * M6 遗留 UI：媒体段卡片上的关键帧菱形。
+ * 与字幕条卡片同一交互：参数轨 t 并集去重、点击把播放头带到该帧、不启动整段拖动。
+ */
+describe('MediaClipCard 关键帧菱形', () => {
+  const keyed: MediaClip = {
+    ...clip,
+    keyframes: [
+      {
+        param: 'opacity',
+        points: [
+          { t: 0, value: 1, easing: 'linear' },
+          { t: 0.5, value: 0.4, easing: 'linear' }
+        ]
+      },
+      { param: 'scalePct', points: [{ t: 0.5, value: 120, easing: 'linear' }] }
+    ]
+  }
+
+  it('按参数轨 t 并集画菱形（同 t 只画一个），点击跳到时间轴位置且不启动拖动', async () => {
+    const onSeekKeyframe = vi.fn()
+    const onMove = vi.fn()
+    const card = await renderCard(makeProps({ clip: keyed, onSeekKeyframe, onMove }))
+
+    const dots = card.querySelectorAll('.media-clip-card__keyframe') as NodeListOf<HTMLButtonElement>
+    expect(dots).toHaveLength(2)
+    expect([...dots].map((dot) => dot.dataset.keyframeT)).toEqual(['0', '0.5'])
+
+    // 入点 2s + 0.5 × 6s = 5s
+    fireEvent.pointerDown(dots[1]!, pointer(0))
+    fireEvent.click(dots[1]!)
+    expect(onSeekKeyframe).toHaveBeenCalledWith(5)
+    expect(onMove).not.toHaveBeenCalled()
+  })
+
+  it('没有关键帧时不画菱形（旧卡片 DOM 不变）', async () => {
+    const card = await renderCard(makeProps())
+    expect(card.querySelectorAll('.media-clip-card__keyframe')).toHaveLength(0)
+  })
+})

@@ -18,7 +18,6 @@ import {
   buildThumbnailArgs,
   buildStripArgs,
   buildTransparentMovFromPipe,
-  buildTransparentMovFromSeq,
   buildTransparentMovQtrle,
   buildVerifyArgs,
   buildVfrSampleArgs,
@@ -105,15 +104,6 @@ describe('透明 MOV argv', () => {
     expect(BT709_TAGS.length).toBe(6)
   })
 
-  it('PNG 序列回退路径带 -start_number 0 与 image 序列模板', () => {
-    const args = buildTransparentMovFromSeq(FPS_30, 'C:/tmp/frame_%06d.png', 'D:/out/lower.mov')
-    expect(args).toContain('-start_number')
-    expect(args[args.indexOf('-start_number') + 1]).toBe('0')
-    expect(args).toContain('C:/tmp/frame_%06d.png')
-    expect(args).toContain('-framerate')
-    expect(args).not.toContain('image2pipe')
-  })
-
   it('qtrle 兼容模式输出 argb 且使用全范围', () => {
     const args = buildTransparentMovQtrle(FPS_30, 'D:/out/lower.mov', 'png')
     expect(args).toContain('qtrle')
@@ -179,6 +169,63 @@ describe('叠加合成 argv（计划 C2/C3/C4/C7）', () => {
     const pngArgs = buildOverlayMp4DirectPipe({ ...input, frameFormat: 'png' })
     expect(pngArgs).toContain('image2pipe')
     expect(pngArgs).not.toContain('C:/tmp/overlay.mov')
+  })
+})
+
+describe('叠加导出码率 / HEVC / 音频码率', () => {
+  const base = {
+    refVideoPath: 'D:/videos/ref.mp4',
+    outputPath: 'D:/out/final.mp4',
+    fps: FPS_30,
+    frameFormat: 'raw' as const,
+    frameSize: { width: 1920, height: 1080 },
+    spanStartSec: 0,
+    spanEndSec: 10,
+    fpsMode: 'cfr' as const
+  }
+
+  it('AVC 动态码率：只输出目标 -b:v 2000k，无 -maxrate/-bufsize/-crf', () => {
+    const args = buildOverlayMp4DirectPipe({ ...base, audioMode: 'aac', videoBitrateKbps: 2000, videoCodec: 'avc' })
+    expect(args[args.indexOf('-c:v') + 1]).toBe('libx264')
+    expect(args[args.indexOf('-b:v') + 1]).toBe('2000k')
+    expect(args).not.toContain('-maxrate')
+    expect(args).not.toContain('-bufsize')
+    expect(args).not.toContain('-crf')
+  })
+
+  it('HEVC 软件编码使用 libx265（码率模式 + 无码率 CRF 模式）', () => {
+    const bitrate = buildOverlayMp4DirectPipe({
+      ...base,
+      audioMode: 'aac',
+      videoCodec: 'hevc',
+      videoBitrateKbps: 4000
+    })
+    expect(bitrate[bitrate.indexOf('-c:v') + 1]).toBe('libx265')
+    expect(bitrate[bitrate.indexOf('-b:v') + 1]).toBe('4000k')
+    const crf = buildOverlayMp4DirectPipe({ ...base, audioMode: 'aac', videoCodec: 'hevc' })
+    expect(crf[crf.indexOf('-c:v') + 1]).toBe('libx265')
+    expect(crf[crf.indexOf('-crf') + 1]).toBe('18')
+  })
+
+  it('audioBitrateKbps 在 AAC 分支输出 -b:a 128k；copy 分支保持 -c:a copy', () => {
+    const aac = buildOverlayMp4DirectPipe({ ...base, audioMode: 'aac', audioBitrateKbps: 128 })
+    expect(aac[aac.indexOf('-b:a') + 1]).toBe('128k')
+    const copy = buildOverlayMp4DirectPipe({ ...base, audioMode: 'copy', audioBitrateKbps: 128 })
+    expect(copy[copy.indexOf('-c:a') + 1]).toBe('copy')
+  })
+
+  it('多输入直接管道同样透传 HEVC + 码率 + 音频码率', () => {
+    const args = buildOverlayMp4MultiInputDirectPipe({
+      ...basis([seg()]),
+      frameFormat: 'raw',
+      audioMode: 'aac',
+      videoCodec: 'hevc',
+      videoBitrateKbps: 3000,
+      audioBitrateKbps: 256
+    })
+    expect(args[args.indexOf('-c:v') + 1]).toBe('libx265')
+    expect(args[args.indexOf('-b:v') + 1]).toBe('3000k')
+    expect(args[args.indexOf('-b:a') + 1]).toBe('256k')
   })
 })
 
@@ -1145,4 +1192,54 @@ describe('v10 响度标准化 argv', () => {
     expect(joined(args)).toContain('-map 0:a? -af loudnorm=I=-23:TP=-1:LRA=7')
   })
 })
+describe('M7-E 图形层 z 档（graphicsZ）', () => {
+  const direct = {
+    refVideoPath: 'D:/videos/ref.mp4',
+    outputPath: 'D:/out/final.mp4',
+    fps: FPS_30,
+    spanStartSec: 2,
+    spanEndSec: 8,
+    audioMode: 'copy' as const,
+    fpsMode: 'cfr' as const
+  }
 
+  const filterOf = (args: string[]): string => args[args.indexOf('-filter_complex') + 1] ?? ''
+
+  it('缺省 aboveMedia：透明层叠在媒体基座之上（旧行为，无 obase）', () => {
+    const fc = buildMediaBasisFilterComplex(basis([seg()]))
+    expect(fc).toContain('[v0][ov]overlay')
+    expect(fc).not.toContain('[obase]')
+    expect(fc).not.toContain('graphicsZ')
+  })
+
+  it('belowMedia（多输入基座）：透明帧作基座，媒体基座叠在上面', () => {
+    const fc = buildMediaBasisFilterComplex({ ...basis([seg()]), graphicsZ: 'belowMedia' })
+    expect(fc).toContain('[2:v]fps=30/1,setsar=1[obase]')
+    expect(fc).toContain('[obase][v0]overlay=0:0:')
+    expect(fc).not.toContain('[v0][ov]overlay')
+    // 时间窗不再需要（基座本身就是整段字幕帧），但仍然要落 yuv420p
+    expect(fc).toContain('format=yuv420p[v]')
+  })
+
+  it('belowMedia（多轨基座）：以 [mv] 作为被叠加的媒体层', () => {
+    const multiSeg = [
+      seg({ trackIndex: 0 }),
+      seg({ refVideoPath: 'D:/media/pip.mp4', trackIndex: 1, timelineStartSec: 2, timelineEndSec: 6, sourceInSec: 0, sourceOutSec: 4 })
+    ]
+    const fc = buildMediaBasisFilterComplex({ ...basis(multiSeg), graphicsZ: 'belowMedia' })
+    expect(fc).toContain('[obase][mv]overlay=0:0:')
+  })
+
+  it('直接管道：graphicsZ 原样透传到滤镜图', () => {
+    const graph = filterOf(buildOverlayMp4DirectPipe({ ...direct, graphicsZ: 'belowMedia' }))
+    expect(graph).toContain('[1:v]fps=30/1,setsar=1[obase]')
+    expect(graph).toContain('[obase][v0]overlay=0:0:')
+    expect(graph).not.toContain('[v0][ov]overlay')
+  })
+
+  it('缺省直接管道：滤镜图与旧版一致（无 obase）', () => {
+    const graph = filterOf(buildOverlayMp4DirectPipe({ ...direct }))
+    expect(graph).not.toContain('[obase]')
+    expect(graph).toContain('[v0][ov]overlay')
+  })
+})

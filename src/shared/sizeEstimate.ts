@@ -1,5 +1,5 @@
 import { PNG_RECOMMEND_THRESHOLD_BYTES, PRORES_4444_BITS_PER_PIXEL_FRAME } from './constants'
-import type { Fps, SizeEstimate } from './types'
+import type { ExportKind, Fps, SizeEstimate } from './types'
 
 /** 体积预估（规格 §2.3：4K60 透明 MOV 导出前须显示预估文件大小）。 */
 
@@ -20,6 +20,18 @@ export function estimateProres4444Bytes(
   return Math.max(0, Math.round((bytesByFrames + bytesByTime) / 2))
 }
 
+/**
+ * H.264 交付口径（CRF 18）的经验值：约 0.10 bit/pixel/frame
+ * （1080p30 ≈ 6 Mbps）。只用于叠加出口的预估与磁盘判断——
+ * 叠加产物是 H.264 MP4，拿 ProRes 4444 的 10 bit 系数去量会高估一个数量级，
+ * 把一个正常的 4K 导出误判成「磁盘不足」。
+ */
+export const H264_CRF18_BITS_PER_PIXEL_FRAME = 0.1
+
+export function estimateH264Bytes(width: number, height: number, fps: Fps, frames: number): number {
+  return estimateProres4444Bytes(width, height, fps, frames, H264_CRF18_BITS_PER_PIXEL_FRAME)
+}
+
 export interface SizeEstimateInput {
   width: number
   height: number
@@ -29,15 +41,30 @@ export interface SizeEstimateInput {
   freeBytes?: number
   /** 磁盘安全系数（规格 §5 预检 1.5×） */
   safetyFactor?: number
+  /** 出口类型：overlayMp4 用 H.264 口径，其余用 ProRes 4444 口径（缺省） */
+  kind?: ExportKind
+  /** 视频码率（kbps）：有值时按码率口径估算 */
+  videoBitrateKbps?: number
+  /** 音频码率（kbps）：缺省按 192 计 */
+  audioBitrateKbps?: number
 }
 
 export function buildSizeEstimate(input: SizeEstimateInput): SizeEstimate {
-  const bytes = estimateProres4444Bytes(input.width, input.height, input.fps, input.frames)
+  const overlay = input.kind === 'overlayMp4'
+  const fpsRatio = input.fps.den > 0 ? input.fps.num / input.fps.den : 0
+  const durationSec = fpsRatio > 0 ? input.frames / fpsRatio : 0
+  const bytes =
+    input.videoBitrateKbps !== undefined
+      ? Math.round(((input.videoBitrateKbps + (input.audioBitrateKbps ?? 192)) * 1000) / 8 * durationSec)
+      : overlay
+        ? estimateH264Bytes(input.width, input.height, input.fps, input.frames)
+        : estimateProres4444Bytes(input.width, input.height, input.fps, input.frames)
   const freeBytes = input.freeBytes
   const need = bytes * (input.safetyFactor ?? 1.5)
   return {
     bytes,
-    recommendPng: bytes >= PNG_RECOMMEND_THRESHOLD_BYTES,
+    // 「改用 PNG 序列」只对透明 MOV 有意义：叠加出口的产物本来就是小体积 H.264
+    recommendPng: !overlay && bytes >= PNG_RECOMMEND_THRESHOLD_BYTES,
     freeBytes,
     sufficientDisk: freeBytes === undefined ? true : freeBytes >= need
   }
@@ -61,14 +88,14 @@ export function formatBytes(bytes: number): string {
  * 之前这一步只在 UI 里作为提示/弹窗存在，主进程本身不拦——绕过 UI 的调用（进口、自动化）
  * 会在写满的盘上跑到一半才报一个无法归因的 FFmpeg 错误。
  *
- * 不强行拦截的情形（估错方向反而造成误拒）：
- *  - pngSequence：它本身就是磁盘紧张时的推荐出口，用 ProRes 口径去量它必然高估；
- *  - directPipe 叠加：不落中间透明 MOV，产物是 H.264，ProRes 系数不适用。
+ * 只有透明 MOV 出口用 ProRes 口径硬拦：
+ *  - pngSequence：本身就是磁盘紧张时的推荐出口，用 ProRes 口径去量它必然高估；
+ *  - overlayMp4：v11 起全程流式编码，不落任何中间文件，产物是 H.264（约为 ProRes 的 1/20），
+ *    ProRes 系数会把正常磁盘误判成「空间不足」。
  * 这两种仍由 UI 的预估与安量提示兼顾，但不硬拦。
  */
 export interface DiskPrecheckInput {
   kind: 'transparentMov' | 'overlayMp4' | 'pngSequence'
-  directPipe: boolean
   width: number
   height: number
   fps: Fps
@@ -88,7 +115,7 @@ export interface DiskPrecheckResult {
 
 export function diskPrecheck(input: DiskPrecheckInput): DiskPrecheckResult {
   const safety = input.safetyFactor ?? 1.5
-  const enforced = input.kind !== 'pngSequence' && !(input.kind === 'overlayMp4' && input.directPipe)
+  const enforced = input.kind === 'transparentMov'
   const estimate = estimateProres4444Bytes(input.width, input.height, input.fps, input.frames)
   const requiredBytes = Math.round(estimate * safety)
   if (!enforced) return { enforced, requiredBytes, freeBytes: input.freeBytes, ok: true }

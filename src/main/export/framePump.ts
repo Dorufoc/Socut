@@ -1,29 +1,51 @@
 import { Writable } from 'node:stream'
 import type { FrameChannelHandle } from './frameChannel'
 
-/** 帧泵：按帧序号向渲染进程索取 PNG，并交给消费方（stdin 或磁盘）。 */
+/**
+ * 帧泵：按帧序号向渲染进程索取帧，并直接交给消费方（编码器 stdin）。
+ *
+ * 内存纪律（专业剪辑软件的导出口径）：
+ * - 帧只在内存里停留，绝不落盘成中间图片；
+ * - 在飞帧数由**字节预算**决定，而不是写死 3：
+ *   1080p RGBA 一帧 8.3MB、4K 一帧 33MB、8K 一帧 132MB，
+ *   固定窗口会让高分辨率导出把内存吃穿；这里按预算反算窗口，
+ *   内存在任何分辨率下都不超过 `FRAME_BUFFER_BUDGET_BYTES`；
+ * - 窗口是固定的环形槽位：消费完一帧才补一帧，天然形成背压，不丢帧也不空转。
+ */
+
+/** 在飞帧的内存预算（渲染进程舞台池另有 4 个画布，两者相乘才是峰值）。 */
+export const FRAME_BUFFER_BUDGET_BYTES = 192 * 1024 * 1024
+
+/** 渲染侧舞台缓冲池大小（STAGE_POOL_SIZE）；超过它必然触发池饥饿。 */
+export const MAX_INFLIGHT_FRAMES = 3
+
+/**
+ * 按帧字节数与内存预算算出在飞窗口。
+ * 单帧超过预算时至少保留 1 帧（否则导出无法推进）。
+ */
+export function frameWindowSize(frameBytes?: number, budget = FRAME_BUFFER_BUDGET_BYTES): number {
+  if (!frameBytes || !Number.isFinite(frameBytes) || frameBytes <= 0) return MAX_INFLIGHT_FRAMES
+  const fit = Math.floor(budget / frameBytes)
+  return Math.max(1, Math.min(MAX_INFLIGHT_FRAMES, fit))
+}
 
 export interface PumpInput {
   channel: FrameChannelHandle
   /** 绝对起始帧（消息里携带绝对帧号，渲染进程据此算局部进度） */
   startFrame: number
   framesTotal: number
+  /** 单帧字节数（raw = w*h*4）；用于反算内存窗口 */
+  frameBytes?: number
   onFrame: (absoluteIndex: number, buffer: Buffer) => Promise<void>
   isCancelled: () => boolean
   /** 每交付一帧回调（用于进度） */
   onProgress?: (framesDone: number) => void
-  /**
-   * 并发窗口：同时在飞的帧数。窗口=1 会把「渲染 → PNG 编码 → IPC 往返 → 写盘」完全串行化，
-   * 实测每帧多出一个往返的延迟；窗口≥ 2 时编码与消费重叠，吞吐接近线性提升。
-   * 上限受渲染侧舞台缓冲池（默认 4）约束，取 3 留一颗余量。
-   */
-  windowSize?: number
 }
 
 export type PumpResult = 'done' | 'cancelled'
 
 export async function pumpFrames(input: PumpInput): Promise<PumpResult> {
-  const windowSize = Math.max(1, Math.min(4, input.windowSize ?? 3))
+  const windowSize = frameWindowSize(input.frameBytes)
   const inflight = new Map<number, Promise<Buffer>>()
   const requestFrame = (absolute: number): Promise<Buffer> => {
     const promise = input.channel.request(absolute)

@@ -12,6 +12,29 @@ directories:
 files:
   - out/**/*
   - package.json
+  # M8-P1：onnxruntime-node 是可选原生依赖（N-API 预编译），必须原样进包。
+  # 只带 win-x64 的 CPU 运行时（onnxruntime.dll + binding ≈ 31MB）；DirectML/dxcompiler
+  # （约 36MB，GPU EP 用）本轮不需要，其他平台的二进制也不打进来。
+  # 它运行时只 require onnxruntime-common（adm-zip/global-agent 是它自家的安装期工具依赖，不进包）。
+  - node_modules/onnxruntime-node/package.json
+  - node_modules/onnxruntime-node/dist/**/*
+  - node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime.dll
+  - node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime_binding.node
+  - node_modules/onnxruntime-common/**/*
+  # 只出 win-x64 安装包：其它平台二进制与 DirectML GPU EP（本轮只用 CPU）不进包。
+  - '!node_modules/onnxruntime-node/bin/napi-v6/darwin/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/linux/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/DirectML.dll'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxcompiler.dll'
+
+# M8-P1：原生 .node 与 DLL 不能留在 asar 里（process.dlopen 需要真实文件路径）。
+# 显式把这两个二进制列进 asarUnpack 保证它们一定物理落地；electron-builder 的 smartUnpack
+# 还会把这个含原生依赖的可选包整体解到 app.asar.unpacked（只会是 files 白名单里的 win-x64 文件），
+# onnxruntime-common 留在 asar 内，按 asar 虚拟路径解析。打包后用 `npm run smoke:packaged:ai` 实测。
+asarUnpack:
+  - node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime.dll
+  - node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime_binding.node
 
 # CLI 客户端放在安装目录 cli/ 下，旁边再放一个根目录快捷 cmd。
 # 不依赖 node_modules：客户端只用 Node 内置模块与全局 fetch。
@@ -21,6 +44,9 @@ extraFiles:
     filter:
       - 'socut-cli.mjs'
       - 'socut.cmd'
+      - 'socut-mcp.mjs'
+      - 'socut-mcp.cmd'
+      - 'lib/**/*.mjs'
   - from: cli/socut-root.cmd
     to: socut.cmd
 
@@ -38,6 +64,33 @@ extraResources:
     to: icons
     filter:
       - 'icon.png'
+  # M11 离线 whisper.cpp（`npm run fetch:whisper` 产出：whisper-cli.exe + 同目录 dll）
+  # 与 ggml 模型（`npm run fetch:whisper:model` 产出，141MB）。二者都是**可选资产**：
+  # 缺失时 electron-builder 只 warn（file source doesn't exist），安装包里就没有语音
+  # 识别能力，设置页提示「导入二进制/模型」，所以 CI 没有资产也能出包。
+  - from: resources/whisper
+    to: whisper
+    filter:
+      - 'whisper-cli.exe'
+      - '*.dll'
+  - from: resources/models/whisper
+    to: models/whisper
+    filter:
+      - 'ggml-*.bin'
+  # M8 离线 RNNoise 模型（`npm run fetch:rnnoise` 产出，约 300KB）：AI 降噪（arnndn）用。
+  # 同样是可选资产：缺失时只 warn，导出选「AI 降噪」会在合成前给出「先取回模型」的明确错误。
+  - from: resources/models/rnnoise
+    to: models/rnnoise
+    filter:
+      - '*.rnnn'
+  # M8-P1 离线 AI matte 模型（`npm run fetch:matte:model` 产出，约 451KB，Apache-2.0）：
+  # 人像抠像（Selfie Segmenter 256²）用。同样是可选资产：缺失时只 warn，
+  # 检查器「AI 抠像」显示「模型未就绪」，导出前不会静默降级。
+  - from: resources/models/matte
+    to: models/matte
+    filter:
+      - '*.onnx'
+      - '*.json'
 
 asar: true
 

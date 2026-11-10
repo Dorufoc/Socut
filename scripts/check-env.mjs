@@ -39,7 +39,7 @@ const OFFLINE_FORBIDDEN = [
   { pattern: /\bnew\s+WebSocket\b/, label: 'WebSocket' },
   { pattern: /\bEventSource\b/, label: 'EventSource' },
   { pattern: /\bnavigator\.sendBeacon\b/, label: 'sendBeacon' },
-  { pattern: /['"]node:(?:https|net|dns|tls|dgram)['"]/, label: 'Node 网络内置模块' },
+  { pattern: /['"]node:(?:https|dns|tls|dgram)['"]/, label: 'Node 网络内置模块（运行期不得联网）' },
   { pattern: /\brequire\(['"](?:https?|net)['"]\)/, label: 'require 网络模块' }
 ]
 
@@ -94,6 +94,13 @@ async function scanSource() {
             problems.push(`${path.relative(root, file)}：${forbidden.label}（离线交付纪律）`)
           }
         }
+        // M10：JSON-RPC / 命名管道只允许出现在主进程控制面（src/main/），且必须绑回环
+        if (/['"]node:net['"]/.test(content)) {
+          const relative = path.relative(root, file).replace(/\\/g, '/')
+          if (!relative.startsWith('src/main/')) {
+            problems.push(`${relative}：node:net 只允许在主进程控制面（src/main/）使用（本地回环通信）`)
+          }
+        }
         // toDataURL 只可能在渲染侧出现，但全仓统一禁更便宜
         for (const forbidden of RENDERER_FORBIDDEN) {
           if (forbidden.pattern.test(content)) {
@@ -125,6 +132,87 @@ async function checkBinaries() {
     }
   }
   if (total > 0) console.log(`  随包 FFmpeg 合计 ${(total / 1024 / 1024).toFixed(0)}MB（未压缩）`)
+}
+
+/**
+ * M11 whisper 资产（**可选**）：二进制与模型都是离线资产，不入库。
+ * 缺失时只警告（语音识别不可用，但编辑器/导出/其他自动化都正常），
+ * 避免干净检出或 CI 因为没拉 141MB 模型而红。
+ */
+async function checkWhisperAssets() {
+  const exe = path.join(root, 'resources', 'whisper', process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli')
+  const modelsDir = path.join(root, 'resources', 'models', 'whisper')
+  let exeStat = null
+  try {
+    exeStat = await fs.stat(exe)
+  } catch {
+    warnings.push('resources/whisper 未就位：语音识别不可用（执行 npm run fetch:whisper 取回 whisper.cpp 二进制）')
+  }
+  let models = []
+  try {
+    models = (await fs.readdir(modelsDir)).filter((name) => name.endsWith('.bin'))
+  } catch {
+    // 目录不存在 = 没模型
+  }
+  if (models.length === 0) {
+    warnings.push('resources/models/whisper 没有 ggml-*.bin：语音识别不可用（执行 npm run fetch:whisper:model）')
+    return
+  }
+  let total = 0
+  for (const name of models) {
+    const stat = await fs.stat(path.join(modelsDir, name)).catch(() => null)
+    if (stat) total += stat.size
+  }
+  const exePart = exeStat ? `${(exeStat.size / 1024 / 1024).toFixed(1)}MB 二进制` : '缺二进制'
+  console.log(`  whisper 资产：${exePart} + ${models.length} 个模型 ${(total / 1024 / 1024).toFixed(0)}MB（会随包装入安装包）`)
+}
+
+/**
+ * M8 RNNoise 模型（**可选**）：`arnndn` 的 `.rnnn` 文件，约 300KB。
+ * 缺失时只警告：其他降噪档位（afftdn）照常可用，AI 降噪导出前会给出明确错误。
+ */
+async function checkRnnoiseAsset() {
+  const dir = path.join(root, 'resources', 'models', 'rnnoise')
+  let models = []
+  try {
+    models = (await fs.readdir(dir)).filter((name) => name.toLowerCase().endsWith('.rnnn'))
+  } catch {
+    // 目录不存在 = 没模型
+  }
+  if (models.length === 0) {
+    warnings.push('resources/models/rnnoise 没有 .rnnn 模型：AI 降噪（arnndn）不可用（执行 npm run fetch:rnnoise）')
+    return
+  }
+  let total = 0
+  for (const name of models) {
+    const stat = await fs.stat(path.join(dir, name)).catch(() => null)
+    if (stat) total += stat.size
+  }
+  console.log(`  RNNoise 模型 ${models.length} 个（${(total / 1024).toFixed(0)}KB，AI 降噪可用）`)
+}
+
+/**
+ * M8-P1 AI matte 模型（**可选**）：Selfie Segmenter ONNX（约 451KB，Apache-2.0）。
+ * 缺失时只警告：编辑器/导出照常，检查器「AI 抠像」显示未就绪（可执行 npm run fetch:matte:model）。
+ */
+async function checkMatteModelAsset() {
+  const dir = path.join(root, 'resources', 'models', 'matte')
+  let models = []
+  try {
+    models = (await fs.readdir(dir)).filter((name) => name.toLowerCase().endsWith('.onnx'))
+  } catch {
+    // 目录不存在 = 没模型
+  }
+  if (models.length === 0) {
+    warnings.push('resources/models/matte 没有 .onnx 模型：AI 抠像不可用（执行 npm run fetch:matte:model，约 451KB）')
+    return
+  }
+  let total = 0
+  for (const name of models) {
+    const stat = await fs.stat(path.join(dir, name)).catch(() => null)
+    if (stat) total += stat.size
+  }
+  console.log(`  AI matte 模型 ${models.length} 个（${(total / 1024).toFixed(0)}KB，AI 抠像可用）`)
 }
 
 async function checkFonts() {
@@ -217,6 +305,9 @@ async function main() {
   await scanSource()
   await checkBinaries()
   await checkFonts()
+  await checkWhisperAssets()
+  await checkRnnoiseAsset()
+  await checkMatteModelAsset()
   await checkBuiltCsp()
   await checkDeliverables()
   checkRuntime()

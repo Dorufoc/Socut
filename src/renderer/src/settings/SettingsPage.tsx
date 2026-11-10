@@ -11,6 +11,7 @@ import {
 } from '@shared/gpu'
 import { TEXT } from '@shared/i18n'
 import { InfoBar } from '../components/ui/InfoBar'
+import { VoiceAssetsSection } from './VoiceAssetsSection'
 
 export interface SettingsPageProps {
   onBack: () => void
@@ -309,6 +310,9 @@ export function SettingsPage({ onBack, appVersion }: SettingsPageProps): ReactEl
               <p className="settings__hint">{TEXT.settings.encoder.hintHardware}</p>
               <p className="settings__hint">{TEXT.settings.encoder.hintFallback}</p>
             </section>
+
+            {/* M11/M8：语音资产（whisper 二进制/模型 + RNNoise 模型），离线选择、不联网 */}
+            <VoiceAssetsSection />
 
             <section className="settings__section" aria-labelledby="settings-diagnostics-title">
               <div className="settings__section-head">

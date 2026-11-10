@@ -1,11 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { cleanup, fireEvent, render } from '@testing-library/react'
-import { FPS_30 } from '@shared/constants'
+import { DEFAULT_SEQUENCE_ID, FPS_30, TRACK_SOFT_LIMIT } from '@shared/constants'
 import { TEXT } from '@shared/i18n'
-import { createClip, createDefaultProject } from '@shared/projectSchema'
+import { createClip, createDefaultProject, createTextElementClip } from '@shared/projectSchema'
 import { frameTimeSec, snapTimeToFrame } from '@shared/fps'
 import { secondsToTimecode } from '@shared/timecode'
+import { makeAudioTrack, makeMediaTrack } from '@shared/tracks'
 import type { MediaItem, Project, VideoMeta } from '@shared/types'
 import { Timeline } from './Timeline'
 import { useProjectStore } from '../state/projectStore'
@@ -80,7 +81,9 @@ afterEach(() => {
   act(() => {
     useProjectStore.setState({ project: createDefaultProject('空'), selectedClipId: null, fonts: [] })
     useUiStore.setState({ playing: false, displayTimeSec: 0, playheadSec: 0, notice: null, timelineZoom: 1 })
-    useUiStore.setState({ timelineTools: { snapTogether: false, magneticSnap: false, hoverPreview: false } })
+    useUiStore.setState({ timelineTools: { snapTogether: false, magneticSnap: false, rippleDelete: false, hoverPreview: false } })
+    // v11：转场拖拽态不带到下一个用例
+    useUiStore.setState({ transitionDrag: null, transitionDropClipId: null })
   })
 })
 
@@ -484,19 +487,30 @@ const toolButton = (root: HTMLElement, name: string): HTMLButtonElement =>
 const mediaClip = (id: string) => useProjectStore.getState().project.mediaClips.find((clip) => clip.id === id)!
 
 describe('时间轴工具栏', () => {
-  it('三个开关默认关闭，点一下变选中态（aria-pressed 同步）', () => {
+  it('四个开关默认关闭，点一下变选中态（aria-pressed 同步）', () => {
     seedTools()
     const root = renderTimeline(vi.fn())
 
-    for (const name of [TEXT.timeline.snapTogether, TEXT.timeline.magneticSnap, TEXT.timeline.hoverPreview]) {
+    for (const name of [
+      TEXT.timeline.snapTogether,
+      TEXT.timeline.magneticSnap,
+      TEXT.timeline.rippleDeleteTool,
+      TEXT.timeline.hoverPreview
+    ]) {
       expect(toolButton(root, name).getAttribute('aria-pressed')).toBe('false')
     }
 
     fireEvent.click(toolButton(root, TEXT.timeline.magneticSnap))
     expect(toolButton(root, TEXT.timeline.magneticSnap).getAttribute('aria-pressed')).toBe('true')
     expect(toolButton(root, TEXT.timeline.magneticSnap).className).toContain('btn--primary')
-    // 其余两个不受影响
+    // 其余开关不受影响
     expect(toolButton(root, TEXT.timeline.snapTogether).getAttribute('aria-pressed')).toBe('false')
+    expect(toolButton(root, TEXT.timeline.rippleDeleteTool).getAttribute('aria-pressed')).toBe('false')
+
+    // v4：磁性删除开关可独立切换
+    fireEvent.click(toolButton(root, TEXT.timeline.rippleDeleteTool))
+    expect(toolButton(root, TEXT.timeline.rippleDeleteTool).getAttribute('aria-pressed')).toBe('true')
+    expect(useUiStore.getState().timelineTools.rippleDelete).toBe(true)
   })
 
   it('主轨对齐打开：所有媒体段从左到右紧贴，间隙为 0；关掉后允许再拉开', () => {
@@ -815,17 +829,19 @@ describe('Timeline v3 多轨', () => {
         ? 'media'
         : row.classList.contains('timeline__track--audio')
           ? 'audio'
-          : 'subtitle'
+          : row.classList.contains('timeline__track--text')
+            ? 'text'
+            : 'subtitle'
     )
 
-  it('新增媒体/音频轨后行序为「媒体反向 → 字幕 → 音频反向」', () => {
+  it('新增媒体/音频轨后行序为「媒体反向 → 字幕 → 文本 → 音频反向」', () => {
     seedTools()
     const root = renderTimeline(vi.fn())
 
     fireEvent.click(groupButton(root, '+ 媒体轨'))
     fireEvent.click(groupButton(root, '+ 音频轨'))
 
-    expect(rowKinds(root)).toEqual(['media', 'media', 'subtitle', 'audio', 'audio'])
+    expect(rowKinds(root)).toEqual(['media', 'media', 'subtitle', 'text', 'audio', 'audio'])
     const [newMedia, baseMedia] = Array.from(root.querySelectorAll('.timeline__track--media'))
     expect((newMedia as HTMLElement).dataset.trackId).toBe('track-media-1')
     expect((baseMedia as HTMLElement).dataset.trackId).toBe('track-media-0')
@@ -890,10 +906,57 @@ describe('Timeline v3 多轨', () => {
 
     expect(mediaClip('a').trackId).toBe(newTrackId)
   })
+
+  /**
+   * M5-A 无限轨（第一阶段软上限 50）：
+   * >8 条可加；达到 50 条按钮才禁用，计数显示 `50/50`，按钮 title 说明是“软上限”。
+   */
+  it('轨道可加到 12 条以上；软上限 50 条时新增按钮禁用并提示“软上限”', () => {
+    seedTools()
+    const root = renderTimeline(vi.fn())
+    const groupCount = (index: number): string =>
+      root.querySelectorAll('.timeline__group-count')[index]!.textContent ?? ''
+
+    // 旧硬上限 8：现在可以无提示地继续加，12 条为止
+    for (let index = 0; index < 11; index += 1) {
+      fireEvent.click(groupButton(root, '+ 媒体轨'))
+      fireEvent.click(groupButton(root, '+ 音频轨'))
+    }
+    expect(useProjectStore.getState().project.mediaTracks).toHaveLength(12)
+    expect(useProjectStore.getState().project.audioTracks).toHaveLength(12)
+    expect(groupCount(0)).toBe(`12/${TRACK_SOFT_LIMIT}`)
+    expect(groupCount(1)).toBe(`12/${TRACK_SOFT_LIMIT}`)
+    expect(groupButton(root, '+ 媒体轨').disabled).toBe(false)
+    expect(groupButton(root, '+ 音频轨').disabled).toBe(false)
+
+    // 达到软上限：按钮禁用 + 计数 50/50；再点也不会增长
+    act(() => {
+      const project = useProjectStore.getState().project
+      useProjectStore.setState({
+        project: {
+          ...project,
+          mediaTracks: Array.from({ length: TRACK_SOFT_LIMIT }, (_, index) => makeMediaTrack(index)),
+          audioTracks: Array.from({ length: TRACK_SOFT_LIMIT }, (_, index) => makeAudioTrack(index))
+        }
+      })
+    })
+    for (const [label, index] of [
+      ['+ 媒体轨', 0],
+      ['+ 音频轨', 1]
+    ] as const) {
+      const button = groupButton(root, label)
+      expect(button.disabled).toBe(true)
+      expect(button.title).toContain('软上限')
+      expect(groupCount(index)).toBe(`${TRACK_SOFT_LIMIT}/${TRACK_SOFT_LIMIT}`)
+      fireEvent.click(button)
+    }
+    expect(useProjectStore.getState().project.mediaTracks).toHaveLength(TRACK_SOFT_LIMIT)
+    expect(useProjectStore.getState().project.audioTracks).toHaveLength(TRACK_SOFT_LIMIT)
+  })
 })
 
-/** v10：切点转场标记（合法才出现；点击选中右侧片段且不跳转）。 */
-describe('v10 转场标记', () => {
+/** v11：切点转场「连接标识」（合法才出现；点击选中转场；拖拽时缝隙成为落点）。 */
+describe('v11 转场连接标识', () => {
   function seedMarker(options: { bStart: number; transitionOn: 'a' | 'b' }): void {
     seedTools()
     const project = useProjectStore.getState().project
@@ -913,11 +976,12 @@ describe('v10 转场标记', () => {
     useProjectStore.setState({
       project: { ...project, mediaClips: [a, b] },
       selectedMediaClipId: null,
-      selectionKind: 'subtitle'
+      selectionKind: 'subtitle',
+      selectedTransitionClipId: null
     })
   }
 
-  it('合法转场在切点画出标记（类型 + 时长），点击选中右侧片段且不跳转', () => {
+  it('合法转场在切点画出连接标识（类型 + 时长），点击选中转场且不跳转', () => {
     seedMarker({ bStart: 2, transitionOn: 'b' })
     const seekTo = vi.fn()
     const root = renderTimeline(seekTo)
@@ -926,23 +990,139 @@ describe('v10 转场标记', () => {
     expect(marker).toBeTruthy()
     expect(marker.getAttribute('aria-label')).toBe('转场：溶解 0.5 秒')
     expect(marker.getAttribute('title')).toContain('溶解')
-    // 标记挂在切点位置（B 起点 2s × 72px/s = 144px）
-    expect(parseFloat(marker.style.left)).toBeCloseTo(2 * PX_PER_SEC, 6)
+    // 标识挂在切点位置（B 起点 2s × 72px/s = 144px）
+    const junction = root.querySelector('.timeline__transition-junction') as HTMLElement
+    expect(parseFloat(junction.style.left)).toBeCloseTo(2 * PX_PER_SEC, 6)
 
     fireEvent.click(marker)
-    expect(useProjectStore.getState().selectedMediaClipId).toBe('b')
+    // v11：点的是「转场」而不是片段——右侧检查器据此切到转场面板
+    const state = useProjectStore.getState()
+    expect(state.selectionKind).toBe('transition')
+    expect(state.selectedTransitionClipId).toBe('b')
     expect(seekTo).not.toHaveBeenCalled()
   })
 
-  it('前段与后段之间有空隙：不画标记', () => {
+  it('前段与后段之间有空隙：不画连接标识，拖拽也不会命中', () => {
     seedMarker({ bStart: 5, transitionOn: 'b' })
+    const root = renderTimeline(vi.fn())
+    expect(root.querySelector('.timeline__transition-marker')).toBeNull()
+    expect(root.querySelector('.timeline__transition-junction')).toBeNull()
+  })
+
+  it('首段没有入场转场：即使数据里写了也不画连接标识', () => {
+    seedMarker({ bStart: 2, transitionOn: 'a' })
     const root = renderTimeline(vi.fn())
     expect(root.querySelector('.timeline__transition-marker')).toBeNull()
   })
 
-  it('首段没有入场转场：即使数据里写了也不画标记', () => {
+  it('从左侧拖拽：指针落在缝隙上时写入落点，离开缝隙清空；并在时间轴上标记拖拽态', () => {
     seedMarker({ bStart: 2, transitionOn: 'a' })
     const root = renderTimeline(vi.fn())
-    expect(root.querySelector('.timeline__transition-marker')).toBeNull()
+    const timelineEl = root.querySelector('.timeline') as HTMLElement
+
+    act(() => useUiStore.getState().beginTransitionDrag({ type: 'dissolve', label: '溶解' }))
+    expect(timelineEl.className).toContain('timeline--transition-dragging')
+
+    // 切点 2s → 144px；指针在轨道行内（行高 40）判定为命中 B 的入场缝隙
+    fireEvent.pointerMove(timelineEl, { pointerId: 9, pointerType: 'mouse', clientX: pxAtSec(2), clientY: 20 })
+    expect(useUiStore.getState().transitionDropClipId).toBe('b')
+    expect((root.querySelector('.timeline__transition-junction') as HTMLElement).className).toContain(
+      'timeline__transition-junction--drop'
+    )
+
+    // 2s→5s 之间是空隙：没有合法切点，落点清空
+    fireEvent.pointerMove(timelineEl, { pointerId: 9, pointerType: 'mouse', clientX: pxAtSec(4), clientY: 20 })
+    expect(useUiStore.getState().transitionDropClipId).toBeNull()
+
+    act(() => useUiStore.getState().endTransitionDrag())
+    expect(timelineEl.className).not.toContain('timeline--transition-dragging')
+  })
+})
+
+describe('v4 多序列工具栏', () => {
+  function toolbar(root: HTMLElement): { select: HTMLSelectElement; add: HTMLButtonElement; remove: HTMLButtonElement } {
+    const select = root.querySelector('.timeline__sequence select') as HTMLSelectElement
+    const buttons = [...root.querySelectorAll('.timeline__meta button')] as HTMLButtonElement[]
+    return {
+      select,
+      add: buttons.find((button) => button.title === TEXT.timeline.sequenceAdd)!,
+      remove: buttons.find((button) => button.title === TEXT.timeline.sequenceRemoveHint || button.title === TEXT.timeline.sequenceLastHint)!
+    }
+  }
+
+  it('初始只有主序列：删除按钮禁用；点“新建空序列”后出现第二项且可删除', () => {
+    seed()
+    const root = renderTimeline(vi.fn())
+    const ui = toolbar(root)
+    expect(ui.select.options).toHaveLength(1)
+    expect(ui.remove.disabled).toBe(true)
+
+    act(() => ui.add.click())
+
+    expect(ui.select.options).toHaveLength(2)
+    expect(ui.remove.disabled).toBe(false)
+    expect(ui.select.options[1]!.textContent).toContain('序列 2')
+  })
+
+  it('切换到新序列：时间轴上的片段消失；切回主序列片段回来', () => {
+    seed()
+    const root = renderTimeline(vi.fn())
+    const ui = toolbar(root)
+    expect(root.querySelectorAll('.clip-card')).toHaveLength(1)
+
+    act(() => ui.add.click())
+    const newId = ui.select.options[1]!.value
+    act(() => fireEvent.change(ui.select, { target: { value: newId } }))
+
+    expect(useProjectStore.getState().project.clips).toHaveLength(0)
+    expect(root.querySelectorAll('.clip-card')).toHaveLength(0)
+    expect(useProjectStore.getState().selectedClipId).toBeNull()
+
+    act(() => fireEvent.change(ui.select, { target: { value: DEFAULT_SEQUENCE_ID } }))
+    expect(useProjectStore.getState().project.clips).toHaveLength(1)
+    expect(root.querySelectorAll('.clip-card')).toHaveLength(1)
+  })
+
+  it('删除当前序列后回到剩余序列，且删除按钮重新禁用', () => {
+    seed()
+    const root = renderTimeline(vi.fn())
+    const ui = toolbar(root)
+    act(() => ui.add.click())
+    const newId = ui.select.options[1]!.value
+    act(() => fireEvent.change(ui.select, { target: { value: newId } }))
+
+    act(() => ui.remove.click())
+
+    expect(useProjectStore.getState().project.activeSequenceId).toBeUndefined()
+    expect(useProjectStore.getState().project.clips).toHaveLength(1)
+    expect(useProjectStore.getState().project.sequences).toBeUndefined()
+    expect(ui.remove.disabled).toBe(true)
+  })
+})
+describe('M7：文本轨', () => {
+  it('文本元素按入出点渲染为区间条；点击选中并切到文本检查器', () => {
+    const project = createDefaultProject('文本轨')
+    project.fps = FPS_30
+    project.clips = []
+    const textClip = createTextElementClip({ startTime: 2, fps: FPS_30, text: '地点条' })
+    textClip.endTime = 4
+    project.textClips = [textClip]
+    useProjectStore.setState({
+      project,
+      selectedClipId: null,
+      selectedTextClipId: null,
+      selectionKind: 'subtitle',
+      fonts: []
+    })
+
+    const root = renderTimeline(vi.fn())
+    const chip = root.querySelector('.clip-card--text') as HTMLElement
+    expect(chip).toBeTruthy()
+    expect(chip.style.left).toBe(`${2 * PX_PER_SEC}px`)
+    expect(chip.textContent).toContain('地点条')
+
+    fireEvent.pointerDown(chip, { pointerId: 1, clientX: 0, bubbles: true })
+    expect(useProjectStore.getState().selectionKind).toBe('text')
+    expect(useProjectStore.getState().selectedTextClipId).toBe(textClip.id)
   })
 })

@@ -65,18 +65,42 @@ export async function verifyTransparentMov(
   }
 }
 
+export interface OverlayVerifyOptions {
+  /** M9：显式要求编码格式（缺省只校验像素格式，与旧行为一致） */
+  videoCodec?: 'avc' | 'hevc' | 'av1'
+  /** M9：10bit 产物期望 yuv420p10le */
+  bitDepth?: 8 | 10
+  /** M9：full range 产物期望 color_range=pc */
+  colorRange?: 'limited' | 'full'
+}
+
 export async function verifyOverlayMp4(
   path: string,
   expectation: Expectation,
   refMeta: VideoMeta,
-  binaries: FfmpegBinaries
+  binaries: FfmpegBinaries,
+  options: OverlayVerifyOptions = {}
 ): Promise<void> {
   const payload = await runFfprobeJson<unknown>(buildVerifyArgs(path), `verify-${Date.now()}`, binaries)
   const result = parseVerifyJson(payload)
   if (!result) throw new VerifyError('产物无法解析', 'ffprobe 未返回视频流')
-  if (!isDeliveryYuv420p(result)) {
+  if (options.bitDepth === 10) {
+    // M9：10bit 交付（HEVC/AV1）；像素格式必须带 10
+    if (result.pixFmt !== 'yuv420p10le' && result.pixFmt !== 'yuv420p10be') {
+      throw new VerifyError('输出位深不符', `pix_fmt=${result.pixFmt}（期望 yuv420p10le）`)
+    }
+  } else if (!isDeliveryYuv420p(result)) {
     // 计划 C3：overlay 后必须回到 8-bit 4:2:0
     throw new VerifyError('输出像素格式不符', `pix_fmt=${result.pixFmt}（期望 yuv420p）`)
+  }
+  if (options.videoCodec) {
+    const expected = options.videoCodec === 'hevc' ? 'hevc' : options.videoCodec === 'av1' ? 'av1' : 'h264'
+    if (result.codecName !== expected) {
+      throw new VerifyError('输出编码格式不符', `codec=${result.codecName}（期望 ${expected}）`)
+    }
+  }
+  if (options.colorRange === 'full' && result.colorRange !== 'pc') {
+    throw new VerifyError('色彩范围标签不符', `color_range=${result.colorRange ?? '未标注'}（期望 pc）`)
   }
   if (result.width !== expectation.width || result.height !== expectation.height) {
     throw new VerifyError(

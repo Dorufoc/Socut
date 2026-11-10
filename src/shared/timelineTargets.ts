@@ -16,6 +16,12 @@ import { mediaTrackOrder } from './tracks'
 
 export type TimelineTrackKind = 'subtitle' | 'media' | 'audio'
 
+/**
+ * 选中类型：三条轨之外，v11 还有「转场」（挂在切点上），M7 还有「文本元素」
+ * （与字幕条一样有自己的编辑面板），二者都不参与拆分/删除目标的解析。
+ */
+export type TimelineSelectionKind = TimelineTrackKind | 'transition' | 'text'
+
 export interface TimelineTracks {
   clips: SubtitleClip[]
   mediaClips: MediaClip[]
@@ -29,7 +35,7 @@ export interface TimelineSelection {
   mediaClipId: string | null
   audioClipId: string | null
   /** 最后一次点选的类型：三个选中 id 可以并存，只有它决定「现在操作的是谁」 */
-  kind: TimelineTrackKind
+  kind: TimelineSelectionKind
 }
 
 export interface TargetRef {
@@ -64,6 +70,8 @@ export function findBottomMediaClipAt(
 
 /** 选中的那一段（选中类型指向的 id 必须还活在轨上，否则不算选中）。 */
 export function findSelectedRef(tracks: TimelineTracks, selection: TimelineSelection): TargetRef | null {
+  // 转场 / 文本元素选中不指向可拆可删的时间轴片段：交给调用方先行处理（文本由 removeSelected 先删）
+  if (selection.kind === 'transition' || selection.kind === 'text') return null
   if (selection.kind === 'subtitle') {
     return selection.clipId && tracks.clips.some((clip) => clip.id === selection.clipId)
       ? { kind: 'subtitle', id: selection.clipId }

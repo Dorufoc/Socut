@@ -157,11 +157,12 @@ export async function getGpuDiagnostics(): Promise<GpuDiagnostics> {
 }
 
 /**
- * 导出前决定用哪个硬件编码器（null = libx264）。
+ * 导出前决定用哪个硬件编码器（null = 软件编码）。
+ * `codec` 缺省 h264（叠加出口默认 H.264），HEVC 选择 hevc_nvenc/qsv/amf。
  * 每次调用都重新读设置（编码模式可即时切换），仅编码器清单与设备清单走缓存。
  * 任何异常都回落 null：硬件不可用绝不能让导出失败。
  */
-export async function resolveExportEncoder(): Promise<string | null> {
+export async function resolveExportEncoder(codec: 'h264' | 'hevc' | 'av1' = 'h264'): Promise<string | null> {
   try {
     const settings = getRenderSettings()
     if (settings.videoEncoder === 'software') return null
@@ -171,7 +172,8 @@ export async function resolveExportEncoder(): Promise<string | null> {
     return (
       pickHardwareEncoder(encoders, {
         mode: settings.videoEncoder,
-        preferredVendor: preferred?.vendor
+        preferredVendor: preferred?.vendor,
+        codec
       })?.name ?? null
     )
   } catch {

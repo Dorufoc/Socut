@@ -126,7 +126,6 @@ async function runOverlaySmoke(config: SmokeConfig): Promise<void> {
     jobId,
     target: { kind: 'overlayMp4', outputDir: config.outputDir, fileName },
     frameSpec: frameSpecOf(spec),
-    frameDelivery: 'pipe',
     codec: 'prores4444',
     overlay: {
       refVideoPath: config.refVideoPath,
@@ -140,8 +139,7 @@ async function runOverlaySmoke(config: SmokeConfig): Promise<void> {
           : 'copy',
       fpsMode: 'cfr',
       spanStartSec,
-      spanEndSec,
-      directPipe: false
+      spanEndSec
     }
   }
   const resultPromise = waitForJobResult(jobId, 150_000)
@@ -235,9 +233,8 @@ async function runExportSmoke(config: SmokeConfig): Promise<void> {
     resolution: { width: config.width, height: config.height },
     fps: config.fps,
     scope: { kind: 'timeline' },
-    // 与生产 useExportJob 同口径：只要帧要落盘（PNG 出口或 MOV 的 pngSequence 回退）就必须是真 PNG
-    frameFormat:
-      config.exportKind === 'pngSequence' || config.frameDelivery === 'pngSequence' ? 'png' : 'raw'
+    // 与生产 useExportJob 同口径：只有 PNG 序列出口的帧要落盘，必须给真 PNG
+    frameFormat: config.exportKind === 'pngSequence' ? 'png' : 'raw'
   })
   const framesTotal = spec.endFrame - spec.startFrame
 
@@ -252,7 +249,6 @@ async function runExportSmoke(config: SmokeConfig): Promise<void> {
     jobId,
     target: { kind: config.exportKind, outputDir: config.outputDir, fileName },
     frameSpec: frameSpecOf(spec),
-    frameDelivery: config.frameDelivery,
     codec: 'prores4444'
   }
   // 结果订阅先于发起：避免极快任务下错过已完成事件

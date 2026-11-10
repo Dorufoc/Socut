@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DEFAULT_CLIP_DURATION_SEC, FPS_30 } from '@shared/constants'
+import { DEFAULT_PRESET_ID } from '@shared/presets'
 import { TEXT } from '@shared/i18n'
 import { createClip, createDefaultProject } from '@shared/projectSchema'
 import type { Project, SubtitleClip } from '@shared/types'
@@ -211,5 +212,210 @@ describe('CaptionListPanel（字幕列表 Tab）', () => {
     } finally {
       detach()
     }
+  })
+})
+describe('M11 字幕导入', () => {
+  it('导入 SRT：按文件时间码生成字幕条并提示条数', async () => {
+    const project = createDefaultProject('导入')
+    project.fps = FPS_30
+    useProjectStore.setState({ project, selectedClipId: null, selectionKind: 'subtitle', fonts: [] })
+    render(<CaptionListPanel />)
+
+    const input = screen.getByLabelText(TEXT.captions.importSubtitle) as HTMLInputElement
+    const file = new File(['1\n00:00:01,000 --> 00:00:03,000\n今日头条\n\n2\n00:00:04,000 --> 00:00:06,000\n第二条\n'], 'a.srt', {
+      type: 'text/plain'
+    })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+      await Promise.resolve()
+    })
+
+    const clips = useProjectStore.getState().project.clips
+    expect(clips).toHaveLength(2)
+    expect(clips[0]!.content.title).toBe('今日头条')
+    expect(clips[1]!.startTime).toBe(4)
+    expect(useUiStore.getState().notice).toContain('已导入 2 条字幕')
+  })
+
+  it('导入 CSV 名单：首尾相接生成字幕条', async () => {
+    const project = createDefaultProject('导入名单')
+    project.fps = FPS_30
+    useProjectStore.setState({ project, selectedClipId: null, selectionKind: 'subtitle', fonts: [] })
+    render(<CaptionListPanel />)
+
+    const input = screen.getByLabelText(TEXT.captions.importList) as HTMLInputElement
+    const file = new File(['标题,副标题,时长\n张伟,主任,4\n李娜,记者,2'], 'list.csv', { type: 'text/csv' })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+      await Promise.resolve()
+    })
+
+    const clips = useProjectStore.getState().project.clips
+    expect(clips).toHaveLength(2)
+    expect(clips[0]!.content).toEqual({ title: '张伟', subtitle: '主任' })
+    expect(clips[0]!.endTime - clips[0]!.startTime).toBe(4)
+    expect(clips[1]!.startTime).toBe(4)
+    expect(useUiStore.getState().notice).toContain('已生成 2 条字幕')
+  })
+
+  it('字幕后处理区有「自动字幕」入口：未选中媒体片段时禁用并提示先选片段', () => {
+    seed()
+    render(<CaptionListPanel />)
+
+    const button = screen.getByRole('button', { name: TEXT.captions.autoCaption }) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(screen.getByText(TEXT.captions.autoCaptionNoMedia)).toBeTruthy()
+  })
+})
+
+describe('M11-I 字幕批量编辑（多选 + 批量预设/时长/删除/开关）', () => {
+  /** 进入批量态（工具栏与勾选框随后出现） */
+  const enterBatch = (): void => {
+    fireEvent.click(screen.getByRole('button', { name: TEXT.captions.batchMode }))
+  }
+
+  /** 点卡片 = 勾选（批量态下不跳转、不改单条选中） */
+  const clickCard = (title: string): void => {
+    fireEvent.click(screen.getByText(title))
+  }
+
+  const countChip = (n: number): HTMLElement => screen.getByText(TEXT.captions.batchSelectedCount(n))
+
+  it('进入批量：出现工具栏；卡片点击变为勾选（不跳转、不改单条选中）', () => {
+    const project = seed()
+    const seek = vi.fn()
+    useUiStore.getState().setSeekHandler(seek)
+    render(<CaptionListPanel />)
+
+    enterBatch()
+
+    expect(screen.getByRole('group', { name: TEXT.captions.batchGroup })).toBeTruthy()
+    expect(countChip(0)).toBeTruthy()
+
+    clickCard('第二条：汛期防御启动')
+
+    // 勾选 ≠ 选中：播放头不动、右侧检查器的单条选中不变
+    expect(seek).not.toHaveBeenCalled()
+    expect(useProjectStore.getState().selectedClipId).toBe(project.clips[1]!.id)
+    expect(countChip(1)).toBeTruthy()
+    const checkbox = screen.getByRole('checkbox', {
+      name: TEXT.captions.selectNamed('第二条：汛期防御启动')
+    }) as HTMLInputElement
+    expect(checkbox.checked).toBe(true)
+
+    // 退出批量：工具栏收起、勾选清空
+    fireEvent.click(screen.getByRole('button', { name: TEXT.captions.batchModeExit }))
+    expect(screen.queryByRole('group', { name: TEXT.captions.batchGroup })).toBeNull()
+  })
+
+  it('批量改预设：只改勾选的两条，未选中的保持原预设', () => {
+    seed()
+    render(<CaptionListPanel />)
+    enterBatch()
+    clickCard('第一条：长三角一体化新规')
+    clickCard('第三条：地铁新线开通')
+
+    fireEvent.change(screen.getByLabelText(TEXT.captions.batchPreset), { target: { value: 'breakingRed' } })
+    fireEvent.click(screen.getByRole('button', { name: TEXT.captions.batchApplyPreset }))
+
+    const clips = useProjectStore.getState().project.clips
+    const first = clips.find((clip) => clip.content.title.startsWith('第一条'))!
+    const second = clips.find((clip) => clip.content.title.startsWith('第二条'))!
+    const third = clips.find((clip) => clip.content.title.startsWith('第三条'))!
+    expect(first.presetId).toBe('breakingRed')
+    expect(third.presetId).toBe('breakingRed')
+    expect(second.presetId).toBe(DEFAULT_PRESET_ID)
+    expect(useUiStore.getState().notice).toContain('已为 2 条字幕应用预设')
+  })
+
+  it('统一时长：从各自入点顺延、出点吸附帧边界', () => {
+    const project = seed()
+    render(<CaptionListPanel />)
+    enterBatch()
+    fireEvent.click(screen.getByRole('button', { name: TEXT.captions.batchSelectAll }))
+
+    // 30fps 下 2.017s 吸附到 61 帧
+    fireEvent.change(screen.getByLabelText(TEXT.captions.batchDuration), { target: { value: '2.017' } })
+    fireEvent.click(screen.getByRole('button', { name: TEXT.captions.batchApplyDuration }))
+
+    const clips = useProjectStore.getState().project.clips
+    for (const clip of clips) {
+      expect(clip.endTime - clip.startTime).toBeCloseTo(61 / 30, 6)
+    }
+    // 入点一律不动（批量只改时长）
+    for (const before of project.clips) {
+      const after = clips.find((clip) => clip.id === before.id)!
+      expect(after.startTime).toBe(before.startTime)
+    }
+    expect(useUiStore.getState().notice).toContain('已统一 3 条字幕的时长')
+  })
+
+  it('批量删除：只删勾选条目、清空勾选，选中态不留在已删片段上', () => {
+    seed()
+    render(<CaptionListPanel />)
+    enterBatch()
+    clickCard('第一条：长三角一体化新规')
+    clickCard('第二条：汛期防御启动')
+
+    fireEvent.click(screen.getByRole('button', { name: TEXT.captions.batchDelete }))
+
+    const clips = useProjectStore.getState().project.clips
+    expect(clips).toHaveLength(1)
+    expect(clips[0]!.content.title).toContain('第三条')
+    expect(countChip(0)).toBeTruthy()
+    // 删掉的包含原来选中的 0s 条 → 选中态已挪到剩余那条
+    expect(useProjectStore.getState().selectedClipId).toBe(clips[0]!.id)
+    expect(useUiStore.getState().notice).toContain('已删除 2 条字幕')
+  })
+
+  it('切换单条选中后批量勾选清空（旧 id 不再属于当前操作面）', () => {
+    const project = seed()
+    render(<CaptionListPanel />)
+    enterBatch()
+    clickCard('第一条：长三角一体化新规')
+    clickCard('第二条：汛期防御启动')
+    expect(countChip(2)).toBeTruthy()
+
+    const other = project.clips.find((clip) => clip.content.title.startsWith('第三条'))!
+    act(() => {
+      useProjectStore.getState().selectClip(other.id)
+    })
+
+    expect(countChip(0)).toBeTruthy()
+    const checkbox = screen.getByRole('checkbox', {
+      name: TEXT.captions.selectNamed('第一条：长三角一体化新规')
+    }) as HTMLInputElement
+    expect(checkbox.checked).toBe(false)
+  })
+
+  it('批量开关「强制紧凑」：开 → 全部写 true；关 → 删键', () => {
+    seed()
+    render(<CaptionListPanel />)
+    enterBatch()
+    fireEvent.click(screen.getByRole('button', { name: TEXT.captions.batchSelectAll }))
+
+    const compact = screen.getByRole('checkbox', { name: TEXT.captions.batchCompact }) as HTMLInputElement
+    expect(compact.checked).toBe(false)
+
+    fireEvent.click(compact)
+    expect(useProjectStore.getState().project.clips.every((clip) => clip.styleOverrides.compact === true)).toBe(true)
+    expect(compact.checked).toBe(true)
+
+    fireEvent.click(compact)
+    expect(
+      useProjectStore.getState().project.clips.every((clip) => !('compact' in clip.styleOverrides))
+    ).toBe(true)
+    expect(compact.checked).toBe(false)
+  })
+
+  it('未勾选任何条目时批量按钮禁用、常驻提示', () => {
+    seed()
+    render(<CaptionListPanel />)
+    enterBatch()
+
+    expect(screen.getByText(TEXT.captions.batchEmptyHint)).toBeTruthy()
+    expect((screen.getByRole('button', { name: TEXT.captions.batchApplyPreset }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: TEXT.captions.batchApplyDuration }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: TEXT.captions.batchDelete }) as HTMLButtonElement).disabled).toBe(true)
   })
 })

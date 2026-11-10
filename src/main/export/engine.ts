@@ -13,7 +13,8 @@ import type {
   TransparentCodec
 } from '../../shared/types'
 import type { EstimateInput } from '../../shared/api'
-import { resolveFfmpegBinaries } from '../paths'
+import { resolveFfmpegBinaries, rnnoiseModelDirs } from '../paths'
+import { needsAiDenoise, resolveRnnoiseModel } from '../rnnoise'
 import { resolveExportEncoder } from '../gpu'
 import { createWorkspace, diskFreeBytes, disposeWorkspace } from '../tempWorkspace'
 import type { Workspace } from '../tempWorkspace'
@@ -25,7 +26,7 @@ import { JobRegistry, emitProgress, emitResult, toProgress } from './jobs'
 import type { JobState } from './jobs'
 import { runTransparentMov } from './transparentMov'
 import type { TransparentRunCtx } from './transparentMov'
-import { encodePngToMov, writePngSequence } from './pngSequence'
+import { writePngSequence } from './pngSequence'
 import { runOverlayMp4 } from './overlayMp4'
 import { watermarkInputOf } from '../../shared/ffmpegArgs'
 import { verifyOverlayMp4, verifyTransparentMov } from './verify'
@@ -46,6 +47,9 @@ export interface EngineJobSnapshot {
   result: JobResult | null
 }
 
+/** M10 事件流：进度监听者（收到与渲染侧 job:progress 同一份 JobProgress 快照）。 */
+export type ExportProgressListener = (progress: JobProgress) => void
+
 export class ExportEngine {
   private readonly registry = new JobRegistry()
   private readonly queue: Pending[] = []
@@ -55,6 +59,33 @@ export class ExportEngine {
   private readonly snapshots = new Map<string, JobProgress>()
   /** 终态结果（成功/失败/取消），供 `export.status` 在完成后仍能查到原因。 */
   private readonly results = new Map<string, JobResult>()
+  /** M10 事件流：进度订阅者（JSON-RPC `events.subscribe` 的 export.progress 数据源）。 */
+  private readonly progressListeners = new Set<ExportProgressListener>()
+
+  /**
+   * 订阅任务进度（M10 事件流）。返回取消函数。
+   *
+   * 与渲染进程的 `job:progress` 共用同一个节流 ticker（PROGRESS_THROTTLE_MS），
+   * 订阅者看到的节奏与 UI 一致；终态（done / failed / cancelled）也会再推一次。
+   * 监听者抛错一律吞掉：事件推送出问题绝不能反过来让导出失败。
+   */
+  onProgress(listener: ExportProgressListener): () => void {
+    this.progressListeners.add(listener)
+    return () => {
+      this.progressListeners.delete(listener)
+    }
+  }
+
+  /** 把一份进度快照推给所有订阅者（单个订阅者抛错不影响其它订阅者与导出流程）。 */
+  private notifyProgress(progress: JobProgress): void {
+    for (const listener of this.progressListeners) {
+      try {
+        listener(progress)
+      } catch {
+        // 事件订阅方的 bug 不能打断导出（与 ControlEventBus.publish 的纪律一致）
+      }
+    }
+  }
 
   async estimate(input: EstimateInput): Promise<SizeEstimate> {
     const freeBytes = await diskFreeBytes(input.outputDir)
@@ -63,7 +94,10 @@ export class ExportEngine {
       height: input.height,
       fps: input.fps,
       frames: input.frames,
-      freeBytes
+      freeBytes,
+      kind: input.kind,
+      ...(input.videoBitrateKbps !== undefined ? { videoBitrateKbps: input.videoBitrateKbps } : {}),
+      ...(input.audioBitrateKbps !== undefined ? { audioBitrateKbps: input.audioBitrateKbps } : {})
     })
   }
 
@@ -122,6 +156,8 @@ export class ExportEngine {
   /** 应用退出前调用：取消所有排队任务并断开帧通道。 */
   async shutdown(): Promise<void> {
     this.queue.length = 0
+    // M10 事件流：退出时解除进度订阅，避免已停止的控制面被继续回调
+    this.progressListeners.clear()
     for (const [jobId, channel] of this.channels) {
       channel.cancel('cancelled')
       channel.close()
@@ -203,7 +239,6 @@ export class ExportEngine {
       const freeBytes = await diskFreeBytes(request.target.outputDir)
       const precheck = diskPrecheck({
         kind: request.target.kind,
-        directPipe: request.overlay?.directPipe === true,
         width: spec.width,
         height: spec.height,
         fps: spec.fps,
@@ -225,13 +260,10 @@ export class ExportEngine {
       }
       const codec: TransparentCodec = request.codec ?? 'prores4444'
       /**
-       * 叠加导出的阶段一产物是**中间文件**（任务结束即删），
-       * 不能跟最终 MP4 共用路径——应用内 overlay 冒烟实捕：
-       * 阶段一渲染到最终输出路径，阶段二去读 overlay.mov（从未存过）而失败。
+       * 帧一律经内存直送编码器（v11）：两种出口都不再有中间产物——
+       * 叠加出口直接写最终 MP4，透明出口直接写最终 MOV，
+       * 任务工作目录只承载防抖分析产生的 `.trf`。
        */
-      const overlayPath = path.join(workspace.dir, 'overlay.mov')
-      const transparentOutput =
-        request.target.kind === 'overlayMp4' ? overlayPath : outputPath
       const transparentCtx: TransparentRunCtx = {
         window,
         state,
@@ -241,7 +273,7 @@ export class ExportEngine {
         height: spec.height,
         startFrame: spec.startFrame,
         framesTotal,
-        outputPath: transparentOutput,
+        outputPath,
         codec,
         frameFormat: spec.frameFormat,
         audioMastering: request.audioMastering,
@@ -249,9 +281,19 @@ export class ExportEngine {
         onTick: emit
       }
 
+      // M8：AI 降噪（arnndn）需要 RNNoise 模型；只有真有片段选 ai 档时才去解析，
+      // 缺失时这里不抛错——留给合成前统一报「缺模型」（错误文案只在一处）。
+      const needsRnnoise = needsAiDenoise({
+        segments: request.overlay?.segments,
+        audioClips: request.audioClips
+      })
+      const rnnoiseModelPath = needsRnnoise
+        ? (await resolveRnnoiseModel({ ...rnnoiseModelDirs(), env: process.env })).path
+        : null
+
       /**
        * v7：透明出口的音频。
-       * 只给 `transparentMov`：叠加导出的阶段一是**无声中间件**，
+       * 只给 `transparentMov`：叠加出口的帧流是无声的叠加层，
        * 在这里带音轨会与阶段二的混音叠成双份（而且会提前出声）。
        */
       const transparentAudio =
@@ -260,7 +302,8 @@ export class ExportEngine {
               clips: request.audioClips ?? [],
               spanStartSec: frameTimeSec(spec.startFrame, spec.fps),
               spanEndSec: frameTimeSec(spec.startFrame + framesTotal, spec.fps),
-              ...(request.audioMastering ? { mastering: request.audioMastering } : {})
+              ...(request.audioMastering ? { mastering: request.audioMastering } : {}),
+              ...(rnnoiseModelPath ? { arnndnModelPath: rnnoiseModelPath } : {})
             }
           : undefined
 
@@ -292,44 +335,10 @@ export class ExportEngine {
       }
 
       if (request.target.kind === 'transparentMov') {
-        if (request.frameDelivery === 'pngSequence') {
-          const framesDir = path.join(workspace.dir, 'frames')
-          const wrote = await writePngSequence(
-            {
-              state,
-              dir: framesDir,
-              fps: spec.fps,
-              startFrame: spec.startFrame,
-              framesTotal,
-              isCancelled: () => state.cancelRequested,
-              onTick: emit
-            },
-            channel
-          )
-          if (wrote === 'cancelled') {
-            this.finalizeCancelled(request, state)
-            return
-          }
-          state.phase = 'muxing'
-          emit()
-          await encodePngToMov({
-            state,
-            binaries,
-            dir: framesDir,
-            outputPath,
-            fps: spec.fps,
-            framesTotal,
-            codec,
-            audio: transparentAudio,
-            isCancelled: () => state.cancelRequested,
-            onTick: emit
-          })
-        } else {
-          const done = await runTransparentMov({ ...transparentCtx, audio: transparentAudio }, channel)
-          if (done === 'cancelled') {
-            this.finalizeCancelled(request, state)
-            return
-          }
+        const done = await runTransparentMov({ ...transparentCtx, audio: transparentAudio }, channel)
+        if (done === 'cancelled') {
+          this.finalizeCancelled(request, state)
+          return
         }
         state.phase = 'verifying'
         emit()
@@ -347,10 +356,10 @@ export class ExportEngine {
       // 叠加压制
       const overlay = request.overlay
       if (!overlay) throw new Error('叠加导出缺少参考视频参数')
-      // 硬件编码器只解析一次：失败/不可用一律回落 libx264，导出照常进行
+      // 硬件编码器只解析一次：失败/不可用一律回落软件编码，导出照常进行
       let videoEncoder: string | null = null
       try {
-        videoEncoder = await resolveExportEncoder()
+        videoEncoder = await resolveExportEncoder(overlay.videoCodec === 'hevc' ? 'hevc' : overlay.videoCodec === 'av1' ? 'av1' : 'h264')
       } catch {
         videoEncoder = null
       }
@@ -362,26 +371,39 @@ export class ExportEngine {
         refVideoPath: overlay.refVideoPath,
         // v2：媒体时间轴；单段整段覆盖时主进程仍走旧单输入（argv 不变）
         segments: overlay.segments,
+        // M8：手绘遮罩（渲染侧光栅化的 PNG）；缺省不落键 → 旧请求逐字节不变。
+        // 主进程在 runOverlayMp4 里写进任务 workspace，并按带 mask 的段顺序接 maskPath。
+        ...(request.mediaMasks && request.mediaMasks.length > 0
+          ? { mediaMasks: request.mediaMasks }
+          : {}),
         frameSize: { width: spec.width, height: spec.height },
         refMeta: overlay.refMeta,
         audioMode: overlay.audioMode,
         fpsMode: overlay.fpsMode,
         spanStartSec: overlay.spanStartSec,
         spanEndSec: overlay.spanEndSec,
+        ...(overlay.graphicsZ ? { graphicsZ: overlay.graphicsZ } : {}),
         outputPath,
-        overlayPath: transparentOutput,
-        codec,
         frameFormat: spec.frameFormat,
-        directPipe: overlay.directPipe,
         // 硬件编码器（null = libx264）；合成失败会自动回退软件编码
         videoEncoder,
         // 水印：尺寸不可用/路径缺失时归一为 undefined，合成链退回无水印的旧参数
         watermark: watermarkInputOf(overlay.watermark),
         // v7：音频轨；有它就与参考视频原声 amix（渲染侧已按 span 裁剪）
         audioClips: request.audioClips,
+        // M8：AI 降噪（arnndn）的 RNNoise 模型绝对路径（缺失时合成前报错）
+        ...(rnnoiseModelPath ? { arnndnModelPath: rnnoiseModelPath } : {}),
         // v10：目标画布与画质档（缺省 = 旧行为，argv 逐字节不变）
         canvas: overlay.canvas,
         quality: overlay.quality,
+        videoCodec: overlay.videoCodec,
+        videoBitrateKbps: overlay.videoBitrateKbps,
+        audioBitrateKbps: overlay.audioBitrateKbps,
+        // M9：CRF 直给 / 软件 preset / 10bit / 色彩范围（缺省 = 旧行为）
+        crf: overlay.crf,
+        encoderPreset: overlay.encoderPreset,
+        bitDepth: overlay.bitDepth,
+        colorRange: overlay.colorRange,
         audioMastering: request.audioMastering,
         // v8：防抖 .trf 落盘与 detect/合成 ffmpeg 的 cwd
         workspaceDir: workspace.dir,
@@ -398,7 +420,12 @@ export class ExportEngine {
         outputPath,
         { width: spec.width, height: spec.height, fps: spec.fps, frames: framesTotal },
         overlay.refMeta,
-        binaries
+        binaries,
+        {
+          ...(overlay.videoCodec ? { videoCodec: overlay.videoCodec } : {}),
+          ...(overlay.bitDepth === 10 ? { bitDepth: 10 as const } : {}),
+          ...(overlay.colorRange === 'full' ? { colorRange: 'full' as const } : {})
+        }
       )
       state.outputs = [outputPath]
       await this.succeed(state, request)
@@ -442,8 +469,11 @@ export class ExportEngine {
 
   /** 记录进度快照（节流由调用方保证；终态也会走到这里）。 */
   private remember(state: JobState): void {
-    this.snapshots.set(state.id, toProgress(state))
+    const progress = toProgress(state)
+    this.snapshots.set(state.id, progress)
     trimOldest(this.snapshots, JOB_SNAPSHOT_LIMIT)
+    // M10 事件流：同一份快照推给控制面订阅者（export.progress 与 export.status 同口径）
+    this.notifyProgress(progress)
   }
 
   private rememberResult(result: JobResult): void {
@@ -475,6 +505,7 @@ export class ExportEngine {
     }
     emitResult(this.windowOf(state.windowId), result)
     this.rememberResult(result)
+    this.notifyProgress(result.progress)
     await log('info', `任务 ${state.id} 完成：${state.outputs.join(', ')}`)
     this.registry.remove(state.id)
     void request
@@ -492,6 +523,7 @@ export class ExportEngine {
     }
     emitResult(this.windowOf(state.windowId), result)
     this.rememberResult(result)
+    this.notifyProgress(result.progress)
     this.registry.remove(state.id)
     void request
   }
@@ -507,6 +539,7 @@ export class ExportEngine {
     }
     emitResult(this.windowOf(state.windowId), result)
     this.rememberResult(result)
+    this.notifyProgress(result.progress)
     this.registry.remove(state.id)
     void request
   }

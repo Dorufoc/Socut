@@ -260,6 +260,103 @@ export function transitionStyles(type: TransitionType, progress: number): Previe
     }
   }
 
+  // M7-E：滑动（slide*）= 两层同向平移，新画面从反方向顶进来
+  if (family === 'slide') {
+    return {
+      left: { opacity: 1, zIndex: 1, ...translateStyle(-dx * eased * 100, -dy * eased * 100) },
+      right: { opacity: 1, zIndex: 2, ...translateStyle(dx * (1 - eased) * 100, dy * (1 - eased) * 100) },
+      blurPx: 0,
+      dx,
+      dy
+    }
+  }
+
+  // M7-E：擦除（wipe*）= 用 clip-path 揭示新画面；对角线/切片类方向为 none，做纵向开合近似
+  if (family === 'wipe') {
+    const reveal = 1 - eased
+    let clipPath: string
+    if (dx < 0) clipPath = `inset(0 ${round2(reveal * 100)}% 0 0)`
+    else if (dx > 0) clipPath = `inset(0 0 0 ${round2(reveal * 100)}%)`
+    else if (dy < 0) clipPath = `inset(0 0 ${round2(reveal * 100)}% 0)`
+    else if (dy > 0) clipPath = `inset(${round2(reveal * 100)}% 0 0 0)`
+    else clipPath = `inset(${round2(reveal * 50)}% 0 ${round2(reveal * 50)}% 0)`
+    return {
+      left: { opacity: 1 },
+      right: { opacity: 1, zIndex: 2, clipPath },
+      blurPx: 0,
+      dx,
+      dy
+    }
+  }
+
+  // M7-E：形状（circle*/vert*/horz*/radial/distance/crop）= 圆形/矩形剪裁展开
+  if (family === 'shape') {
+    const open = 75 * eased
+    if (type === 'vertOpen' || type === 'vertClose') {
+      const inset = round2((type === 'vertOpen' ? 50 * (1 - eased) : 50 * eased))
+      return {
+        left: { opacity: 1 },
+        right: { opacity: 1, zIndex: 2, clipPath: `inset(${inset}% 0 ${inset}% 0)` },
+        blurPx: 0,
+        dx,
+        dy
+      }
+    }
+    if (type === 'horzOpen' || type === 'horzClose') {
+      const inset = round2((type === 'horzOpen' ? 50 * (1 - eased) : 50 * eased))
+      return {
+        left: { opacity: 1 },
+        right: { opacity: 1, zIndex: 2, clipPath: `inset(0 ${inset}% 0 ${inset}%)` },
+        blurPx: 0,
+        dx,
+        dy
+      }
+    }
+    if (type === 'rectCrop') {
+      const inset = round2(50 * (1 - eased))
+      return {
+        left: { opacity: 1 },
+        right: { opacity: 1, zIndex: 2, clipPath: `inset(${inset}% 0 ${inset}% 0)` },
+        blurPx: 0,
+        dx,
+        dy
+      }
+    }
+    return {
+      left: { opacity: 1 },
+      right: { opacity: 1, zIndex: 2, clipPath: `circle(${round2(open)}% at 50% 50%)` },
+      blurPx: 0,
+      dx,
+      dy
+    }
+  }
+
+  // M7-E：特效（pixelize / squeezeH / squeezeV）
+  if (family === 'effect') {
+    if (type === 'pixelize') {
+      const blurPx = 8 * mid
+      return {
+        left: withBlur({ opacity: 1 - p }, blurPx),
+        right: withBlur({ opacity: p, zIndex: 2 }, blurPx),
+        blurPx,
+        dx,
+        dy
+      }
+    }
+    const horizontal = type === 'squeezeH'
+    const shrink = 1 - 0.9 * eased
+    const grow = 0.1 + 0.9 * eased
+    const size = (value: number): CSSProperties =>
+      horizontal ? { transform: `scaleX(${round2(value)})` } : { transform: `scaleY(${round2(value)})` }
+    return {
+      left: { opacity: 1, zIndex: 1, ...size(shrink) },
+      right: { opacity: 1, zIndex: 2, ...size(grow) },
+      blurPx: 0,
+      dx,
+      dy
+    }
+  }
+
   // camera：zoomin = 新画面推近入场
   const blurPx = PREVIEW_TRANSITION_ZOOM_BLUR_PX * mid
   const scale = 1.16 - 0.16 * p

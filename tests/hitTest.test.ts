@@ -127,6 +127,95 @@ describe('预览命中测试', () => {
   })
 })
 
+describe('预览命中测试 · M6 关键帧变换后的点选', () => {
+  /** 给 job 的唯一片段挂上关键帧（t=0 与 t=1 同一个值 → 全程常量变换）。 */
+  function withKeyframes(job: RenderJobSpec, param: string, value: number): RenderJobSpec {
+    const clip = job.clips[0]!
+    return {
+      ...job,
+      clips: [
+        {
+          ...clip,
+          keyframes: [
+            {
+              param: param as never,
+              points: [
+                { t: 0, value, easing: 'linear' },
+                { t: 1, value, easing: 'linear' }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+
+  it('位移关键帧：条块画到哪就点到哪（左移后原本的空白区变成可点）', async () => {
+    const { job, bar } = await buildJob()
+    const clip = job.clips[0]!
+    const steadyFrame = clip.startFrame + clip.animation.inFrames + 4
+    const shifted = withKeyframes(job, 'offsetXPct', -10) // 画宽 1920 的 -10% = 左移 192px
+    const dx = Math.round(job.width * 0.1)
+    // 左移后条块左缘外 100px 处：未变换时是空白（不命中），变换后落在条内（命中）
+    const probe = { x: bar.x - 100, y: bar.y + bar.h / 2 }
+    expect(hitTestClips(job, steadyFrame, probe)).toBeNull()
+    expect(hitTestClips(shifted, steadyFrame, probe)).toBe(clip.id)
+    // 反向：+10% 时右缘外 100px 原本空白、变换后命中
+    const rightShifted = withKeyframes(job, 'offsetXPct', 10)
+    const rightProbe = { x: bar.x + bar.w + 100, y: bar.y + bar.h / 2 }
+    expect(hitTestClips(job, steadyFrame, rightProbe)).toBeNull()
+    expect(hitTestClips(rightShifted, steadyFrame, rightProbe)).toBe(clip.id)
+    // 平移量确实来自画宽百分比
+    expect(dx).toBe(192)
+  })
+
+  it('缩放关键帧：放大后的边缘区域也能点中（局部坐标反算）', async () => {
+    const { job, bar } = await buildJob()
+    const clip = job.clips[0]!
+    const steadyFrame = clip.startFrame + clip.animation.inFrames + 4
+    const cx = bar.x + bar.w / 2
+    const cy = bar.y + bar.h / 2
+    const scaled = withKeyframes(job, 'scalePct', 200)
+    // 距中心 0.75 条宽处：原始尺寸下在条外，2x 后落进条内
+    const outsideX = cx + bar.w * 0.75
+    expect(hitTestClips(job, steadyFrame, { x: outsideX, y: cy })).toBeNull()
+    expect(hitTestClips(scaled, steadyFrame, { x: outsideX, y: cy })).toBe(clip.id)
+  })
+
+  it('旋转 90°：命中区域跟着转（上下方向变成长轴方向）', async () => {
+    const { job, bar } = await buildJob()
+    const clip = job.clips[0]!
+    const steadyFrame = clip.startFrame + clip.animation.inFrames + 4
+    const cx = bar.x + bar.w / 2
+    const cy = bar.y + bar.h / 2
+    const delta = Math.round(bar.h + 40)
+    // 前提：delta 在条宽方向内、在条高方向外
+    expect(bar.w / 2).toBeGreaterThan(delta)
+    const rotated = withKeyframes(job, 'rotationDeg', 90)
+    expect(hitTestClips(job, steadyFrame, { x: cx, y: cy + delta })).toBeNull()
+    expect(hitTestClips(rotated, steadyFrame, { x: cx, y: cy + delta })).toBe(clip.id)
+  })
+
+  it('不透明度关键帧归零：完全透明时不可点（不选中看不见的像素）', async () => {
+    const { job, bar } = await buildJob()
+    const clip = job.clips[0]!
+    const steadyFrame = clip.startFrame + clip.animation.inFrames + 4
+    const invisible = withKeyframes(job, 'opacity', 0)
+    expect(hitTestClips(invisible, steadyFrame, { x: bar.x + bar.w / 2, y: bar.y + bar.h / 2 })).toBeNull()
+    // 半透明仍属于"看得见"，照常可点
+    const half = withKeyframes(job, 'opacity', 0.5)
+    expect(hitTestClips(half, steadyFrame, { x: bar.x + bar.w / 2, y: bar.y + bar.h / 2 })).toBe(clip.id)
+  })
+
+  it('关键帧只影响时间轴上的同一片段：区间外依旧不命中', async () => {
+    const { job, bar } = await buildJob()
+    const clip = job.clips[0]!
+    const shifted = withKeyframes(job, 'offsetXPct', 10)
+    const dx = Math.round(job.width * 0.1)
+    expect(hitTestClips(shifted, clip.startFrame - 1, { x: bar.x + bar.w / 2 + dx, y: bar.y + bar.h / 2 })).toBeNull()
+  })
+})
+
 describe('显示坐标 → 原生像素', () => {
   it('按显示矩形的等比映射（与 DPR 无关）', () => {
     const rect = { left: 100, top: 50, width: 960, height: 540 }

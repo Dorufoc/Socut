@@ -1,6 +1,25 @@
-import type { ExportQuality, Fps, FontRecord, Resolution, ResolutionPreset, FpsPreset } from './types'
+import type {
+  ExportBitrateTier,
+  ExportQuality,
+  ExportResolutionChoice,
+  ExportResolutionTier,
+  Fps,
+  FontRecord,
+  Resolution,
+  ResolutionPreset,
+  FpsPreset,
+  VideoCodec
+} from './types'
 
-export const PROJECT_VERSION = 3
+/** v4：多序列（一个工程多段剪辑）。首次升级只加活动序列 id/名字，不搬动任何片段数据。 */
+export const PROJECT_VERSION = 4
+
+/** v4：默认（首个）序列 id；活动序列是默认序列时工程 JSON 不落 activeSequenceId 键 */
+export const DEFAULT_SEQUENCE_ID = 'seq-main'
+/** v4：默认序列显示名（同上：等于默认名时不落盘） */
+export const DEFAULT_SEQUENCE_NAME = '主序列'
+/** v4：一个工程最多几条序列（保护性上限：导出/切换列表不做虚拟化） */
+export const MAX_SEQUENCES = 20
 
 export const APP_NAME = 'Socut'
 export const WINDOW_TITLE = 'Socut 新闻字幕条'
@@ -20,7 +39,9 @@ export const USER_DATA_DIRS = {
   /** v10：4K / MXF 预览代理（整片 720p H.264），按 素材+签名指纹 命名 */
   proxies: 'proxies',
   /** 启动页工程封面（covers/<entryId>.png），由 socut-cover:// 协议只读提供 */
-  covers: 'covers'
+  covers: 'covers',
+  /** M5：冻结帧抽出来的静态 PNG（freezes/<素材>-<时间>.png），作为 image 素材被工程引用 */
+  freezes: 'freezes'
 } as const
 
 export const FONTS_MANIFEST_FILE = 'fonts.json'
@@ -200,6 +221,32 @@ export const EXPORT_CANVAS_SIZES = {
 /** 画质档 → libx264 CRF（high 与现有默认 18 逐字节一致）。 */
 export const EXPORT_QUALITY_CRF: Record<ExportQuality, number> = { high: 18, standard: 23, small: 28 }
 
+/** 分辨率档位 → 目标短边像素（480/720/1080/1440(2K)/2160(4K)）。 */
+export const EXPORT_RESOLUTION_SHORT_SIDE: Record<ExportResolutionTier, number> = {
+  '480': 480,
+  '720': 720,
+  '1080': 1080,
+  '1440': 1440,
+  '2160': 2160
+}
+
+/** 码率档位基准（1080p 下）；其他分辨率按像素数等比缩放。 */
+export const EXPORT_BITRATE_BASE_KBPS: Record<'low' | 'standard' | 'high', number> = {
+  low: 1000,
+  standard: 2000,
+  high: 4000
+}
+
+/** AAC 音频码率预设（kbps）。 */
+export const EXPORT_AUDIO_BITRATE_PRESETS = [128, 192, 256, 320] as const
+
+/** 导出默认值：AVC + 标准码率 + AAC 192kbps + 1080P 目标分辨率。 */
+export const DEFAULT_VIDEO_CODEC: VideoCodec = 'avc'
+export const DEFAULT_VIDEO_BITRATE_TIER: ExportBitrateTier = 'standard'
+export const DEFAULT_AUDIO_BITRATE_KBPS = 192
+/** 分辨率是渲染目标而非素材属性：缺省即 1080P，不再保留素材原始分辨率。 */
+export const DEFAULT_EXPORT_RESOLUTION: ExportResolutionChoice = '1080'
+
 /** 转场时长：秒为单位写盘，范围与帧下限是唯一口径。 */
 export const TRANSITION_DURATION = { min: 0.2, max: 1.5, default: 0.5, minFrames: 2 } as const
 
@@ -378,6 +425,8 @@ export const cssFamilyFor = (fontId: string): string => `${FONT_FAMILY_PREFIX}-$
 export const MIN_CLIP_DURATION_SEC = 0.2
 /** 媒体轨上单段 MediaClip 的最小时长（与字幕轨保持一致，避免拆后零长） */
 export const MIN_MEDIA_CLIP_SEC = 0.2
+/** M5：插入冻结帧的默认时长（秒）；用户可在检查器里改，最短按 MIN_MEDIA_CLIP_SEC 夹取 */
+export const FREEZE_FRAME_DEFAULT_SEC = 1
 /** 新建片段默认时长（秒） */
 export const DEFAULT_CLIP_DURATION_SEC = 5
 /** @deprecated 旧「一屏铺满」上限（60s）。新时间轴用 MAX_TRACK_SEC 作为可滚动软上限。 */
@@ -389,14 +438,25 @@ export const MAX_TIMELINE_SEC = 60
 
 /** 字幕轨是唯一且固定的轨道：不参与增删/排序，恒覆盖在所有画面内容之上。 */
 export const SUBTITLE_TRACK_ID = 'track-subtitle'
+/** M7：文本轨（同样是固定一条）：画在媒体层之上、字幕条之下。 */
+export const TEXT_TRACK_ID = 'track-text'
 /** v3：默认媒体轨 id（空工程 / 旧工程迁移后至少有一条） */
 export const DEFAULT_MEDIA_TRACK_ID = 'track-media-0'
 /** v3：默认音频轨 id */
 export const DEFAULT_AUDIO_TRACK_ID = 'track-audio-0'
-/** 媒体轨数量上限（再多行高就压到不可用了） */
-export const MAX_MEDIA_TRACKS = 8
-/** 音频轨数量上限 */
-export const MAX_AUDIO_TRACKS = 8
+/**
+ * 轨道数量**软上限**（媒体轨 / 音频轨各自独立计数）。
+ * 不再是「每类最多 8 条」的硬限制：导出图与时间轴行数仍需要有限保护，
+ * 因此取 50；用户可自由加到 12+ 条轨道（产品要求“无限轨”的第一阶段）。
+ */
+export const TRACK_SOFT_LIMIT = 50
+/**
+ * @deprecated 旧「媒体轨最多 8 条」硬上限。现为 `TRACK_SOFT_LIMIT` 的兼容别名，
+ * 新增代码请直接用 `TRACK_SOFT_LIMIT`（保留导出只为不一次性改掉 20+ 处 import）。
+ */
+export const MAX_MEDIA_TRACKS = TRACK_SOFT_LIMIT
+/** @deprecated 旧「音频轨最多 8 条」硬上限，同 `MAX_MEDIA_TRACKS`。 */
+export const MAX_AUDIO_TRACKS = TRACK_SOFT_LIMIT
 
 // ---------------------------------------------------------------------------
 // 时间轴（滚动 + 缩放）

@@ -17,6 +17,7 @@ import { installCoverProtocol, registerCoverScheme } from './coverProtocol'
 import { applyGpuPreferenceAtStartup } from './gpu'
 import { log } from './log'
 import { CliControlServer } from './cliServer'
+import { JsonRpcControlServer } from './control/jsonRpcServer'
 
 /**
  * 主进程入口（规格 §4.2）：
@@ -30,6 +31,8 @@ const engine = new ExportEngine()
 /** CLI 自动拉起时带 `--cli-server`：窗口保持隐藏，只作为控制面/渲染后端。 */
 const cliOnly = process.argv.includes('--cli-server')
 let cliServer: CliControlServer | null = null
+/** M10：JSON-RPC 行协议服务（TCP 回环 + 命名管道），与 CLI 同生命周期。 */
+let jsonRpcServer: JsonRpcControlServer | null = null
 
 async function ensureCliServer(): Promise<CliControlServer | null> {
   if (cliServer) return cliServer
@@ -148,6 +151,23 @@ async function bootstrap(): Promise<void> {
 
   const cli = await ensureCliServer()
   registerIpc(engine, cli)
+  // M10：JSON-RPC 行协议（TCP 回环 + 命名管道），与 HTTP CLI 共用同一个分派器
+  if (cli) {
+    try {
+      jsonRpcServer = new JsonRpcControlServer({
+        token: cli.info().token,
+        appVersion: APP_VERSION,
+        dispatch: (request) => cli.dispatch(request),
+        log: (message) => log('info', message)
+      })
+      const rpcInfo = await jsonRpcServer.start()
+      await cli.attachJsonRpc(rpcInfo)
+    } catch (error) {
+      await log('warn', `JSON-RPC 控制面启动失败：${String(error)}`)
+      await jsonRpcServer?.stop().catch(() => undefined)
+      jsonRpcServer = null
+    }
+  }
   const window = createMainWindow({ hidden: cliOnly })
   window.setTitle(WINDOW_TITLE)
   window.webContents.on('did-start-loading', () => cli?.notifyRendererGone())
@@ -202,6 +222,8 @@ async function cleanup(reason: string): Promise<void> {
     // 直接 app.exit 会把它打断（规格 §4.6：关闭程序不丢编辑进度）
     await cliServer?.stop()
     cliServer = null
+    await jsonRpcServer?.stop().catch(() => undefined)
+    jsonRpcServer = null
     await flushPendingAutosave()
     await engine.shutdown()
     const killed = await terminateAll()

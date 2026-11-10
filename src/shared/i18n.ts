@@ -80,11 +80,70 @@ export const TEXT = {
     failed: '失败',
     cancelled: '已取消',
     /** v10：成片响度标准化 */
-    mastering: '响度标准化',
-    masteringOff: '关闭',
-    masteringSocial: '社交 -14 LUFS',
-    masteringBroadcast: '广播 -23 LUFS',
-    masteringHint: '单遍 loudnorm，导出生效'
+    mastering: '音量标准化',
+    masteringOff: '不处理',
+    masteringSocial: '短视频（-14 LUFS）',
+    masteringBroadcast: '电视播出（-23 LUFS）',
+    masteringHint: '统一响度，避免不同平台音量忽大忽小',
+    /** 导出位置 */
+    fileName: '作品名称',
+    outputDir: '导出至',
+    /** 交付画布 */
+    canvas: '导出画布',
+    canvasHint: '可多选，一次导出多个版本',
+    canvasFollow: '跟随素材',
+    /** 分辨率 / 码率 / 编码 / 音频码率 */
+    resolutionSource: '跟随素材（推荐）',
+    resolution480: '480P',
+    resolution720: '720P',
+    resolution1080: '1080P',
+    resolution2k: '2K',
+    resolution4k: '4K',
+    bitrate: '码率',
+    bitrateLow: '较低',
+    bitrateStandard: '标准',
+    bitrateHigh: '较高',
+    bitrateCustom: '自定义',
+    bitrateCustomLabel: '自定义视频码率',
+    bitrateHint: (kbps: number) => `当前码率：${kbps} kbps`,
+    codec: '编码格式',
+    codecAvc: 'AVC（H.264）',
+    codecHevc: 'HEVC（H.265）',
+    codecAv1: 'AV1',
+    crfLabel: 'CRF（留空按画质档）',
+    bitDepthLabel: '位深',
+    bitDepth8: '8-bit',
+    bitDepth10: '10-bit',
+    colorRangeLabel: '色彩范围',
+    colorRangeLimited: '有限（TV 16–235）',
+    colorRangeFull: '全范围（PC 0–255）',
+    // M7-E：图形层 z 档（字幕条/文本元素相对媒体层的位置）
+    graphicsZLabel: '图形层位置',
+    graphicsZAbove: '媒体之上（默认）',
+    graphicsZBelow: '媒体之下',
+    codecHint: 'HEVC 体积更小，但兼容性略差',
+    audioBitrate: '音频码率',
+    audioBitrateCopy: '原声直通',
+    audioBitrateCustom: '自定义音频码率',
+    audioBitrateHint: '选择码率后会转为 AAC 重新编码',
+    /** 画质 */
+    quality: '画质',
+    qualityHigh: '高清',
+    qualityStandard: '标准',
+    qualitySmall: '小体积',
+    qualityHint: '推荐「高清」：画质与体积平衡',
+    /** 导出摘要 */
+    summary: '导出摘要',
+    /** 更多导出选项 */
+    moreOptions: '更多导出选项',
+    transparentHint: '透明素材用于在剪辑软件中叠加，不含成片画面。',
+    transparentFormat: '透明素材格式',
+    pipeTransport: '帧传输',
+    pipeAuto: '自动（推荐）',
+    pipePng: 'PNG（兼容模式）',
+    pipeHint: '自动模式将帧直接送入编码器；兼容模式仅在排障时使用。',
+    /** 预览导出画布 */
+    previewCanvas: '预览导出画布'
   },
 
   // 时间轴与片段
@@ -102,6 +161,8 @@ export const TEXT = {
     noSplitTarget: '没有可拆分的段：先选中一段，或把播放头放到要拆的媒体段上',
     noRemoveTarget: '没有可删除的段：先选中一段，或把播放头放到要删的媒体段上',
     emptyMedia: '空轨：从素材库拖入',
+    /** M7：文本轨（固定一条） */
+    emptyText: '空文本轨：从「包装」Tab 新增文本元素',
     /** v7：音频轨 */
     audioLane: '音频',
     emptyAudio: '空轨：从素材库拖入音频',
@@ -122,8 +183,29 @@ export const TEXT = {
     snapTogetherHint: '主轨片段从左到右紧贴，不留空隙',
     magneticSnap: '自动吸附',
     magneticSnapHint: '拖拽时自动贴到相邻片段的首尾',
+    rippleDeleteTool: '磁性删除',
+    rippleDeleteToolHint: '开启后 Delete 会把后续同轨片段自动左移合拢（等同 Shift+Delete）',
     hoverPreview: '预览轴',
-    hoverPreviewHint: '悬停时用黄线预览帧位置'
+    hoverPreviewHint: '悬停时用黄线预览帧位置',
+    /** M5：剪辑操作（波纹删除 / 向后合并） */
+    rippleDelete: '波纹删除',
+    rippleDeleteHint: '删掉该段并让同轨后续片段左移合拢 · Shift+Delete',
+    mergeNext: '向后合并',
+    mergeNextHint: '与同轨紧邻的下一段合并（同素材、源连续、参数一致）· Ctrl+M',
+    noRippleTarget: '没有可波纹删除的段：先选中一条媒体段',
+    noMergeTarget: '没有可合并的下一段：需要同轨相邻、同一素材且源区间连续',
+    /** M5-D：多序列（一个工程多段剪辑） */
+    sequence: '序列',
+    sequenceHint: '一个工程可有多段剪辑：切换后时间轴只显示当前序列',
+    sequenceAdd: '新建空序列',
+    sequenceRemove: '删除当前序列',
+    sequenceRemoveHint: '删除当前序列（至少保留一条）',
+    sequenceLastHint: '只剩一条序列，无法删除',
+    /** M5：冻结帧 */
+    freezeFrame: '冻结帧',
+    freezeFrameHint: '在播放头切点插入 1s 静帧，后续片段右移 · Shift+F',
+    noFreezeTarget: '没有可冻结的段：把播放头放到媒体段中间（距两端至少 0.2s）',
+    freezeFailed: '冻结帧失败：源文件不可读或 FFmpeg 不可用'
   },
 
   /**
@@ -133,10 +215,56 @@ export const TEXT = {
   wrap: {
     tab: '包装',
     captions: '字幕',
+    textElements: '文本元素',
     ending: '片尾',
     endingTodo: '片尾功能尚未实现，后续版本开放',
     endingPlaceholder: '片尾占位',
     watermark: '水印'
+  },
+
+  /** M7：文本元素（自由叠加文字，与字幕条是两套体系） */
+  textElement: {
+    title: '文本元素',
+    add: '新增文本元素',
+    addHint: '新增一条默认 5s 的文本元素，随即可在右侧改字与样式',
+    empty: '暂无文本元素',
+    hint: '选中并在预览里显示',
+    remove: '删除文本元素',
+    preset: '起始预设',
+    text: '文字',
+    inPoint: '入点（秒）',
+    outPoint: '出点（秒）',
+    style: '样式',
+    size: '字号',
+    weight: '字重',
+    color: '颜色',
+    tracking: '字距',
+    lineHeight: '行高',
+    align: '对齐',
+    alignLeft: '左对齐',
+    alignCenter: '居中',
+    alignRight: '右对齐',
+    anchorX: '锚点 X（%）',
+    anchorY: '锚点 Y（%）',
+    plate: '背景板',
+    plateEnabled: '启用背景板',
+    plateColor: '底色',
+    plateOpacity: '不透明度',
+    platePaddingX: '左右内边距',
+    platePaddingY: '上下内边距',
+    plateRadius: '圆角',
+    stroke: '描边',
+    strokeWidth: '描边宽度',
+    strokeColor: '描边颜色',
+    shadow: '阴影',
+    shadowBlur: '模糊',
+    shadowColor: '阴影颜色',
+    shadowOffsetX: '阴影 X',
+    shadowOffsetY: '阴影 Y',
+    animation: '动画',
+    inDuration: '入场（秒）',
+    outDuration: '出场（秒）',
+    rise: '上浮（px）'
   },
 
   /** 左侧「字幕」Tab：按时间顺序列出全部标题，并且是新建/删除字幕条的唯一入口 */
@@ -147,12 +275,65 @@ export const TEXT = {
     empty: '暂无字幕条',
     add: '新建片段',
     addHint: '在时间轴末尾接一条新的字幕条，随即可在右侧编辑',
+    // M11：外部字幕 / 名单导入
+    importSubtitle: '导入 SRT/ASS',
+    importSubtitleHint: '把外部字幕文件解析成字幕条（按文件里的时间码落位）',
+    importList: '导入名单',
+    importListHint: 'CSV/JSON/纯文本名单 → 首尾相接的字幕条（列：标题,副标题,时长）',
+    imported: (n: number) => `已导入 ${n} 条字幕`,
+    importedBatch: (n: number) => `已生成 ${n} 条字幕`,
+    importEmpty: '文件里没有可导入的字幕内容',
+    importFailed: '导入失败',
+    // M11：自动字幕（whisper.cpp）——选中媒体片段 → 离线识别 → 字幕条落到时间轴
+    autoCaption: '自动字幕',
+    autoCaptionHint: '用 whisper.cpp 离线识别选中媒体片段的语音，并按片段在时间轴上的位置生成字幕条',
+    autoCaptionNoMedia: '先在时间轴上选中一个媒体片段，再点「自动字幕」',
+    autoCaptionSelected: (name: string) => `将识别选中片段的素材：${name}`,
+    autoCaptionLanguage: '识别语言',
+    autoCaptionLangAuto: '自动检测',
+    autoCaptionLangZh: '中文',
+    autoCaptionLangEn: '英文',
+    autoCaptionPrepare: '准备音频…',
+    autoCaptionProgress: (percent: number) => `识别中 ${percent}%`,
+    autoCaptionCancel: '取消识别',
+    autoCaptionCancelled: '已取消自动字幕',
+    autoCaptionAdded: (n: number) => `自动字幕：新增 ${n} 条`,
+    autoCaptionEmpty: '没有识别到落在该片段区间内的语音',
+    autoCaptionFailed: '自动字幕失败',
+    /** 缺资产时给「可执行」提示，而不是只报一句错 */
+    autoCaptionImportHint:
+      '可执行：请先导入 whisper 二进制与模型（npm run fetch:whisper / fetch:whisper:model，或放到 resources/whisper 与 resources/models/whisper），也能用 CLI whisper.config 指定路径',
+    autoCaptionMissingMedia: '选中的媒体文件已不存在：请先用「重新定位」恢复素材',
+    autoCaptionAudioFailed: '抽音失败：该素材可能没有音轨，或随包 FFmpeg 不可用',
     remove: '删除这条字幕',
     removeNamed: (title: string) => `删除字幕条：《${title}》`,
     hint: '选中并跳到中点',
     onAir: '正在显示',
     noTitle: '未填写',
-    noSubtitle: '未填写'
+    noSubtitle: '未填写',
+    // M11-H：字幕列表多选 + 批量编辑（每个批量动作 = 一次撤销步）
+    batchMode: '批量',
+    batchModeHint: '进入批量编辑：勾选多条字幕后统一改预设/时长/开关，或一次删除',
+    batchModeExit: '退出批量',
+    batchGroup: '字幕批量编辑',
+    batchSelectedCount: (n: number) => `已选 ${n} 条`,
+    batchSelectAll: '全选',
+    batchClear: '清空',
+    batchEmptyHint: '勾选列表左侧的复选框，选择要批量处理的字幕条',
+    batchPreset: '批量预设',
+    batchApplyPreset: '应用预设',
+    batchPresetDone: (n: number) => `已为 ${n} 条字幕应用预设`,
+    batchDuration: '统一时长（秒）',
+    batchApplyDuration: '统一时长',
+    batchDurationDone: (n: number) => `已统一 ${n} 条字幕的时长`,
+    batchCompact: '强制竖屏紧凑',
+    batchCompactDone: (n: number) => `已更新 ${n} 条字幕的紧凑设置`,
+    batchGradient: '标题渐变',
+    batchGradientDone: (n: number) => `已更新 ${n} 条字幕的渐变设置`,
+    batchDelete: '删除选中',
+    batchDeleteDone: (n: number) => `已删除 ${n} 条字幕`,
+    batchNothing: '没有可改动的字幕条（可能已是该状态）',
+    selectNamed: (title: string) => `选择字幕条：《${title}》`
   },
 
   /** 右侧「视频片段」编辑器（选中媒体段时替换字幕检查器） */
@@ -189,9 +370,28 @@ export const TEXT = {
     resetHint: '本条片段的画面、音频与变速参数全部回到默认值'
   },
 
-  /** v10：媒体片段入场转场（落在切点右侧片段上） */
+  /**
+   * v11：转场（左侧「转场」Tab + 时间轴切点 + 右侧转场检查器）。
+   * 数据仍落在切点右侧片段的 `transitionIn` 上，但入口从「片段检查器」搬到
+   * 「样式面板 → 拖到缝隙」，检查器只负责调时长与删除。
+   */
   transition: {
-    title: '转场（入场）',
+    /** 左侧 Tab 标题 */
+    tab: '转场',
+    panelTitle: '转场样式',
+    panelHint: '长按一种转场，拖到两个片段之间的连接缝隙处松开即可应用；点选样式可替换已选中的转场',
+    panelCount: (count: number) => (count > 0 ? `时间轴上已有 ${count} 个转场` : '时间轴上还没有转场'),
+    dragFirst: '先长按样式拖到片段缝隙，或点选时间轴上的转场图标，再用样式替换',
+    dropInvalid: '请拖到同一轨道相邻两个片段之间的连接缝隙（有空隙的位置不能添加转场）',
+    rejected: '该切点无法添加转场：需要两侧片段紧贴，且两侧素材的余量足够',
+    added: (label: string) => `已添加转场：${label}`,
+    replaced: (label: string) => `已替换为：${label}`,
+    inspectorTitle: '转场',
+    noneSelected: '未选中转场。点击时间轴缝隙上的转场图标即可编辑',
+    durationGroup: '参数',
+    cutPoint: (timecode: string) => `切点 ${timecode}`,
+    maxDuration: (sec: string) => `可调范围 0.2–${sec}s`,
+    deleteKeyHint: '选中状态按 Delete / 退格键可直接删除',
     /** 首段 / 间隙 / 手柄不足的禁用原因 */
     first: '本段是同轨第一段，没有入场转场',
     gap: '与前段之间有空隙，先紧贴再设置转场',
@@ -200,9 +400,9 @@ export const TEXT = {
     noHead: '本段头部没有足够素材，可缩短转场或把本段入点提前',
     tooShort: '可用时长不足 2 帧，无法设置转场',
     insufficient: (sec: string) => `可用转场约 ${sec} 秒，不足最短 0.2 秒`,
-    duration: '时长（秒）',
+    duration: '时长',
     frames: (count: number) => `${count} 帧`,
-    remove: '移除转场',
+    remove: '删除转场',
     hint: '转场只在叠加 MP4 与封面中生效；音频仍按切点硬切',
     marker: (label: string, sec: string) => `转场：${label} ${sec} 秒`
   },
@@ -222,10 +422,48 @@ export const TEXT = {
     denoiseLight: '轻度',
     denoiseStandard: '标准',
     denoiseStrong: '强',
-    denoiseHint: '导出生效：afftdn 频域降噪，作用于变速/音量/淡变之前'
+    denoiseHint: '导出生效：afftdn 频域降噪，作用于变速/音量/淡变之前',
+    // M8：arnndn 神经网络降噪（随包 RNNoise 模型；缺模型时导出侧给可执行提示）
+    denoiseAi: 'AI 降噪',
+    denoiseAiHint: '导出生效：arnndn 神经网络降噪（用随包 RNNoise 模型）；缺模型时导出会提示先取回模型',
+    // M8：人声增强 / 变声（都只在导出侧生效）
+    voiceEnhance: '人声增强',
+    voiceEnhanceHint: '导出生效：高通去低频轰鸣 + 3kHz 存在感 + 轻压缩，全程不改时长',
+    voiceEnhanceOff: '关闭',
+    voiceEnhanceLight: '轻度',
+    voiceEnhanceStandard: '标准',
+    voiceEnhanceStrong: '强',
+    voiceChange: '变声',
+    voiceChangeHint: '导出生效：rubberband 改音高并保持时长（与画面不会错位）',
+    voiceChangeOff: '关闭',
+    voiceChangeChipmunk: '花栗鼠',
+    voiceChangeRobot: '机器人',
+    voiceChangePhone: '电话音',
+    voiceChangeDeep: '低沉'
   },
 
   /** v9：片段变速 */
+  /** M7-E：特效包（导出侧生效，预览 CSS 近似） */
+  /** M8：抠像（色度键/亮度键，导出侧生效） */
+  clipKey: {
+    title: '抠像',
+    hint: '导出生效：把键色抠成透明（绿幕/蓝幕/白底素材），预览不显示透明结果',
+    mode: '模式',
+    off: '关闭',
+    chroma: '色度键（绿/蓝幕）',
+    luma: '亮度键（白底/黑底）',
+    color: '键色',
+    similarity: '相似度',
+    blend: '边缘混合',
+    despill: '去溢色',
+    threshold: '阈值',
+    tolerance: '容差',
+    softness: '柔和'
+  },
+  clipEffects: {
+    title: '特效包',
+    hint: '导出侧生效（预览为近似）：暗角 / 胶片颗粒 / 故障 / 色差 / 暖色漏光 / 黑白'
+  },
   clipSpeed: {
     title: '变速',
     rate: '倍速',
@@ -293,9 +531,90 @@ export const TEXT = {
     proxyEmpty: (p: string) => `防抖代理产物为空：${p}`
   },
 
+  /** M6：片段参数关键帧（右侧检查器"关键帧"展开器） */
+  keyframes: {
+    title: '关键帧',
+    hint: '按片段内进度改参数（0% = 入点，100% = 出点）；没有关键帧时参数不生效',
+    addPoint: '在播放头打点',
+    clearTrack: '清空该参数',
+    deletePoint: '删除关键点',
+    points: (n: number) => `${n} 个关键点`,
+    empty: '还没有关键帧',
+    playhead: (percent: number) => `播放头 ${percent}%`,
+    easing: '缓动',
+    easingCustom: '自定义贝塞尔',
+    bezierHint: 'cubic-bezier(x1, y1, x2, y2)：x/y 都在 0–1，禁回弹',
+    bezierEditor: '贝塞尔曲线编辑器（拖动两个控制点；松手才写回）',
+    value: '值',
+    labels: {
+      opacity: '不透明度',
+      offsetXPct: '水平位移 %',
+      offsetYPct: '垂直位移 %',
+      scalePct: '缩放 %',
+      rotationDeg: '旋转 °'
+    }
+  },
+
+  /** M8：手绘遮罩（预览 CSS mask + 画笔层；导出侧用同一份归一化笔画光栅化） */
+  mask: {
+    title: '遮罩',
+    hint: '在预览画面上涂掉不要的区域；坐标归一化，改画幅/缩放不影响已有笔画',
+    enter: '进入画笔',
+    exit: '退出画笔',
+    enterHint: '进入画笔会暂停播放并跳到该段中点，预览画面被画笔层接管（不会误触选中/拖拽手柄）',
+    brush: '笔刷大小',
+    brushUnit: '% 画面宽',
+    mode: '笔刷模式',
+    hide: '抹掉',
+    restore: '擦回',
+    clear: '清空遮罩',
+    clearHint: '删除这一段上的全部笔画（可撤销）',
+    strokes: (n: number) => (n > 0 ? `${n} 笔` : '无笔画'),
+    empty: '还没有笔画：进入画笔后直接在预览画面上按住拖动',
+    paintHint: '按住拖动涂抹 · 松手提交一笔 · [ / ] 调笔刷 · Esc 退出画笔',
+    feather: '羽化',
+    featherHint: '柔化遮罩边缘：0 = 硬边；数值按画面宽度百分比做模糊，预览与导出共用同一张遮罩图',
+    invert: '反向遮罩',
+    invertHint: '黑白互换：已涂掉的区域变可见、其余变隐藏（预览与导出共用同一张遮罩图）',
+    brushHint: '半径按画面宽度的百分比计算，与导出光栅化同一公式（lineWidth = 2·radius%·宽）'
+  },
+
+  /** M8-P0：外部 matte（图片/视频文件；与手绘遮罩可叠加，两者都只在导出侧生效） */
+  matte: {
+    title: '外部 matte',
+    import: '导入 matte…',
+    importHint: '选择一个图片或视频 matte（白 = 保留、黑 = 隐藏）；仅导出生效，预览仍显示原片',
+    remove: '移除 matte',
+    removeHint: '删除该段的 matte 引用（不会删除磁盘上的 matte 文件）',
+    none: '未导入',
+    image: '静态图',
+    video: '视频',
+    exportingOnly: '外部 matte 仅导出生效（预览仍显示原片）',
+    pickFailed: (reason: string) => `导入 matte 失败：${reason}`,
+    applied: (name: string) => `已挂载 matte：${name}（导出时生效）`,
+    removed: '已移除外部 matte'
+  },
+
+  /** M8-P1：AI 人像抠像（Selfie Segmenter；主进程推理生成 matte 视频，仅导出生效） */
+  aiMatte: {
+    title: 'AI 抠像',
+    generate: 'AI 抠像（生成 matte）',
+    generateHint: '用本机 ONNX 模型逐帧分离人像，生成 matte 视频后自动挂到本段；仅导出生效，预览仍显示原片',
+    runtimeMissing: 'AI 运行时未就绪',
+    modelMissing: '模型未就绪',
+    ready: '就绪',
+    readyHint: '运行时与模型已就绪：生成过程在主进程后台跑，可随时取消',
+    cancel: '取消生成',
+    generating: (done: number, total: number) =>
+      total > 0 ? `正在生成 matte… ${done}/${total} 帧` : '正在准备推理…',
+    cached: '已命中缓存，直接复用上次生成的 matte',
+    done: 'AI matte 已生成并挂到本段（导出时生效）',
+    failed: (reason: string) => `AI 抠像失败：${reason}`,
+    installHint: '需要 onnxruntime-node 与 Selfie 模型：执行 npm run fetch:matte:model，或重新安装完整包'
+  },
+
   // 检查器
-  inspector: {
-    preset: '预设样式',
+  inspector: {    preset: '预设样式',
     presetCount: (n: number) => `${n} 套`,
     title: '主标题',
     subtitle: '副标题',
@@ -431,7 +750,36 @@ export const TEXT = {
     error: '显卡检测失败',
     saveError: '设置保存失败',
     retry: '重试',
-    restartNote: '已保存。重启 Socut 后切换到所选显卡。'
+    restartNote: '已保存。重启 Socut 后切换到所选显卡。',
+    /** M11/M8：语音资产（whisper 转写 + RNNoise AI 降噪），离线资产只做本地选择 */
+    voice: {
+      title: '语音资产（离线）',
+      subtitle: '自动字幕与 AI 降噪都在本机运行；二进制与模型由安装包提供或从本地选择，应用不联网下载。',
+      status: '状态',
+      ready: '就绪',
+      missingBinary: '缺少 whisper 二进制',
+      missingModel: '缺少 whisper 模型',
+      binary: 'whisper.cpp 可执行文件',
+      model: 'whisper 模型（ggml-*.bin）',
+      language: '识别语言',
+      languageAuto: '自动检测',
+      languageZh: '中文',
+      languageEn: '英文',
+      configPath: '配置文件',
+      candidates: '候选路径',
+      pickBinary: '选择二进制…',
+      pickModel: '选择模型…',
+      reset: '清除配置',
+      refresh: '重新检测',
+      none: '（未找到）',
+      rnnoiseTitle: 'AI 降噪模型（RNNoise）',
+      rnnoiseReady: '就绪（导出可选「AI 降噪」）',
+      rnnoiseMissing: '未就绪：导出时选「AI 降噪」会提示先取回模型',
+      fetchHint: '取回命令：npm run fetch:whisper / npm run fetch:whisper:model / npm run fetch:rnnoise',
+      loading: '正在检测语音资产…',
+      saved: '已保存',
+      pickCancelled: '已取消选择'
+    }
   },
 
   /** 主界面伸缩布局：区域名用于分隔线实时读数与无障碍朗读 */

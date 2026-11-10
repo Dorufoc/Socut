@@ -148,6 +148,7 @@ beforeEach(() => {
     previewCanvasKind: null,
     previewFit: 'contain',
     exportScope: 'timeline',
+    uiMode: 'basic',
     notice: null
   })
 })
@@ -162,7 +163,7 @@ afterEach(() => {
 })
 
 describe('多画布导出', () => {
-  it('默认只勾 16:9；单一导出仍走旧的叠加语义（无画布归一、high）', async () => {
+  it('默认只勾 16:9；单一导出使用 1080P 目标分辨率、AVC + 标准码率 + AAC 192kbps', async () => {
     let count = 0
     mocks.start.mockImplementation(async () => {
       const jobId = `job-${++count}`
@@ -175,14 +176,22 @@ describe('多画布导出', () => {
     expect((screen.getByRole('checkbox', { name: '竖屏 9:16' }) as HTMLInputElement).checked).toBe(false)
     expect((screen.getByRole('checkbox', { name: '方形 1:1' }) as HTMLInputElement).checked).toBe(false)
 
-    fireEvent.click(screen.getByRole('button', { name: /开始导出/ }))
+    fireEvent.click(screen.getByRole('button', { name: '导出' }))
     await flush()
 
     expect(mocks.start).toHaveBeenCalledTimes(1)
     const input = mocks.start.mock.calls[0]![0]
-    expect(input).toMatchObject({ kind: 'overlayMp4', quality: 'high' })
-    expect(input.canvas).toBeUndefined()
-    expect(input.fileName).toContain('-overlayMp4-16x9-1920x1080-30/1')
+    expect(input).toMatchObject({
+      kind: 'overlayMp4',
+      videoCodec: 'avc',
+      videoBitrateKbps: 2000,
+      pipeTransport: 'raw',
+      codec: 'prores4444'
+    })
+    expect(input.canvas).toEqual({ kind: 'landscape', resolution: '1080', fit: 'contain' })
+    expect(input.audioBitrateKbps).toBe(192)
+    expect(input.quality).toBeUndefined()
+    expect(input.fileName).toBe('导出测试.mp4')
     expect(screen.getByText('完成')).toBeTruthy()
   })
 
@@ -196,20 +205,20 @@ describe('多画布导出', () => {
     render(<ExportPanel spec={SPEC} fontLoading={false} ffmpegAvailable />)
 
     fireEvent.click(screen.getByRole('checkbox', { name: '竖屏 9:16' }))
-    expect(screen.getByLabelText('竖屏 9:16分辨率')).toBeTruthy()
     expect(screen.getByLabelText('竖屏 9:16适配')).toBeTruthy()
     fireEvent.click(screen.getByRole('checkbox', { name: '方形 1:1' }))
 
-    fireEvent.click(screen.getByRole('button', { name: /开始导出（3 个画布）/ }))
+    fireEvent.click(screen.getByRole('button', { name: '导出 3 个画布' }))
     await flush(60)
 
     expect(mocks.start).toHaveBeenCalledTimes(3)
     const inputs = mocks.start.mock.calls.map((call) => call[0])
     expect(inputs.map((input) => input.canvas?.kind ?? 'landscape')).toEqual(['landscape', 'portrait', 'square'])
-    expect(inputs[1]!.canvas).toEqual({ kind: 'portrait', tier: '1080', fit: 'cover' })
-    expect(inputs[2]!.canvas).toEqual({ kind: 'square', tier: '1080', fit: 'cover' })
-    expect(inputs[1]!.fileName).toContain('-overlayMp4-9x16-1080x1920-30/1')
-    expect(inputs[2]!.fileName).toContain('-overlayMp4-1x1-1080x1080-30/1')
+    expect(inputs[1]!.canvas).toEqual({ kind: 'portrait', resolution: '1080', fit: 'cover' })
+    expect(inputs[2]!.canvas).toEqual({ kind: 'square', resolution: '1080', fit: 'cover' })
+    expect(inputs[0]!.fileName).toBe('导出测试-16x9.mp4')
+    expect(inputs[1]!.fileName).toBe('导出测试-9x16.mp4')
+    expect(inputs[2]!.fileName).toBe('导出测试-1x1.mp4')
   })
 
   it('取消全部先置批处理标志，再取消当前 job；后续版本不再启动', async () => {
@@ -218,7 +227,7 @@ describe('多画布导出', () => {
     render(<ExportPanel spec={SPEC} fontLoading={false} ffmpegAvailable />)
 
     fireEvent.click(screen.getByRole('checkbox', { name: '竖屏 9:16' }))
-    fireEvent.click(screen.getByRole('button', { name: /开始导出/ }))
+    fireEvent.click(screen.getByRole('button', { name: '导出 2 个画布' }))
     await flush()
 
     fireEvent.click(screen.getByRole('button', { name: '取消全部' }))
@@ -253,28 +262,68 @@ describe('多画布导出', () => {
 
     expect(mocks.exportCover).toHaveBeenCalledWith({
       outputDir: 'D:/out',
-      selection: { kind: 'landscape', fit: 'contain' }
+      selection: { kind: 'landscape', resolution: '1080', fit: 'contain' },
+      baseName: '导出测试'
     })
   })
 
   it('没有输出目录 / 素材缺失 / 一个画布都没勾时禁用', async () => {
     localStorage.clear()
     render(<ExportPanel spec={SPEC} fontLoading={false} ffmpegAvailable />)
-    expect((screen.getByRole('button', { name: /开始导出/ }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: '导出' }) as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByRole('button', { name: /导出封面/ }) as HTMLButtonElement).disabled).toBe(true)
     cleanup()
 
     localStorage.setItem('socut.lastOutputDir', 'D:/out')
     useUiStore.getState().setMissingMediaIds(['m1'])
     render(<ExportPanel spec={SPEC} fontLoading={false} ffmpegAvailable />)
-    expect((screen.getByRole('button', { name: /开始导出/ }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: '导出' }) as HTMLButtonElement).disabled).toBe(true)
     cleanup()
 
     useUiStore.getState().setMissingMediaIds([])
     render(<ExportPanel spec={SPEC} fontLoading={false} ffmpegAvailable />)
     fireEvent.click(screen.getByRole('checkbox', { name: '横屏 16:9' }))
-    expect((screen.getByRole('button', { name: /开始导出/ }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: '导出' }) as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByText('至少勾选一个画布')).toBeTruthy()
+  })
+})
+
+describe('分辨率 / 编码 / 码率控件', () => {
+  it('720P + HEVC + 自定义 3000 写进导出参数', async () => {
+    mocks.start.mockImplementation(async () => {
+      const jobId = 'job-settings'
+      setTimeout(() => useExportStore.getState().setResult(doneResult(jobId)), 0)
+      return jobId
+    })
+    render(<ExportPanel spec={SPEC} fontLoading={false} ffmpegAvailable />)
+
+    fireEvent.change(screen.getByLabelText(TEXT.export.resolution), { target: { value: '720' } })
+    fireEvent.click(screen.getByRole('button', { name: TEXT.export.codecHevc }))
+    fireEvent.click(screen.getByRole('button', { name: TEXT.export.bitrateCustom }))
+    fireEvent.change(screen.getByLabelText(TEXT.export.bitrateCustomLabel), { target: { value: '3000' } })
+    fireEvent.click(screen.getByRole('button', { name: '导出' }))
+    await flush()
+
+    const input = mocks.start.mock.calls[0]![0]
+    expect(input.canvas).toMatchObject({ kind: 'landscape', resolution: '720', fit: 'contain' })
+    expect(input.videoCodec).toBe('hevc')
+    expect(input.videoBitrateKbps).toBe(3000)
+  })
+
+  it('音频码率 128 时写入 audioBitrateKbps', async () => {
+    mocks.start.mockImplementation(async () => {
+      const jobId = 'job-audio'
+      setTimeout(() => useExportStore.getState().setResult(doneResult(jobId)), 0)
+      return jobId
+    })
+    render(<ExportPanel spec={SPEC} fontLoading={false} ffmpegAvailable />)
+
+    fireEvent.change(screen.getByLabelText(TEXT.export.audioBitrate), { target: { value: '128' } })
+    fireEvent.click(screen.getByRole('button', { name: '导出' }))
+    await flush()
+
+    const input = mocks.start.mock.calls[0]![0]
+    expect(input.audioBitrateKbps).toBe(128)
   })
 })
 
@@ -285,11 +334,23 @@ describe('预览此画布', () => {
     fireEvent.click(screen.getByRole('button', { name: '9:16' }))
     expect(useUiStore.getState().previewCanvasKind).toBe('portrait')
     expect(useUiStore.getState().previewFit).toBe('cover')
-    expect(screen.getByText('预览：竖屏 9:16 · cover')).toBeTruthy()
+    expect(screen.getByText('预览：竖屏 9:16 · 裁切填满')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: '工程画布' }))
     expect(useUiStore.getState().previewCanvasKind).toBeNull()
     expect(useUiStore.getState().previewFit).toBe('contain')
+  })
+})
+
+describe('模式分层（基础 / 高级）', () => {
+  it('基础模式不显示帧传输；切到高级模式后出现', async () => {
+    render(<ExportPanel spec={SPEC} fontLoading={false} ffmpegAvailable />)
+    expect(screen.queryByLabelText('帧传输')).toBeNull()
+
+    act(() => useUiStore.getState().setUiMode('advanced'))
+    await flush(0)
+
+    expect(screen.getByLabelText('帧传输')).toBeTruthy()
   })
 })
 

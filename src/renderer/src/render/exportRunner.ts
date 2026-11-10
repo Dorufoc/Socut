@@ -5,7 +5,7 @@ import { mediaKindOf } from '@shared/audioClips'
 import { speedValueOf } from '@shared/mediaClipAudio'
 import { createId } from '@shared/projectSchema'
 import { frameTimeSec, rationalToNumber } from '@shared/fps'
-import { nearestFps } from '@shared/constants'
+import { DEFAULT_AUDIO_BITRATE_KBPS, nearestFps } from '@shared/constants'
 import { resolveExportCanvas, type ResolvedExportCanvas } from '@shared/exportPresets'
 import { TEXT } from '@shared/i18n'
 import { formatBytes } from '@shared/sizeEstimate'
@@ -17,10 +17,12 @@ import type {
   ExportRequest,
   FrameSpec,
   Fps,
+  MediaClipMask,
   MediaItem,
   OverlaySegment,
   Project,
   TransparentCodec,
+  VideoCodec,
   VideoMeta
 } from '@shared/types'
 import { askHugeExport, askVfrSecondConfirm } from '../dialog/ask'
@@ -28,6 +30,7 @@ import type { DialogAnswer } from '../state/uiStore'
 import { gateBlocked } from '../state/uiStore'
 import { buildRenderJob } from './jobBuilder'
 import { frameSpecOf, registerExportJob } from './frameSource'
+import { rasterizeMask } from './maskRaster'
 import { useProjectStore } from '../state/projectStore'
 import { useUiStore } from '../state/uiStore'
 
@@ -42,15 +45,27 @@ export interface StartExportInput {
   kind: ExportKind
   outputDir: string
   fileName: string
-  frameDelivery?: 'pipe' | 'pngSequence'
   /** 管道内帧形式：raw（默认，无 PNG 压缩开销）或 png */
   pipeTransport?: 'raw' | 'png'
   codec?: TransparentCodec
-  directPipe?: boolean
   /** v10：目标画布（缺省 = 现有行为：叠加跟随首个底层素材的横屏） */
   canvas?: ExportCanvasSelection
   /** v10：画质档（缺省 = high，CRF 18 与旧版一致） */
   quality?: ExportQuality
+  /** 视频编码格式（缺省 = AVC/H.264） */
+  videoCodec?: VideoCodec
+  /** 视频码率（kbps）；有值时走码率模式 */
+  videoBitrateKbps?: number
+  /** 音频码率（kbps）；有值时强制 AAC 重编码 */
+  audioBitrateKbps?: number
+  /** M9：CRF 直给（0–51）；缺省按画质档 */
+  crf?: number
+  /** M9：软件编码 preset（x264/x265 名称；AV1 内部映射 SVT 档位） */
+  encoderPreset?: string
+  /** M9：输出位深（10 走 yuv420p10le；H.264 不支持，UI 侧禁用） */
+  bitDepth?: 8 | 10
+  /** M9：色彩范围标签（full → -color_range pc） */
+  colorRange?: 'limited' | 'full'
 }
 
 export interface RunExportOptions {
@@ -101,6 +116,12 @@ export function assertGate(): void {
 /** 导出基座的媒体时间轴（v2）：mediaClips → 按时间轴升序的 trim 段列表。 */
 export interface OverlayBase {
   segments: OverlaySegment[]
+  /**
+   * 与 `segments` 一一对应的片段 id。
+   * M8：`OverlaySegment` 本身没有 id，但遮罩 PNG 的 `{ clipId, png }` 契约需要它
+   * （文件名/错误信息要有可读的归属），所以这里另带一份平行数组。
+   */
+  clipIds: string[]
   /** 段数 > 1 或存在空隙/非零源入点时，主进程改走多输入 trim+concat */
   multi: boolean
   /** 首段元数据（分辨率/帧率跟随基准，规格 §2.3） */
@@ -117,12 +138,14 @@ export function buildOverlayBase(project: Project): OverlayBase | null {
   // v3 多轨：不再把轨道压成一条。按「底层→顶层」逐轨输出段，导出层按 trackIndex 分层合成。
   // 隐藏轨不导出；静音轨仍出画面，但 hasAudio=false（导出层补静音，且不混它的原声）。
   const order = mediaTrackOrder(project.mediaTracks)
-  let clips: (OverlaySegment & { meta: VideoMeta | null; vfrRaw: boolean })[] = []
+  let clips: (OverlaySegment & { meta: VideoMeta | null; vfrRaw: boolean; clipId: string })[] = []
   for (const track of visibleMediaTracks(project.mediaTracks)) {
     const trackIndex = order.get(track.id) ?? 0
     for (const clip of clipsOnMediaTrack(project.mediaClips, track.id)) {
       const item = pool.get(clip.mediaId)
       clips.push({
+        // M8：片段 id 只用于遮罩归属，不参与任何 argv/画面计算
+        clipId: clip.id,
         refVideoPath: item?.path ?? '',
         timelineStartSec: clip.timelineStartSec,
         timelineEndSec: clip.timelineEndSec,
@@ -138,6 +161,13 @@ export function buildOverlayBase(project: Project): OverlayBase | null {
         ...(clip.speed ? { speed: clip.speed } : {}),
         // v6：调色/变换参数原样透传，不能在多轨改造里丢掉（导出暂未烧录，见验收文档）
         ...(clip.video ? { video: clip.video } : {}),
+        // M6-E：媒体段关键帧（缺键 = 静态几何，导出 argv 与旧版逐字节一致）
+        ...(clip.keyframes ? { keyframes: clip.keyframes } : {}),
+        // M8：手绘遮罩（缺键 = 不遮罩，请求体与旧版逐字节一致）
+        ...(clip.mask ? { mask: clip.mask } : {}),
+        // M8-P0：外部 matte（绝对路径 + 可选类型；缺键 = 不接 matte）
+        ...(clip.mattePath ? { mattePath: clip.mattePath } : {}),
+        ...(clip.matteKind ? { matteKind: clip.matteKind } : {}),
         // v10：转场只在定义时带键（无转场时请求体与旧版逐字节一致）
         ...(clip.transitionIn ? { transitionIn: clip.transitionIn } : {}),
         ...(item ? { sourceDurationSec: item.meta.durationSec } : {}),
@@ -152,6 +182,7 @@ export function buildOverlayBase(project: Project): OverlayBase | null {
     const item = project.media[0]
     clips = [
       {
+        clipId: `media-${item.id}`,
         refVideoPath: item.path,
         timelineStartSec: 0,
         timelineEndSec: item.meta.durationSec,
@@ -170,6 +201,7 @@ export function buildOverlayBase(project: Project): OverlayBase | null {
     const ref = project.refVideo
     clips = [
       {
+        clipId: 'legacy-ref',
         refVideoPath: ref.path,
         timelineStartSec: 0,
         timelineEndSec: ref.meta.durationSec,
@@ -206,19 +238,57 @@ export function buildOverlayBase(project: Project): OverlayBase | null {
     clips.some((clip) => clip.isImage) ||
     // v3：上层轨道必须分层合成；静音轨必须走 trim 链补静音
     clips.some((clip) => (clip.trackIndex ?? 0) > 0) ||
-    clips.some((clip) => clip.muted === true)
+    clips.some((clip) => clip.muted === true) ||
+    // M8：有遮罩就必须走多输入路径（旧单输入 builder 没有逐段 alphamerge 插入点）
+    clips.some((clip) => clip.mask !== undefined) ||
+    // M8-P0：外部 matte 同理（需要独立输入 + 逐段 alpha 相乘）
+    clips.some((clip) => typeof clip.mattePath === 'string' && clip.mattePath.length > 0)
   return {
-    segments: clips.map(({ meta, vfrRaw, ...seg }) => {
+    segments: clips.map(({ meta, vfrRaw, clipId, ...seg }) => {
       void meta
       void vfrRaw
+      void clipId
       return seg
     }),
+    // M8：与 segments 同序的片段 id（遮罩的 clipId/png 契约靠它归属）
+    clipIds: clips.map((clip) => clip.clipId),
     multi,
     primaryMeta,
     anyNoAudio: clips.some((clip) => clip.hasAudio === false),
     anyVfrRaw: clips.some((clip) => clip.vfrRaw),
     audioTranscodeNeeded: clips.some((clip) => (clip.meta ? detectCompat(clip.meta).audioTranscodeNeeded : false))
   }
+}
+
+/**
+ * M8：把「本次导出里带手绘遮罩的段」逐段光栅化成 PNG，供主进程接 alphamerge。
+ *
+ * 尺寸用**导出目标画布**（spec.width/height），与主进程 `frameSize`、预览画笔同一坐标系。
+ * 顺序即 `base.segments` 里带 `mask` 的段顺序——主进程按同一顺序接 `maskPath`
+ * （OverlaySegment 没有 clipId，数量/顺序必须由这条唯一构造路径保证）。
+ * 无遮罩时返回空数组（请求体不落 `mediaMasks` 键，旧导出逐字节一致）。
+ *
+ * `rasterize` 可注入（jsdom 里没有 2D Canvas，测试用假光栅化验证归属与顺序）。
+ */
+export type MaskRasterizer = (
+  mask: MediaClipMask,
+  width: number,
+  height: number
+) => Promise<Uint8Array>
+
+export async function rasterizeExportMasks(
+  base: Pick<OverlayBase, 'segments' | 'clipIds'>,
+  width: number,
+  height: number,
+  rasterize: MaskRasterizer = rasterizeMask
+): Promise<Array<{ clipId: string; png: Uint8Array }>> {
+  const out: Array<{ clipId: string; png: Uint8Array }> = []
+  for (const [index, seg] of base.segments.entries()) {
+    if (!seg.mask) continue
+    const clipId = base.clipIds[index] ?? `mask-${index}`
+    out.push({ clipId, png: await rasterize(seg.mask, width, height) })
+  }
+  return out
 }
 
 /**
@@ -249,10 +319,24 @@ async function confirmHugeExport(
   frames: number,
   fps: Fps,
   outputDir: string,
-  kind: ExportKind
+  kind: ExportKind,
+  videoBitrateKbps?: number,
+  audioBitrateKbps?: number
 ): Promise<{ choice: DialogAnswer; estimateBytes: number; freeBytes?: number }> {
-  const estimate = await window.socut.export.estimate({ width, height, fps, frames, outputDir })
-  if (kind === 'pngSequence') return { choice: 'ok', estimateBytes: estimate.bytes, freeBytes: estimate.freeBytes }
+  const estimate = await window.socut.export.estimate({
+    width,
+    height,
+    fps,
+    frames,
+    outputDir,
+    kind,
+    ...(videoBitrateKbps !== undefined ? { videoBitrateKbps } : {}),
+    ...(audioBitrateKbps !== undefined ? { audioBitrateKbps } : {})
+  })
+  // PNG 出口本身就是产物，叠加出口的产物是小体积 H.264：两者都不该弹「改用 PNG / 空间不足」
+  if (kind === 'pngSequence' || kind === 'overlayMp4') {
+    return { choice: 'ok', estimateBytes: estimate.bytes, freeBytes: estimate.freeBytes }
+  }
   if (estimate.sufficientDisk && !estimate.recommendPng) {
     return { choice: 'ok', estimateBytes: estimate.bytes, freeBytes: estimate.freeBytes }
   }
@@ -275,10 +359,23 @@ async function autoConfirmHugeExport(
   height: number,
   frames: number,
   fps: Fps,
-  outputDir: string
+  outputDir: string,
+  kind: ExportKind,
+  videoBitrateKbps?: number,
+  audioBitrateKbps?: number
 ): Promise<{ choice: DialogAnswer; estimateBytes: number; freeBytes?: number }> {
-  const estimate = await window.socut.export.estimate({ width, height, fps, frames, outputDir })
-  if (!estimate.sufficientDisk) {
+  const estimate = await window.socut.export.estimate({
+    width,
+    height,
+    fps,
+    frames,
+    outputDir,
+    kind,
+    ...(videoBitrateKbps !== undefined ? { videoBitrateKbps } : {}),
+    ...(audioBitrateKbps !== undefined ? { audioBitrateKbps } : {})
+  })
+  // 叠加出口全程流式、产物是 H.264，ProRes 口径的「空间不足」在这里不成立
+  if (kind !== 'overlayMp4' && !estimate.sufficientDisk) {
     throw new GateError(
       `目标磁盘空间不足：预计 ${formatBytes(estimate.bytes)}，可用 ${formatBytes(estimate.freeBytes ?? 0)}`
     )
@@ -321,6 +418,12 @@ export async function runExport(
   const primaryMeta = base?.primaryMeta ?? null
 
   /**
+   * 音频一律重编码为 AAC：多视频混音后各源码率不一致，不存在可继承的“原始码率”，
+   * 统一按本次配置的码率压制（缺省 192 kbps）。
+   */
+  const audioBitrateKbps = input.audioBitrateKbps ?? DEFAULT_AUDIO_BITRATE_KBPS
+
+  /**
    * v10：可选目标画布。未选时保持旧行为；只有叠加出口吃画布，
    * 透明 MOV / PNG 序列仍只按工程分辨率。
    */
@@ -333,11 +436,15 @@ export async function runExport(
         })
       : null
   /**
-   * 只把「会改变画面几何」的画布下传给主进程：横屏 + contain 与旧行为等价，
+   * 只把「会改变画面几何」的画布下传给主进程：横屏 + contain 且跟随素材与旧行为等价，
    * 传下去只会凭空多一圈 scale，违背「默认导出 argv 逐字节不变」。
+   * 但横屏选了具体分辨率档位时必须下传，否则主进程不会缩放。
    */
   const canvasForRequest =
-    resolvedCanvas && (resolvedCanvas.kind !== 'landscape' || resolvedCanvas.fit !== 'contain')
+    resolvedCanvas &&
+    (resolvedCanvas.kind !== 'landscape' ||
+      resolvedCanvas.fit !== 'contain' ||
+      (input.canvas?.resolution !== undefined && input.canvas.resolution !== 'source'))
       ? { width: resolvedCanvas.width, height: resolvedCanvas.height, fit: resolvedCanvas.fit }
       : null
 
@@ -359,11 +466,11 @@ export async function runExport(
 
   /**
    * 帧形式必须跟着“帧到底交给谁”：
-   * 计划 C17 把管道主路径改成未压缩 rawvideo（PNG 压缩是吐吐量瓶颈），
-   * 但**落盘的路径**（PNG 序列出口、以及 frameDelivery='pngSequence' 的透明 MOV 回退）
-   * 写的就是文件名带 .png 的文件，拿到 raw 字节会产出“921600B 的假 PNG”（应用内实捕）。
+   * 计划 C17 把管道主路径改成未压缩 rawvideo（PNG 压缩是吐吐量瓶颈）；
+   * PNG 序列出口落的就是文件名带 .png 的**产物**，拿到 raw 字节会产出“921600B 的假 PNG”（应用内实捕）。
+   * v11 起导出流程内部不再有 PNG 中间帧：透明/叠加出口一律 raw 直送编码器。
    */
-  const framesToDisk = input.kind === 'pngSequence' || input.frameDelivery === 'pngSequence'
+  const framesToDisk = input.kind === 'pngSequence'
 
   const spec = await buildRenderJob({
     project,
@@ -382,19 +489,31 @@ export async function runExport(
 
   const frameSpec: FrameSpec = frameSpecOf(spec)
   const estimate = autoConfirm
-    ? await autoConfirmHugeExport(spec.width, spec.height, frames, fps, input.outputDir)
-    : await confirmHugeExport(spec.width, spec.height, frames, fps, input.outputDir, input.kind)
+    ? await autoConfirmHugeExport(
+        spec.width,
+        spec.height,
+        frames,
+        fps,
+        input.outputDir,
+        input.kind,
+        input.videoBitrateKbps,
+        audioBitrateKbps
+      )
+    : await confirmHugeExport(
+        spec.width,
+        spec.height,
+        frames,
+        fps,
+        input.outputDir,
+        input.kind,
+        input.videoBitrateKbps,
+        audioBitrateKbps
+      )
   if (estimate.choice === 'cancel') throw new GateError('已取消导出')
   let kind: ExportKind = input.kind
-  const frameDelivery = input.frameDelivery ?? 'pipe'
-  let directPipe = input.directPipe === true
   if (estimate.choice === 'png') {
-    if (input.kind === 'overlayMp4') {
-      // 磁盘紧张：改用直接管道合成，不落中间透明 MOV
-      directPipe = true
-    } else {
-      kind = 'pngSequence'
-    }
+    // 「改用 PNG 序列」只对透明 MOV 开放：帧序列本身就是产物，不需要再编码回容器
+    kind = 'pngSequence'
   }
 
   let fpsMode: 'cfr' | 'vfr' = 'cfr'
@@ -408,14 +527,9 @@ export async function runExport(
   registerExportJob(jobId, spec)
 
   /**
-   * 音频策略（v2 枚级）：单段且首段从 0s 起才允许直接 copy（与旧单输入一致）；
-   * 多段/trim 路径的音频要重编码时间轴，或者任一段无音轨/编码不可 copy → 统一 AAC。
+   * 音频策略：一律 AAC 重编码（码率见上），不再有 copy 分支。
    */
-  // v10：显式画布会强制主进程走多输入（音频随之重编码），这里同口径直接给 aac
-  const audioMode: 'copy' | 'aac' =
-    !base || base.multi || base.anyNoAudio || base.audioTranscodeNeeded || canvasForRequest !== null
-      ? 'aac'
-      : 'copy'
+  const audioMode: 'copy' | 'aac' = 'aac'
 
   /**
    * v7：音频轨 → 导出输入。
@@ -495,12 +609,20 @@ export async function runExport(
       : []
   const audioMix = [...externalAudio, ...embeddedAudio]
 
+  /**
+   * M8：手绘遮罩 → PNG 字节（尺寸 = 导出目标画布 spec.width/height）。
+   * 只服务叠加出口；没有遮罩时返回空数组、请求体不落 `mediaMasks` 键
+   * （旧工程导出请求与现在逐字节一致）。
+   */
+  const mediaMasks = isOverlay && base ? await rasterizeExportMasks(base, spec.width, spec.height) : []
+
   const request: ExportRequest = {
     jobId,
     target: { kind, outputDir: input.outputDir, fileName: input.fileName },
     frameSpec,
-    frameDelivery,
     codec: input.codec ?? 'prores4444',
+    // M8：手绘遮罩 PNG（缺省不落键）；主进程写盘后接 maskPath 并走 alphamerge
+    ...(mediaMasks.length > 0 ? { mediaMasks } : {}),
     // v10：响度标准化；off/缺省不落键（argv 与旧版逐字节一致）
     ...(project.audioMastering === 'social' || project.audioMastering === 'broadcast'
       ? { audioMastering: project.audioMastering }
@@ -512,12 +634,13 @@ export async function runExport(
             segments: base.segments,
             /** v1 兼容字段：首段即旧单输入路径的参考视频 */
             refVideoPath: base.segments[0]?.refVideoPath ?? '',
+            // M7-E：图形层 z 档（缺省 aboveMedia 不落键 → argv 与旧版逐字节一致）
+            ...(project.graphicsZ ? { graphicsZ: project.graphicsZ } : {}),
             refMeta: primaryMeta,
             audioMode,
             fpsMode,
             spanStartSec: frameTimeSec(spec.startFrame, fps),
             spanEndSec: frameTimeSec(spec.endFrame, fps),
-            directPipe,
             // 水印：主进程按本次输出尺寸等比换算后作为最后一层 overlay
             ...(watermark?.enabled
               ? {
@@ -530,7 +653,15 @@ export async function runExport(
               : {}),
             // v10：目标画布与画质档（缺省时不落键，argv 与旧版逐字节一致）
             ...(canvasForRequest ? { canvas: canvasForRequest } : {}),
-            ...(input.quality ? { quality: input.quality } : {})
+            ...(input.quality ? { quality: input.quality } : {}),
+            ...(input.videoCodec ? { videoCodec: input.videoCodec } : {}),
+            ...(input.videoBitrateKbps !== undefined ? { videoBitrateKbps: input.videoBitrateKbps } : {}),
+            // M9：CRF / preset / 位深 / 色彩范围（缺省不落键 → argv 与旧版逐字节一致）
+            ...(input.crf !== undefined ? { crf: input.crf } : {}),
+            ...(input.encoderPreset ? { encoderPreset: input.encoderPreset } : {}),
+            ...(input.bitDepth === 10 ? { bitDepth: 10 as const } : {}),
+            ...(input.colorRange ? { colorRange: input.colorRange } : {}),
+            audioBitrateKbps
           }
         }
       : {})

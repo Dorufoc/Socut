@@ -5,10 +5,11 @@ import {
   DEFAULT_CLIP_DURATION_SEC,
   DEFAULT_FPS,
   DEFAULT_FONT_ID,
+  DEFAULT_SEQUENCE_ID,
+  DEFAULT_SEQUENCE_NAME,
   FONT_SCALE_MAX,
   FONT_SCALE_MIN,
-  MAX_AUDIO_TRACKS,
-  MAX_MEDIA_TRACKS,
+  MAX_SEQUENCES,
   MEDIA_BIN_ID_MAX_LENGTH,
   MEDIA_BIN_MAX_COUNT,
   MEDIA_BIN_NAME_MAX_LENGTH,
@@ -16,6 +17,7 @@ import {
   MEDIA_TAG_MAX_LENGTH,
   MIN_CLIP_DURATION_SEC,
   PROJECT_VERSION,
+  TRACK_SOFT_LIMIT,
   TRANSITION_DURATION
 } from './constants'
 import { DEFAULT_PRESET_ID, PRESET_IDS } from './presets'
@@ -29,6 +31,16 @@ import {
   snapTimeToFrame
 } from './fps'
 import { normalizeMediaVideo } from './mediaClipVideo'
+import { normalizeMediaClipKey } from './keying'
+import { normalizeKeyframeTracks } from './keyframes'
+import { normalizeSequenceName } from './sequence'
+import {
+  DEFAULT_TEXT_ANIMATION,
+  DEFAULT_TEXT_PRESET_ID,
+  TEXT_ELEMENT_TRACK_ID,
+  getTextPreset,
+  isTextPresetId
+} from './textPresets'
 import { normalizeMediaStab } from './mediaStab'
 import { normalizeClipAudio, normalizeClipSpeed, speedValueOf } from './mediaClipAudio'
 import { MIN_AUDIO_CLIP_SEC, normalizeLayer } from './audioClips'
@@ -53,18 +65,26 @@ import type {
   LeftTabValue,
   MediaBin,
   MediaClip,
+  MediaClipMask,
   MediaClipTransition,
   MediaItem,
   MediaTrack,
+  MaskStroke,
   PresetId,
   Project,
   Rational,
   RefVideo,
   Resolution,
+  SequenceSnapshot,
   SizeToken,
   StyleOverrides,
   SubtitleClip,
   SubtitleTrack,
+  TextElementAnimation,
+  TextElementClip,
+  TextElementPresetId,
+  TextElementStyle,
+  TextElementStyleOverrides,
   Track,
   TransitionType,
   VideoMeta,
@@ -82,11 +102,12 @@ export const PROJECT_FILE_EXTENSION = 'socut.json'
 export { AUTOSAVE_FILE }
 
 /**
- * 左侧栏 Tab 清单（P6）：素材库 / 包装 / 导出 / 进度。
+ * 左侧栏 Tab 清单（P6）：素材库 / 转场 / 包装 / 导出 / 进度。
  * 「包装」把原来的字幕与水印两栏合并，旧工程里的 'captions' / 'watermark'
- * 在读入时一律迁到 'wrap'（见 normalizeLeftTab）。
+ * 在读入时一律迁到 'wrap'（见 normalizeLeftTab）；v11 新增「转场」，
+ * 转场样式从这里长按拖到时间轴缝隙上生效，不再挂在片段检查器里。
  */
-export const LEFT_TABS = ['media', 'wrap', 'export', 'progress'] as const
+export const LEFT_TABS = ['media', 'transition', 'wrap', 'export', 'progress'] as const
 
 /** 旧版 Tab 值 → 现在的位置；只为兼容旧工程，写新值时不要再产出它们。 */
 const LEGACY_LEFT_TABS: Record<string, LeftTabValue> = { captions: 'wrap', watermark: 'wrap' }
@@ -154,6 +175,8 @@ function normalizeClip(value: unknown, fps: Fps): SubtitleClip | null {
   if (typeof overrides['compact'] === 'boolean') styleOverrides.compact = overrides['compact']
   const fontScale = normalizeFontScale(overrides['fontScale'])
   if (fontScale) styleOverrides.fontScale = fontScale
+  // M6：参数关键帧（可选；全非法时整键丢弃 → 旧工程 JSON 形状不变）
+  const keyframes = normalizeKeyframeTracks(value['keyframes'])
 
   return {
     id,
@@ -175,7 +198,124 @@ function normalizeClip(value: unknown, fps: Fps): SubtitleClip | null {
         ? { ruleLeadInFrames: Math.round(animation['ruleLeadInFrames']) }
         : {})
     },
-    fontId: typeof value['fontId'] === 'string' && value['fontId'].length > 0 ? value['fontId'] : DEFAULT_FONT_ID
+    fontId: typeof value['fontId'] === 'string' && value['fontId'].length > 0 ? value['fontId'] : DEFAULT_FONT_ID,
+    ...(keyframes ? { keyframes } : {})
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* M7：文本元素归一与工厂                                                     */
+/* ------------------------------------------------------------------------- */
+
+const TEXT_STYLE_NUMBER_LIMITS: ReadonlyArray<
+  [key: keyof TextElementStyle, min: number, max: number]
+> = [
+  ['sizePx', 8, 400],
+  ['weight', 100, 900],
+  ['trackingPx', -10, 50],
+  ['lineHeight', 0.8, 3],
+  ['maxLines', 1, 6],
+  ['anchorXPct', 0, 100],
+  ['anchorYPct', 0, 100],
+  ['strokeWidthPx', 0, 24],
+  ['shadowBlurPx', 0, 64],
+  ['shadowOffsetXPx', -64, 64],
+  ['shadowOffsetYPx', -64, 64]
+]
+
+/** 文本元素样式覆盖：只保留已知键 + 合法类型（颜色非法整键丢弃），数值夹到区间。 */
+function normalizeTextStyleOverrides(value: unknown): TextElementStyleOverrides {
+  if (!isRecord(value)) return {}
+  const out: TextElementStyleOverrides = {}
+  if (typeof value['fontId'] === 'string' && value['fontId'].length > 0) out.fontId = value['fontId']
+  for (const [key, min, max] of TEXT_STYLE_NUMBER_LIMITS) {
+    const raw = value[key]
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) continue
+    ;(out as Record<string, unknown>)[key] = Math.min(max, Math.max(min, raw))
+  }
+  if (value['align'] === 'left' || value['align'] === 'center' || value['align'] === 'right') out.align = value['align']
+  for (const key of ['color', 'strokeColor', 'shadowColor'] as const) {
+    const raw = value[key]
+    if (typeof raw === 'string' && isValidColor(raw)) out[key] = raw
+  }
+  if (isRecord(value['plate'])) {
+    const raw = value['plate']
+    const plate: Partial<TextElementStyle['plate']> = {}
+    if (typeof raw['enabled'] === 'boolean') plate.enabled = raw['enabled']
+    if (typeof raw['color'] === 'string' && isValidColor(raw['color'])) plate.color = raw['color']
+    if (typeof raw['opacity'] === 'number' && Number.isFinite(raw['opacity'])) plate.opacity = Math.min(1, Math.max(0, raw['opacity']))
+    if (typeof raw['paddingXPx'] === 'number') plate.paddingXPx = Math.min(96, Math.max(0, raw['paddingXPx']))
+    if (typeof raw['paddingYPx'] === 'number') plate.paddingYPx = Math.min(96, Math.max(0, raw['paddingYPx']))
+    if (typeof raw['radiusPx'] === 'number') plate.radiusPx = Math.min(999, Math.max(0, raw['radiusPx']))
+    // 只保留用户显式改过的键：预设自带的底色/圆角不能被一次"只改透明度"冲掉
+    // （真正的合并发生在渲染侧 resolveTextStyle：默认 → 预设 → 覆盖）
+    if (Object.keys(plate).length > 0) out.plate = plate
+  }
+  return out
+}
+
+/** 文本元素动画：时长夹 0.05–2s、缓动必须是已知无过冲曲线、上浮量 0–200px。 */
+function normalizeTextElementAnimation(value: unknown): TextElementAnimation {
+  const raw = isRecord(value) ? value : {}
+  const inDuration = numberOr(raw['inDurationSec'], DEFAULT_TEXT_ANIMATION.inDurationSec)
+  const outDuration = numberOr(raw['outDurationSec'], DEFAULT_TEXT_ANIMATION.outDurationSec)
+  const rise = numberOr(raw['risePx'], DEFAULT_TEXT_ANIMATION.risePx)
+  return {
+    inDurationSec: Math.min(2, Math.max(0.05, inDuration)),
+    outDurationSec: Math.min(2, Math.max(0.05, outDuration)),
+    easing: isEasingKey(raw['easing']) ? raw['easing'] : DEFAULT_TEXT_ANIMATION.easing,
+    risePx: Math.min(200, Math.max(0, rise))
+  }
+}
+
+export function normalizeTextElementClip(
+  value: unknown,
+  fps: Fps,
+  trackIds: ReadonlySet<string> = new Set<string>()
+): TextElementClip | null {
+  if (!isRecord(value)) return null
+  const text = typeof value['text'] === 'string' ? value['text'].slice(0, 500) : ''
+  if (text.trim().length === 0) return null
+  const id = typeof value['id'] === 'string' && value['id'].length > 0 ? value['id'] : createId('textclip')
+  const startTime = snapTimeToFrame(Math.max(0, numberOr(value['startTime'], 0)), fps)
+  const endTime = snapTimeToFrame(Math.max(startTime + MIN_CLIP_DURATION_SEC, numberOr(value['endTime'], 0)), fps)
+  const presetId = isTextPresetId(value['presetId']) ? value['presetId'] : DEFAULT_TEXT_PRESET_ID
+  const keyframes = normalizeKeyframeTracks(value['keyframes'])
+  // 文本轨固定一条；旧/脏数据里的 trackId 一律投影回固定 id（M7 第一阶段只有一条文本轨）
+  void trackIds
+  return {
+    id,
+    text,
+    presetId,
+    styleOverrides: normalizeTextStyleOverrides(value['styleOverrides']),
+    startTime,
+    endTime: Math.max(endTime, snapTimeToFrame(startTime + MIN_CLIP_DURATION_SEC, fps)),
+    trackId: TEXT_ELEMENT_TRACK_ID,
+    animation: normalizeTextElementAnimation(value['animation']),
+    ...(keyframes ? { keyframes } : {})
+  }
+}
+
+/** 文本元素工厂（store / CLI 新建共用；默认文案取预设的示例文案）。 */
+export function createTextElementClip(input: {
+  startTime?: number
+  fps: Fps
+  presetId?: TextElementPresetId
+  text?: string
+  durationSec?: number
+}): TextElementClip {
+  const preset = getTextPreset(input.presetId ?? DEFAULT_TEXT_PRESET_ID)
+  const startTime = snapTimeToFrame(Math.max(0, input.startTime ?? 0), input.fps)
+  const endTime = snapTimeToFrame(startTime + Math.max(MIN_CLIP_DURATION_SEC, input.durationSec ?? DEFAULT_CLIP_DURATION_SEC), input.fps)
+  return {
+    id: createId('textclip'),
+    text: input.text ?? preset.sampleText,
+    presetId: preset.id,
+    styleOverrides: {},
+    startTime,
+    endTime,
+    trackId: TEXT_ELEMENT_TRACK_ID,
+    animation: { ...DEFAULT_TEXT_ANIMATION }
   }
 }
 
@@ -183,8 +323,7 @@ function normalizeClip(value: unknown, fps: Fps): SubtitleClip | null {
  * 字号缩放：非数字丢弃，越界夹到上下限，与 1 相差不到 0.5%（低于滑杆粒度）视为未设置，
  * 避免一件“看似没改”的片段在工程 JSON 里留下无意义的 0.001 级噪声。
  */
-function normalizeFontScale(value: unknown): { title?: number; subtitle?: number } | undefined {
-  if (!isRecord(value)) return undefined
+function normalizeFontScale(value: unknown): { title?: number; subtitle?: number } | undefined {  if (!isRecord(value)) return undefined
   const out: { title?: number; subtitle?: number } = {}
   for (const role of ['title', 'subtitle'] as const) {
     const raw = value[role]
@@ -391,7 +530,7 @@ function normalizeMediaItem(value: unknown): MediaItem | null {
  *
  * 三条兜底：
  * - 至少一条媒体轨 / 音频轨（新素材要有地方落）；
- * - id 去重、数量夹到上限；
+ * - id 去重、数量夹到软上限；
  * - 片段引用了不存在的轨道（手改 JSON / 旧工程）时，按 `layer` 换算或退回第一条。
  */
 function normalizeTrackName(value: Record<string, unknown>, fallback: string): string {
@@ -423,7 +562,7 @@ function normalizeMediaTracks(value: unknown, referenced: readonly string[]): Me
   const tracks: MediaTrack[] = []
   const seen = new Set<string>()
   const push = (track: MediaTrack): void => {
-    if (tracks.length >= MAX_MEDIA_TRACKS || seen.has(track.id)) return
+    if (tracks.length >= TRACK_SOFT_LIMIT || seen.has(track.id)) return
     seen.add(track.id)
     tracks.push(track)
   }
@@ -435,7 +574,7 @@ function normalizeMediaTracks(value: unknown, referenced: readonly string[]): Me
     })
   }
   for (const id of referenced) {
-    if (tracks.length >= MAX_MEDIA_TRACKS) break
+    if (tracks.length >= TRACK_SOFT_LIMIT) break
     push({ id, kind: 'media', name: `媒体 ${tracks.length + 1}`, muted: false, hidden: false, locked: false })
   }
   if (tracks.length === 0) tracks.push(makeMediaTrack(0))
@@ -446,7 +585,7 @@ function normalizeAudioTracks(value: unknown, referenced: readonly string[]): Au
   const tracks: AudioTrack[] = []
   const seen = new Set<string>()
   const push = (track: AudioTrack): void => {
-    if (tracks.length >= MAX_AUDIO_TRACKS || seen.has(track.id)) return
+    if (tracks.length >= TRACK_SOFT_LIMIT || seen.has(track.id)) return
     seen.add(track.id)
     tracks.push(track)
   }
@@ -458,7 +597,7 @@ function normalizeAudioTracks(value: unknown, referenced: readonly string[]): Au
     })
   }
   for (const id of referenced) {
-    if (tracks.length >= MAX_AUDIO_TRACKS) break
+    if (tracks.length >= TRACK_SOFT_LIMIT) break
     push({ id, kind: 'audio', name: `音频 ${tracks.length + 1}`, muted: false, hidden: false, locked: false })
   }
   if (tracks.length === 0) tracks.push(makeAudioTrack(0))
@@ -559,6 +698,19 @@ function normalizeMediaClip(
   const speed = normalizeClipSpeed(value['speed'])
   // v10：入场转场（无效时整键丢弃）
   const transitionIn = normalizeTransition(value['transitionIn'], fps)
+  // M8：抠像（全默认 → undefined → 整键不落盘）
+  const key = normalizeMediaClipKey(value['key'])
+  // M6-E：媒体段关键帧（缺省/全非法 → undefined → 整键不落盘）
+  const keyframes = normalizeKeyframeTracks(value['keyframes'])
+  // M8：手绘遮罩（空/全非法 → undefined → 整键不落盘）
+  const mask = normalizeMediaClipMask(value['mask'])
+  // M8-P0：外部 matte（路径必须非空；类型只认显式 image/video，缺省由调用方按扩展名推断）
+  const mattePathRaw = value['mattePath']
+  const mattePath =
+    typeof mattePathRaw === 'string' && mattePathRaw.trim().length > 0 ? mattePathRaw.trim() : undefined
+  const matteKindRaw = value['matteKind']
+  const matteKind =
+    mattePath && (matteKindRaw === 'image' || matteKindRaw === 'video') ? matteKindRaw : undefined
   // 时长强制对齐：任何一份手工改写的 JSON 也要保证
   // `sourceOutSec - sourceInSec === (timelineEndSec - timelineStartSec) × 倍速`（1x 时即旧恒等式）
   const sOut = snapTimeToFrame(sIn + duration * speedValueOf(speed), fps)
@@ -578,8 +730,67 @@ function normalizeMediaClip(
     ...(audio ? { audio } : {}),
     ...(speed ? { speed } : {}),
     // v10：转场；无效/缺省时整键不存在
-    ...(transitionIn ? { transitionIn } : {})
+    ...(key ? { key } : {}),
+    ...(transitionIn ? { transitionIn } : {}),
+    // M6-E：媒体段关键帧（缺省时整键不存在，旧工程读盘后写回逐字节一致）
+    ...(keyframes ? { keyframes } : {}),
+    // M8：手绘遮罩（缺省时整键不存在）
+    ...(mask ? { mask } : {}),
+    // M8-P0：外部 matte（路径 + 可选类型）
+    ...(mattePath ? { mattePath } : {}),
+    ...(matteKind ? { matteKind } : {})
   }
+}
+
+/** M8：手绘遮罩的笔刷上限（保护性上限：UI 不做虚拟化，工程 JSON 别被一笔画爆）。 */
+export const MASK_MAX_STROKES = 200
+export const MASK_MAX_POINTS_PER_STROKE = 2000
+export const MASK_RADIUS_RANGE = { min: 0.1, max: 50 } as const
+
+/**
+ * M8：归一化手绘遮罩（schema 读盘、store 写入、CLI 入参共用）。
+ * - 未知 mode / 非法半径 / 无有效点的笔画丢弃；
+ * - 点坐标夹到 [0,1] 并保留 5 位小数（够细，也不会让 JSON 膨胀）；
+ * - 一笔都没有 → undefined（工程 JSON 里整键不出现）。
+ */
+export function normalizeMediaClipMask(raw: unknown): MediaClipMask | undefined {
+  if (!isRecord(raw)) return undefined
+  const strokesRaw = Array.isArray(raw['strokes']) ? raw['strokes'] : []
+  const round5 = (value: number): number => Math.round(value * 1e5) / 1e5
+  const strokes: MaskStroke[] = []
+  for (const item of strokesRaw.slice(0, MASK_MAX_STROKES)) {
+    if (!isRecord(item)) continue
+    const modeRaw = item['mode']
+    const mode = modeRaw === 'restore' ? 'restore' : modeRaw === 'hide' ? 'hide' : null
+    if (!mode) continue
+    const radiusRaw = item['radiusPct']
+    if (typeof radiusRaw !== 'number' || !Number.isFinite(radiusRaw)) continue
+    const radiusPct =
+      Math.round(
+        Math.min(MASK_RADIUS_RANGE.max, Math.max(MASK_RADIUS_RANGE.min, radiusRaw)) * 1000
+      ) / 1000
+    const pointsRaw = Array.isArray(item['points']) ? item['points'] : []
+    const points: Array<{ x: number; y: number }> = []
+    for (const pointRaw of pointsRaw.slice(0, MASK_MAX_POINTS_PER_STROKE)) {
+      if (!isRecord(pointRaw)) continue
+      const x = pointRaw['x']
+      const y = pointRaw['y']
+      if (typeof x !== 'number' || !Number.isFinite(x) || typeof y !== 'number' || !Number.isFinite(y)) continue
+      points.push({ x: round5(Math.min(1, Math.max(0, x))), y: round5(Math.min(1, Math.max(0, y))) })
+    }
+    if (points.length === 0) continue
+    strokes.push({ mode, radiusPct, points })
+  }
+  if (strokes.length === 0) return undefined
+  // M8：羽化（0 = 硬边，不落盘；上限 20% 画面宽，超过只会把整段糊成一片）
+  const featherRaw = raw['featherPct']
+  const featherPct =
+    typeof featherRaw === 'number' && Number.isFinite(featherRaw)
+      ? Math.round(Math.min(20, Math.max(0, featherRaw)) * 1000) / 1000
+      : 0
+  // M8：反向遮罩（黑白互换）；只有显式 true 才落盘，缺省/false 不写键（旧工程零回归）
+  const invert = raw['invert'] === true ? true : undefined
+  return { strokes, ...(featherPct > 0 ? { featherPct } : {}), ...(invert ? { invert: true } : {}) }
 }
 
 function isDuckingLevel(value: unknown): value is AudioDuckingLevel {
@@ -677,6 +888,59 @@ function normalizeUi(raw: Record<string, unknown>): NonNullable<Project['ui']> {
   return leftTab ? { ...rest, leftTab } : rest
 }
 
+/**
+ * v4：归一一条**非活动**序列快照。结构与活动序列完全同形，只是不参与当前编辑。
+ * 素材池是工程级共享的（`Project.media`），因此这里只校验片段引用的 mediaId 仍存在。
+ */
+function normalizeSequenceSnapshot(
+  value: unknown,
+  fps: Fps,
+  mediaIds: Set<string>
+): SequenceSnapshot | null {
+  if (!isRecord(value)) return null
+  const id = typeof value['id'] === 'string' && value['id'].length > 0 ? value['id'] : null
+  if (!id) return null
+  const name = normalizeSequenceName(value['name'], '序列')
+  const mediaClipsRaw = Array.isArray(value['mediaClips']) ? value['mediaClips'] : []
+  const audioClipsRaw = Array.isArray(value['audioClips']) ? value['audioClips'] : []
+  const mediaTracks = normalizeMediaTracks(value['mediaTracks'], collectTrackIds(mediaClipsRaw))
+  const audioTracks = normalizeAudioTracks(value['audioTracks'], collectTrackIds(audioClipsRaw))
+  const subtitleTrack = normalizeSubtitleTrack(value['subtitleTrack'])
+  const clips = (Array.isArray(value['clips']) ? value['clips'] : [])
+    .map((clip) => normalizeClip(clip, fps))
+    .filter((clip): clip is SubtitleClip => clip !== null)
+    .sort((a, b) => a.startTime - b.startTime)
+  const mediaClips = mediaClipsRaw
+    .map((item) => normalizeMediaClip(item, fps, mediaIds, mediaTracks))
+    .filter((item): item is MediaClip => item !== null)
+    .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
+  const audioClips = audioClipsRaw
+    .map((item) => normalizeAudioClip(item, fps, mediaIds, audioTracks))
+    .filter((item): item is AudioClip => item !== null)
+    .sort((a, b) => a.timelineStartSec - b.timelineStartSec)
+  const audioMastering = normalizeAudioMastering(value['audioMastering'])
+  const graphicsZ = value['graphicsZ'] === 'belowMedia' ? ('belowMedia' as const) : undefined
+  const textClips = (Array.isArray(value['textClips']) ? value['textClips'] : [])
+    .map((item) => normalizeTextElementClip(item, fps, new Set<string>()))
+    .filter((item): item is TextElementClip => item !== null)
+    .sort((a, b) => a.startTime - b.startTime)
+  return {
+    id,
+    name,
+    clips,
+    mediaClips,
+    mediaTracks,
+    audioTracks,
+    subtitleTrack,
+    ...(audioClips.length > 0 ? { audioClips } : {}),
+    ...(textClips.length > 0 ? { textClips } : {}),
+    ...(audioMastering ? { audioMastering } : {}),
+    // M7-E：默认 aboveMedia 不落盘
+    ...(graphicsZ ? { graphicsZ } : {}),
+    ...(graphicsZ ? { graphicsZ } : {})
+  }
+}
+
 /** 把未知 JSON 归一为 Project；结构完全不可用时返回 null。 */
 export function normalizeProject(raw: unknown): Project | null {
   if (!isRecord(raw)) return null
@@ -729,6 +993,28 @@ export function normalizeProject(raw: unknown): Project | null {
   const ui = isRecord(migrated['ui']) ? normalizeUi(migrated['ui']) : undefined
   const watermark = normalizeWatermark(migrated['watermark'])
   const audioMastering = normalizeAudioMastering(migrated['audioMastering'])
+  const graphicsZ = migrated['graphicsZ'] === 'belowMedia' ? ('belowMedia' as const) : undefined
+  const textClips = (Array.isArray(migrated['textClips']) ? migrated['textClips'] : [])
+    .map((item) => normalizeTextElementClip(item, fps, new Set<string>()))
+    .filter((item): item is TextElementClip => item !== null)
+    .sort((a, b) => a.startTime - b.startTime)
+  // v4：活动序列的 id/名字（默认值不落盘；非活动序列快照逐个归一，去重且限制总数）
+  const activeId =
+    typeof migrated['activeSequenceId'] === 'string' && migrated['activeSequenceId'].length > 0
+      ? migrated['activeSequenceId']
+      : DEFAULT_SEQUENCE_ID
+  const activeName = normalizeSequenceName(migrated['activeSequenceName'], DEFAULT_SEQUENCE_NAME)
+  const seenSequenceIds = new Set<string>([activeId])
+  const sequences: SequenceSnapshot[] = []
+  if (Array.isArray(migrated['sequences'])) {
+    for (const item of migrated['sequences']) {
+      if (sequences.length >= MAX_SEQUENCES - 1) break
+      const snapshot = normalizeSequenceSnapshot(item, fps, mediaIds)
+      if (!snapshot || seenSequenceIds.has(snapshot.id)) continue
+      seenSequenceIds.add(snapshot.id)
+      sequences.push(snapshot)
+    }
+  }
   return {
     version: PROJECT_VERSION,
     name: typeof migrated['name'] === 'string' && migrated['name'].length > 0 ? migrated['name'] : '未命名工程',
@@ -743,15 +1029,26 @@ export function normalizeProject(raw: unknown): Project | null {
     subtitleTrack,
     // v7：没有音频段的工程不写这个键（旧工程 JSON 不变）
     ...(audioClips.length > 0 ? { audioClips } : {}),
+    // M7：没有文本元素的工程不写这个键
+    ...(textClips.length > 0 ? { textClips } : {}),
     ...(watermark ? { watermark } : {}),
     // v10：off/空分组不落盘（旧工程 JSON 不变）
     ...(audioMastering ? { audioMastering } : {}),
+    // M7-E：默认 aboveMedia 不落盘
+    ...(graphicsZ ? { graphicsZ } : {}),
     ...(mediaBins ? { mediaBins } : {}),
-    ...(ui ? { ui } : {})
+    ...(ui ? { ui } : {}),
+    // v4：单序列工程三个键都不出现（工程 JSON 与 v3 逐字节一致）
+    ...(activeId === DEFAULT_SEQUENCE_ID ? {} : { activeSequenceId: activeId }),
+    ...(activeName === DEFAULT_SEQUENCE_NAME ? {} : { activeSequenceName: activeName }),
+    ...(sequences.length > 0 ? { sequences } : {})
   }
 }
 
-/** 旧工程历史层号 → 轨道条数（连续 0..max；没有任何片段时也给一条空轨）。 */
+/**
+ * 旧工程历史层号 → 轨道条数（连续 0..max，最多夹到 `TRACK_SOFT_LIMIT` 条；
+ * 没有任何片段时也给一条空轨）。
+ */
 function legacyTrackCount(clipsRaw: unknown, max: number): number {
   let maxLayer = -1
   if (Array.isArray(clipsRaw)) {
@@ -788,11 +1085,11 @@ function applyTrackMigration(project: Record<string, unknown>): void {
   const mediaClipsRaw = project['mediaClips']
   const audioClipsRaw = project['audioClips']
   project['mediaTracks'] = Array.from(
-    { length: legacyTrackCount(mediaClipsRaw, MAX_MEDIA_TRACKS) },
+    { length: legacyTrackCount(mediaClipsRaw, TRACK_SOFT_LIMIT) },
     (_, index) => makeMediaTrack(index)
   )
   project['audioTracks'] = Array.from(
-    { length: legacyTrackCount(audioClipsRaw, MAX_AUDIO_TRACKS) },
+    { length: legacyTrackCount(audioClipsRaw, TRACK_SOFT_LIMIT) },
     (_, index) => makeAudioTrack(index)
   )
   project['subtitleTrack'] = makeSubtitleTrack()

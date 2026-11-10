@@ -1,4 +1,4 @@
-import { MAX_AUDIO_TRACKS, MAX_MEDIA_TRACKS, SUBTITLE_TRACK_ID } from './constants'
+import { SUBTITLE_TRACK_ID, TRACK_SOFT_LIMIT } from './constants'
 import type {
   AudioClip,
   AudioTrack,
@@ -151,15 +151,19 @@ export function nextTrackName(base: string, tracks: readonly Track[]): string {
   return `${base} ${n}`
 }
 
-/** 在**最上层**新增一条媒体轨（数组末尾 = 顶层）；达到上限时原样返回。 */
+/**
+ * 在**最上层**新增一条媒体轨（数组末尾 = 顶层）。
+ * 达到 `TRACK_SOFT_LIMIT` 软上限时原样返回（调用方据此提示“已达软上限”）。
+ * 注意这是保护性上限，不是产品语义上的“最多 8 条”。
+ */
 export function addMediaTrack(tracks: MediaTrack[]): MediaTrack[] {
-  if (tracks.length >= MAX_MEDIA_TRACKS) return tracks
+  if (tracks.length >= TRACK_SOFT_LIMIT) return tracks
   return [...tracks, makeMediaTrack(nextTrackNumber(tracks), { name: nextTrackName('媒体', tracks) })]
 }
 
-/** 在最上层新增一条音频轨；达到上限时原样返回。 */
+/** 在最上层新增一条音频轨（同一套软上限口径）；达到软上限时原样返回。 */
 export function addAudioTrack(tracks: AudioTrack[]): AudioTrack[] {
-  if (tracks.length >= MAX_AUDIO_TRACKS) return tracks
+  if (tracks.length >= TRACK_SOFT_LIMIT) return tracks
   return [...tracks, makeAudioTrack(nextTrackNumber(tracks), { name: nextTrackName('音频', tracks) })]
 }
 

@@ -1,19 +1,32 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import { DEFAULT_FPS, fpsToString } from '@shared/constants'
+import {
+  DEFAULT_AUDIO_BITRATE_KBPS,
+  DEFAULT_EXPORT_RESOLUTION,
+  DEFAULT_FPS,
+  DEFAULT_VIDEO_BITRATE_TIER,
+  DEFAULT_VIDEO_CODEC,
+  EXPORT_AUDIO_BITRATE_PRESETS
+} from '@shared/constants'
+import { resolveExportCanvas, videoBitrateKbpsOf, type ResolvedExportCanvas } from '@shared/exportPresets'
+import { sanitizeFileName } from '@shared/fileName'
+import { framesToDurationSec } from '@shared/fps'
 import { TEXT } from '@shared/i18n'
 import { formatBytes } from '@shared/sizeEstimate'
+import { formatDuration } from '@shared/timecode'
 import type {
   AudioMastering,
+  ExportBitrateTier,
   ExportCanvasKind,
   ExportCanvasSelection,
   ExportFit,
   ExportKind,
-  ExportQuality,
-  ExportResolutionTier,
+  ExportResolutionChoice,
+  Fps,
   JobPhase,
   RenderJobSpec,
   SizeEstimate,
-  TransparentCodec
+  TransparentCodec,
+  VideoCodec
 } from '@shared/types'
 import { overlayCanvasFor, useExportJob } from '../hooks/useExportJob'
 import { useCoverExport } from '../hooks/useCoverExport'
@@ -23,7 +36,7 @@ import { gateBlocked, useUiStore } from '../state/uiStore'
 import { Expander } from '../components/ui/Expander'
 import { InfoBar } from '../components/ui/InfoBar'
 
-/** 导出面板（规格 §2.3 / §3.1 / v10 多画布）。叠加 MP4 支持画布多选与批量。 */
+/** 导出面板（剪映专业版式分区）：导出位置 → 范围 → 画布 → 画质 → 音量 → 摘要 → 导出。 */
 
 const LAST_DIR_KEY = 'socut.lastOutputDir'
 const CANVAS_ORDER: ExportCanvasKind[] = ['landscape', 'portrait', 'square']
@@ -37,6 +50,30 @@ const PREVIEW_LABELS: Record<ExportCanvasKind, string> = {
   portrait: '9:16',
   square: '1:1'
 }
+const FIT_LABELS: Record<ExportFit, string> = {
+  cover: '裁切填满',
+  contain: '完整显示'
+}
+type AudioPreset = '128' | '192' | '256' | '320' | 'custom'
+const RESOLUTION_OPTIONS: { value: ExportResolutionChoice; label: string }[] = [
+  { value: '480', label: TEXT.export.resolution480 },
+  { value: '720', label: TEXT.export.resolution720 },
+  { value: '1080', label: TEXT.export.resolution1080 },
+  { value: '1440', label: TEXT.export.resolution2k },
+  { value: '2160', label: TEXT.export.resolution4k }
+]
+const BITRATE_OPTIONS: { value: ExportBitrateTier; label: string }[] = [
+  { value: 'low', label: TEXT.export.bitrateLow },
+  { value: 'standard', label: TEXT.export.bitrateStandard },
+  { value: 'high', label: TEXT.export.bitrateHigh },
+  { value: 'custom', label: TEXT.export.bitrateCustom }
+]
+const CODEC_OPTIONS: { value: VideoCodec; label: string }[] = [
+  { value: 'avc', label: TEXT.export.codecAvc },
+  { value: 'hevc', label: TEXT.export.codecHevc },
+  { value: 'av1', label: TEXT.export.codecAv1 }
+]
+const TRANSPARENT_SUMMARY = '透明 MOV · PNG 序列'
 const TERMINAL: JobPhase[] = ['done', 'failed', 'cancelled']
 type StatusPhase = JobPhase | 'pending'
 const STATUS_LABELS: Record<StatusPhase, string> = {
@@ -55,6 +92,10 @@ interface VersionStatus {
   key: ExportCanvasKind
   label: string
   phase: StatusPhase
+}
+
+function formatFps(fps: Fps): string {
+  return String(Math.round((fps.num / fps.den) * 100) / 100)
 }
 
 function waitForTerminal(jobId: string): Promise<JobPhase> {
@@ -81,7 +122,9 @@ export interface ExportPanelProps {
 export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelProps): ReactElement {
   const project = useProjectStore((state) => state.project)
   const setAudioMastering = useProjectStore((state) => state.setAudioMastering)
+  const setGraphicsZ = useProjectStore((state) => state.setGraphicsZ)
   const mastering = project.audioMastering ?? 'off'
+  const uiMode = useUiStore((state) => state.uiMode)
   const exportScope = useUiStore((state) => state.exportScope)
   const setExportScope = useUiStore((state) => state.setExportScope)
   const setNotice = useUiStore((state) => state.setNotice)
@@ -92,31 +135,31 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
   const { start, cancel } = useExportJob()
   const { exportCover, busy: coverBusy } = useCoverExport()
 
+  const [fileName, setFileName] = useState<string>(() => project.name || 'socut')
   const [outputDir, setOutputDir] = useState<string>('')
-  const [frameDelivery, setFrameDelivery] = useState<'pipe' | 'pngSequence'>('pipe')
   const [pipeTransport, setPipeTransport] = useState<'raw' | 'png'>('raw')
   const [codec, setCodec] = useState<TransparentCodec>('prores4444')
   const [estimate, setEstimate] = useState<SizeEstimate | null>(null)
-  /**
-   * 直接管道合成后端（计划 §6）：默认关闭以保持与规格书一致的两阶段写法，
-   * 只在「磁盘不足」或「span > 5 分钟」这两种中间 MOV 真的成问题时才允许勾选。
-   */
-  const [directPipe, setDirectPipe] = useState(false)
 
   const [canvasChecked, setCanvasChecked] = useState<Record<ExportCanvasKind, boolean>>({
     landscape: true,
     portrait: false,
     square: false
   })
-  const [canvasTier, setCanvasTier] = useState<Record<'portrait' | 'square', ExportResolutionTier>>({
-    portrait: '1080',
-    square: '1080'
-  })
   const [canvasFit, setCanvasFit] = useState<Record<'portrait' | 'square', ExportFit>>({
     portrait: 'cover',
     square: 'cover'
   })
-  const [quality, setQuality] = useState<ExportQuality>('high')
+  const [resolution, setResolution] = useState<ExportResolutionChoice>(DEFAULT_EXPORT_RESOLUTION)
+  const [bitrateTier, setBitrateTier] = useState<ExportBitrateTier>(DEFAULT_VIDEO_BITRATE_TIER)
+  const [customBitrate, setCustomBitrate] = useState<number>(2000)
+  const [videoCodec, setVideoCodec] = useState<VideoCodec>(DEFAULT_VIDEO_CODEC)
+  // M9：高级编码参数（缺省 = 旧行为：CRF 按画质档 / 8bit / limited range）
+  const [crfInput, setCrfInput] = useState<string>('')
+  const [bitDepth, setBitDepth] = useState<8 | 10>(8)
+  const [colorRange, setColorRange] = useState<'limited' | 'full'>('limited')
+  const [audioPreset, setAudioPreset] = useState<AudioPreset>('192')
+  const [customAudio, setCustomAudio] = useState<number>(DEFAULT_AUDIO_BITRATE_KBPS)
   const [batchRunning, setBatchRunning] = useState(false)
   const [statuses, setStatuses] = useState<VersionStatus[]>([])
   const cancelledRef = useRef<{ value: boolean }>({ value: false })
@@ -124,15 +167,16 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
 
   const selections = useMemo(
     (): ExportCanvasSelection[] =>
-      CANVAS_ORDER.filter((kind) => canvasChecked[kind]).map((kind) =>
-        kind === 'landscape'
-          ? { kind, fit: 'contain' }
-          : { kind, tier: canvasTier[kind], fit: canvasFit[kind] }
-      ),
-    [canvasChecked, canvasTier, canvasFit]
+      CANVAS_ORDER.filter((kind) => canvasChecked[kind]).map((kind) => ({
+        kind,
+        resolution,
+        fit: kind === 'landscape' ? 'contain' : canvasFit[kind]
+      })),
+    [canvasChecked, canvasFit, resolution]
   )
 
   const frames = spec ? Math.max(0, spec.endFrame - spec.startFrame) : 0
+  const durationSec = spec ? framesToDurationSec(frames, spec.fps) : 0
   const missingMediaIds = useUiStore((state) => state.missingMediaIds)
   const refVideoMissing = useUiStore((state) => state.refVideoMissing)
   // v2：叠加可用性改看媒体轨/素材池（旧 refVideo 路径保留给 v1 兼容）
@@ -141,29 +185,85 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
   const overlayDisabled = !hasBase || frames === 0 || mediaMissing
   const baseDisabled = fontLoading || !ffmpegAvailable || frames === 0 || outputDir.length === 0
 
-  /** span 秒数（直管道合成的可选条件之一：中间 MOV 过大时避免落盘） */
-  const spanSec = spec ? ((spec.endFrame - spec.startFrame) * spec.fps.den) / spec.fps.num : 0
-  const longSpan = spanSec > 300
-  const diskShort = estimate !== null && !estimate.sufficientDisk
-  // 没有参考视频就没有“合成”可言，直管道后端也无从谈起
-  const directPipeAllowed = !overlayDisabled && (diskShort || longSpan)
+  const selectionFor = (kind: ExportCanvasKind): ExportCanvasSelection =>
+    kind === 'landscape'
+      ? { kind, resolution, fit: 'contain' }
+      : { kind, resolution, fit: canvasFit[kind] }
+
+  /** 解析单个画布：有叠加基座时跟随素材，无基座时按工程分辨率兜底（仅用于文字读数）。 */
+  const resolveTarget = (selection: ExportCanvasSelection): { canvas: ResolvedExportCanvas; fps: Fps } => {
+    const target = overlayCanvasFor(project, selection)
+    if (target) return target
+    return {
+      canvas: resolveExportCanvas({
+        selection,
+        primaryMeta: null,
+        projectResolution: project.resolution
+      }),
+      fps: spec?.fps ?? DEFAULT_FPS
+    }
+  }
+
+  /** 当前选择在该画布上的实际视频码率（自定义为绝对 kbps）。 */
+  const bitrateFor = (selection: ExportCanvasSelection): number =>
+    videoBitrateKbpsOf(bitrateTier, customBitrate, resolveTarget(selection).canvas)
+
+  /**
+   * 音频码率：多视频混音后不存在可继承的“原始码率”，因此始终按配置值重编码为 AAC。
+   */
+  const audioKbps: number =
+    audioPreset === 'custom'
+      ? Number.isFinite(customAudio)
+        ? Math.max(16, Math.min(512, Math.round(customAudio)))
+        : DEFAULT_AUDIO_BITRATE_KBPS
+      : Number(audioPreset)
+
+  const canvasMetaText = (kind: ExportCanvasKind): string => {
+    // 有基座时跟随素材，无基座时按工程分辨率兜底；选具体档位时两条路径都按短边缩放。
+    const canvas = resolveTarget(selectionFor(kind)).canvas
+    return `${canvas.width}×${canvas.height}`
+  }
 
   useEffect(() => {
     const saved = localStorage.getItem(LAST_DIR_KEY)
     if (saved) setOutputDir(saved)
   }, [])
 
+  /** 预估按叠加出口口径（H.264），多画布逐个求和；磁盘以最紧的一个为准。 */
   useEffect(() => {
     let cancelled = false
-    if (!spec || outputDir.length === 0) {
+    const targets = selections.flatMap((selection) => {
+      const target = overlayCanvasFor(project, selection)
+      return target ? [{ selection, target }] : []
+    })
+    if (!spec || outputDir.length === 0 || targets.length === 0) {
       setEstimate(null)
       return
     }
-    const frames = Math.max(0, spec.endFrame - spec.startFrame)
-    void window.socut.export
-      .estimate({ width: spec.width, height: spec.height, fps: spec.fps, frames, outputDir })
-      .then((result) => {
-        if (!cancelled) setEstimate(result)
+    const targetFrames = Math.max(0, spec.endFrame - spec.startFrame)
+    void Promise.all(
+      targets.map(({ target }) =>
+        window.socut.export.estimate({
+          width: target.canvas.width,
+          height: target.canvas.height,
+          fps: target.fps,
+          frames: targetFrames,
+          outputDir,
+          kind: 'overlayMp4',
+          videoBitrateKbps: videoBitrateKbpsOf(bitrateTier, customBitrate, target.canvas),
+          audioBitrateKbps: audioKbps
+        })
+      )
+    )
+      .then((results) => {
+        if (cancelled) return
+        const first = results[0]
+        setEstimate({
+          bytes: results.reduce((sum, result) => sum + result.bytes, 0),
+          sufficientDisk: results.every((result) => result.sufficientDisk),
+          recommendPng: false,
+          ...(first?.freeBytes !== undefined ? { freeBytes: first.freeBytes } : {})
+        })
       })
       .catch(() => {
         if (!cancelled) setEstimate(null)
@@ -171,30 +271,23 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
     return () => {
       cancelled = true
     }
-  }, [spec, outputDir])
-
-  // 不再满足直管道条件时自动取消勾选，避免一个看不开的开关默默改变导出路径
-  useEffect(() => {
-    if (!directPipeAllowed && directPipe) setDirectPipe(false)
-  }, [directPipeAllowed, directPipe])
+  }, [spec, outputDir, selections, project, bitrateTier, customBitrate, audioKbps])
 
   // 规格 §6：非 16:9 / HDR / VFR 未确认时不得导出（v2 枚级：逐枚检查素材池，
   // 主进程 hook 里也有一道，这里提前阻断并说明原因）
   const gate = gateBlocked(project.media)
 
+  const currentBaseName = (): string => sanitizeFileName(fileName.trim() || project.name || 'socut')
+
   const run = async (kind: ExportKind): Promise<void> => {
-    const base = `${project.name || 'socut'}-${kind}-${spec?.width ?? 0}x${spec?.height ?? 0}-${fpsToString(
-      spec?.fps ?? DEFAULT_FPS
-    )}`
+    const baseName = currentBaseName()
     try {
       await start({
         kind,
         outputDir,
-        fileName: kind === 'pngSequence' ? `${base}_png` : `${base}.${kind === 'overlayMp4' ? 'mp4' : 'mov'}`,
-        frameDelivery,
+        fileName: kind === 'pngSequence' ? `${baseName}-png` : `${baseName}-透明`,
         pipeTransport,
-        codec,
-        directPipe: directPipe && directPipeAllowed
+        codec
       })
       localStorage.setItem(LAST_DIR_KEY, outputDir)
     } catch (error) {
@@ -216,6 +309,7 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
 
   const runOverlay = async (): Promise<void> => {
     if (batchRunning || selections.length === 0) return
+    const baseName = currentBaseName()
     const cancelled = { value: false }
     cancelledRef.current = cancelled
     setBatchRunning(true)
@@ -238,19 +332,23 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
           setNotice('叠加导出需要先把素材放入媒体轨')
           continue
         }
-        const baseName = `${project.name || 'socut'}-overlayMp4-${target.canvas.suffix}-${target.canvas.width}x${target.canvas.height}-${fpsToString(target.fps)}`
+        const outputName = selections.length > 1 ? `${baseName}-${target.canvas.suffix}.mp4` : `${baseName}.mp4`
         try {
           const jobId = await start({
             kind: 'overlayMp4',
             outputDir,
-            fileName: `${baseName}.mp4`,
-            frameDelivery,
+            fileName: outputName,
             pipeTransport,
             codec,
-            directPipe: directPipe && directPipeAllowed,
-            // 横屏 contain 与旧行为等价：不传画布，保留「跟随素材 + 工程分支」的旧口径
-            ...(selection.kind === 'landscape' ? {} : { canvas: selection }),
-            quality
+            // 分辨率是渲染目标而非素材属性：所有画布都下传，主进程据此缩放。
+            canvas: selection,
+            videoCodec,
+            videoBitrateKbps: bitrateFor(selection),
+            audioBitrateKbps: audioKbps,
+            // M9：高级编码参数（缺省不落键 → argv 与旧版逐字节一致）
+            ...(crfInput.trim() !== '' && Number.isFinite(Number(crfInput)) ? { crf: Number(crfInput) } : {}),
+            ...(videoCodec !== 'avc' && bitDepth === 10 ? { bitDepth: 10 as const } : {}),
+            ...(colorRange === 'full' ? { colorRange: 'full' as const } : {})
           })
           currentJobIdRef.current = jobId
           const phase = await waitForTerminal(jobId)
@@ -287,16 +385,71 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
     !baseDisabled && !overlayDisabled && !gate.blocked && selections.length > 0 && !exportRunning
   const coverDisabled = baseDisabled || overlayDisabled || gate.blocked || selections.length === 0 || exportRunning
   const firstSelection = selections[0]
+  const firstTarget = firstSelection ? resolveTarget(firstSelection) : null
+
+  const summaryLine1 =
+    selections.length > 1
+      ? `${selections.length} 个画布 · ${selections.map((selection) => PREVIEW_LABELS[selection.kind]).join(' / ')}`
+      : firstSelection && firstTarget
+        ? `${CANVAS_LABELS[firstSelection.kind]} · ${firstTarget.canvas.width}×${firstTarget.canvas.height} · ${formatFps(firstTarget.fps)} fps`
+        : '未选择画布'
+  const estimatePart =
+    outputDir.length > 0 && estimate
+      ? ` · 预计 ${formatBytes(estimate.bytes)} · ${estimate.sufficientDisk ? '磁盘充足' : '磁盘不足'}`
+      : ' · 选择导出目录后显示预计体积'
+  const codecLabel = videoCodec === 'hevc' ? 'HEVC' : 'AVC'
+  const summaryBitrate = firstSelection ? bitrateFor(firstSelection) : 2000
+  const summaryLine2 = `${codecLabel} · ${summaryBitrate} kbps · 音频 ${audioKbps} kbps · 时长 ${formatDuration(durationSec)}${estimatePart}`
+  const bitrateHintText =
+    selections.length === 1 && firstSelection
+      ? TEXT.export.bitrateHint(bitrateFor(firstSelection))
+      : selections.length > 1
+        ? `当前码率：${selections
+            .map((selection) => `${PREVIEW_LABELS[selection.kind]} ${bitrateFor(selection)} kbps`)
+            .join(' · ')}`
+        : '当前码率：—'
+
+  const primaryLabel = selections.length > 1 ? `导出 ${selections.length} 个画布` : '导出'
 
   return (
     <section className="group">
       <div className="group__head">
         <span className="group__title">{TEXT.export.tab}</span>
         <span className={`chip ${gate.blocked ? 'chip--warn' : frames > 0 ? 'chip--ok' : ''}`}>
-          {gate.blocked ? '门禁未通过' : frames > 0 ? `${frames} 帧` : '等待片段'}
+          {gate.blocked ? '门禁未通过' : frames > 0 ? `时长 ${formatDuration(durationSec)}` : '等待片段'}
         </span>
       </div>
 
+      {/* 导出位置 */}
+      <div className="export-dir">
+        <label className="field">
+          <span className="field__label">{TEXT.export.fileName}</span>
+          <input
+            className="input"
+            aria-label={TEXT.export.fileName}
+            value={fileName}
+            onChange={(event) => setFileName(event.target.value)}
+          />
+        </label>
+        <div className="dir-picker">
+          <span className="dir-picker__label">{TEXT.export.outputDir}</span>
+          <span className={`dir-picker__value mono${outputDir ? '' : ' muted'}`} title={outputDir}>
+            {outputDir || '未选择'}
+          </span>
+          <button
+            type="button"
+            className="btn btn--sm"
+            onClick={async () => {
+              const dir = await window.socut.app.chooseDirectory()
+              if (dir) setOutputDir(dir)
+            }}
+          >
+            更改…
+          </button>
+        </div>
+      </div>
+
+      {/* 导出范围 */}
       <div className="segmented" role="group" aria-label={TEXT.export.scope}>
         <button
           type="button"
@@ -316,185 +469,280 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
         </button>
       </div>
 
-      <div className="dir-picker">
-        <span className="dir-picker__label">输出目录</span>
-        <span className={`dir-picker__value mono${outputDir ? '' : ' muted'}`} title={outputDir}>
-          {outputDir || '未选择'}
-        </span>
-        <button
-          type="button"
-          className="btn btn--sm"
-          onClick={async () => {
-            const dir = await window.socut.app.chooseDirectory()
-            if (dir) setOutputDir(dir)
-          }}
-        >
-          浏览…
-        </button>
-      </div>
-
-      <div className="kv">
-        <div className="kv__row">
-          <span>{TEXT.export.resolution}</span>
-          <span className="mono">
-            {project.refVideo || project.media.length > 0 ? TEXT.export.followRef : `${spec?.width ?? 0}×${spec?.height ?? 0}`}
-          </span>
-        </div>
-        <div className="kv__row">
-          <span>{TEXT.export.fps}</span>
-          <span className="mono">
-            {project.refVideo || project.media.length > 0 ? TEXT.export.followRef : fpsToString(spec?.fps ?? DEFAULT_FPS)}
-          </span>
-        </div>
-        <div className="kv__row">
-          <span>帧数</span>
-          <span className="mono">{frames}</span>
-        </div>
-        {/* 水印只在叠加出口烧进画面，透明字幕条出口不含台标 —— 在发起导出前说清 */}
-        {project.watermark?.enabled ? (
-          <div className="kv__row">
-            <span>水印</span>
-            <span className="mono" title={project.watermark.path}>
-              {project.watermark.name} · 左上角（仅叠加出口）
-            </span>
-          </div>
-        ) : null}
-        {estimate ? (
-          <div className="kv__row">
-            <span>{TEXT.export.estimate}</span>
-            <span className={`mono${estimate.sufficientDisk ? '' : ' text-danger'}`}>
-              {formatBytes(estimate.bytes)}
-              {estimate.recommendPng ? ' · 建议 PNG' : ''}
-              {estimate.sufficientDisk ? '' : ' · 磁盘不足'}
-            </span>
-          </div>
-        ) : null}
-      </div>
-
+      {/* 导出画布 */}
       <div className="stack stack--tight">
-        <span className="field__label">交付画布（叠加 MP4）</span>
-        {CANVAS_ORDER.map((kind) => (
-          <div key={kind} className="stack stack--tight">
-            <label className="switch">
-              <input
-                type="checkbox"
-                aria-label={CANVAS_LABELS[kind]}
-                checked={canvasChecked[kind]}
-                onChange={(event) =>
-                  setCanvasChecked((previous) => ({ ...previous, [kind]: event.target.checked }))
-                }
-              />
-              <span>{CANVAS_LABELS[kind]}</span>
-            </label>
-            {kind !== 'landscape' && canvasChecked[kind] ? (
-              <div className="stack stack--tight">
-                <label className="field">
-                  <span className="field__label">分辨率</span>
-                  <select
-                    className="select"
-                    aria-label={`${CANVAS_LABELS[kind]}分辨率`}
-                    value={canvasTier[kind]}
-                    onChange={(event) =>
-                      setCanvasTier((previous) => ({
-                        ...previous,
-                        [kind]: event.target.value as ExportResolutionTier
-                      }))
-                    }
-                  >
-                    <option value="1080">1080</option>
-                    <option value="720">720</option>
-                  </select>
-                </label>
-                <label className="field">
-                  <span className="field__label">适配</span>
-                  <select
-                    className="select"
-                    aria-label={`${CANVAS_LABELS[kind]}适配`}
-                    value={canvasFit[kind]}
-                    onChange={(event) =>
-                      setCanvasFit((previous) => ({ ...previous, [kind]: event.target.value as ExportFit }))
-                    }
-                  >
-                    <option value="cover">cover（裁切）</option>
-                    <option value="contain">contain（补边）</option>
-                  </select>
-                </label>
-              </div>
-            ) : null}
-          </div>
-        ))}
+        <div className="field__label">
+          <span>{TEXT.export.canvas}</span>
+          <span className="field__meta">{TEXT.export.canvasHint}</span>
+        </div>
+        {CANVAS_ORDER.map((kind) => {
+          const checked = canvasChecked[kind]
+          return (
+            <div key={kind} className={`canvas-row${checked ? ' canvas-row--checked' : ''}`}>
+              <label className="canvas-row__main">
+                <input
+                  type="checkbox"
+                  aria-label={CANVAS_LABELS[kind]}
+                  checked={checked}
+                  onChange={(event) =>
+                    setCanvasChecked((previous) => ({ ...previous, [kind]: event.target.checked }))
+                  }
+                />
+                <span className={`canvas-row__icon canvas-row__icon--${kind}`} aria-hidden="true" />
+                <span className="canvas-row__text">
+                  <span className="canvas-row__label">{CANVAS_LABELS[kind]}</span>
+                  <span className="canvas-row__meta mono">{canvasMetaText(kind)}</span>
+                </span>
+              </label>
+              {kind !== 'landscape' && checked ? (
+                <div className="canvas-row__settings">
+                  <label className="field">
+                    <span className="field__label">适配</span>
+                    <select
+                      className="select"
+                      aria-label={`${CANVAS_LABELS[kind]}适配`}
+                      value={canvasFit[kind]}
+                      onChange={(event) =>
+                        setCanvasFit((previous) => ({ ...previous, [kind]: event.target.value as ExportFit }))
+                      }
+                    >
+                      <option value="cover">裁切填满</option>
+                      <option value="contain">完整显示</option>
+                    </select>
+                  </label>
+                </div>
+              ) : null}
+            </div>
+          )
+        })}
         {selections.length === 0 ? <p className="hint">至少勾选一个画布</p> : null}
-
-        <label className="field">
-          <span className="field__label">画质档</span>
-          <select
-            className="select"
-            value={quality}
-            onChange={(event) => setQuality(event.target.value as ExportQuality)}
-          >
-            <option value="high">高（CRF 18）</option>
-            <option value="standard">标准（CRF 23）</option>
-            <option value="small">小体积（CRF 28）</option>
-          </select>
-        </label>
-
-        <label className="field">
-          <span className="field__label">{TEXT.export.mastering}</span>
-          <select
-            className="select"
-            aria-label={TEXT.export.mastering}
-            title={TEXT.export.masteringHint}
-            value={mastering}
-            onChange={(event) => setAudioMastering(event.target.value as AudioMastering)}
-          >
-            <option value="off">{TEXT.export.masteringOff}</option>
-            <option value="social">{TEXT.export.masteringSocial}</option>
-            <option value="broadcast">{TEXT.export.masteringBroadcast}</option>
-          </select>
-          <span className="hint">{TEXT.export.masteringHint}</span>
-        </label>
-
-        <button
-          type="button"
-          className="btn btn--primary btn--block"
-          disabled={!canExport}
-          title={
-            gate.blocked
-              ? gate.reason ?? ''
-              : mediaMissing
-                ? TEXT.refVideoMissing.notice
-                : overlayDisabled
-                  ? '叠加导出需要先把素材放入媒体轨'
-                  : undefined
-          }
-          onClick={() => void runOverlay()}
-        >
-          {selections.length > 1
-            ? `开始导出（${selections.length} 个画布）`
-            : firstSelection
-              ? `开始导出（${CANVAS_LABELS[firstSelection.kind]}）`
-              : '开始导出'}
-        </button>
-
-        <button
-          type="button"
-          className="btn btn--block"
-          disabled={coverDisabled}
-          onClick={() => {
-            if (firstSelection) void exportCover({ outputDir, selection: firstSelection })
-          }}
-        >
-          导出封面（{firstSelection ? CANVAS_LABELS[firstSelection.kind] : '当前画布'} · 当前帧）
-        </button>
-
-        {batchRunning ? (
-          <button type="button" className="btn btn--block" onClick={() => void cancelBatch()}>
-            取消全部
-          </button>
-        ) : null}
-
-        <p className="hint">透明 MOV / PNG 序列只按工程分辨率，画布多选只影响叠加 MP4 与封面。</p>
       </div>
+
+      {/* 分辨率 */}
+      <label className="field">
+        <span className="field__label">{TEXT.export.resolution}</span>
+        <select
+          className="select"
+          aria-label={TEXT.export.resolution}
+          value={resolution}
+          onChange={(event) => setResolution(event.target.value as ExportResolutionChoice)}
+        >
+          {RESOLUTION_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <span className="hint">按短边定义；竖屏 / 方图保持各自宽高比。</span>
+      </label>
+
+      {/* 码率 */}
+      <div className="field">
+        <span className="field__label">{TEXT.export.bitrate}</span>
+        <div className="segmented" role="group" aria-label={TEXT.export.bitrate}>
+          {BITRATE_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`segmented__item${bitrateTier === option.value ? ' segmented__item--active' : ''}`}
+              aria-pressed={bitrateTier === option.value}
+              onClick={() => setBitrateTier(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        {bitrateTier === 'custom' ? (
+          <div className="export-custom">
+            <input
+              className="input"
+              type="number"
+              min={100}
+              max={100000}
+              step={100}
+              aria-label={TEXT.export.bitrateCustomLabel}
+              value={customBitrate}
+              onChange={(event) => setCustomBitrate(Number(event.target.value))}
+            />
+            <span className="export-custom__unit">kbps</span>
+          </div>
+        ) : null}
+        <span className="hint">{bitrateHintText}</span>
+      </div>
+
+      {/* 编码格式 */}
+      <div className="field">
+        <span className="field__label">{TEXT.export.codec}</span>
+        <div className="segmented" role="group" aria-label={TEXT.export.codec}>
+          {CODEC_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`segmented__item${videoCodec === option.value ? ' segmented__item--active' : ''}`}
+              aria-pressed={videoCodec === option.value}
+              onClick={() => setVideoCodec(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <span className="hint">{TEXT.export.codecHint}</span>
+      </div>
+
+      {/* M9：高级编码参数（CRF 直给 / 位深 / 色彩范围） */}
+      {uiMode === 'advanced' ? (
+        <div className="stack">
+          <label className="field">
+            <span className="field__label">{TEXT.export.crfLabel}</span>
+            <input
+              className="input mono"
+              type="number"
+              min={0}
+              max={51}
+              step={1}
+              aria-label={TEXT.export.crfLabel}
+              placeholder="自动"
+              value={crfInput}
+              onChange={(event) => setCrfInput(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field__label">{TEXT.export.bitDepthLabel}</span>
+            <select
+              className="select"
+              aria-label={TEXT.export.bitDepthLabel}
+              value={bitDepth}
+              disabled={videoCodec === 'avc'}
+              onChange={(event) => setBitDepth(Number(event.target.value) === 10 ? 10 : 8)}
+            >
+              <option value={8}>{TEXT.export.bitDepth8}</option>
+              <option value={10}>{TEXT.export.bitDepth10}</option>
+            </select>
+          </label>
+          <label className="field">
+            <span className="field__label">{TEXT.export.colorRangeLabel}</span>
+            <select
+              className="select"
+              aria-label={TEXT.export.colorRangeLabel}
+              value={colorRange}
+              onChange={(event) => setColorRange(event.target.value === 'full' ? 'full' : 'limited')}
+            >
+              <option value="limited">{TEXT.export.colorRangeLimited}</option>
+              <option value="full">{TEXT.export.colorRangeFull}</option>
+            </select>
+          </label>
+          {/* M7-E：图形层 z 档（项目级；belowMedia 会把字幕/文本垫到媒体层下面） */}
+          <label className="field">
+            <span className="field__label">{TEXT.export.graphicsZLabel}</span>
+            <select
+              className="select"
+              aria-label={TEXT.export.graphicsZLabel}
+              value={project.graphicsZ ?? 'aboveMedia'}
+              onChange={(event) => setGraphicsZ(event.target.value === 'belowMedia' ? 'belowMedia' : undefined)}
+            >
+              <option value="aboveMedia">{TEXT.export.graphicsZAbove}</option>
+              <option value="belowMedia">{TEXT.export.graphicsZBelow}</option>
+            </select>
+          </label>
+        </div>
+      ) : null}
+
+      {/* 音频码率 */}
+      <label className="field">
+        <span className="field__label">{TEXT.export.audioBitrate}</span>
+        <select
+          className="select"
+          aria-label={TEXT.export.audioBitrate}
+          value={audioPreset}
+          onChange={(event) => setAudioPreset(event.target.value as AudioPreset)}
+        >
+          {EXPORT_AUDIO_BITRATE_PRESETS.map((kbps) => (
+            <option key={kbps} value={String(kbps)}>
+              {kbps}
+            </option>
+          ))}
+          <option value="custom">自定义</option>
+        </select>
+        {audioPreset === 'custom' ? (
+          <div className="export-custom">
+            <input
+              className="input"
+              type="number"
+              min={16}
+              max={512}
+              step={16}
+              aria-label={TEXT.export.audioBitrateCustom}
+              value={customAudio}
+              onChange={(event) => setCustomAudio(Number(event.target.value))}
+            />
+            <span className="export-custom__unit">kbps</span>
+          </div>
+        ) : null}
+        <span className="hint">{TEXT.export.audioBitrateHint}</span>
+      </label>
+
+      {/* 音量标准化 */}
+      <label className="field">
+        <span className="field__label">{TEXT.export.mastering}</span>
+        <select
+          className="select"
+          aria-label={TEXT.export.mastering}
+          title={TEXT.export.masteringHint}
+          value={mastering}
+          onChange={(event) => setAudioMastering(event.target.value as AudioMastering)}
+        >
+          <option value="off">{TEXT.export.masteringOff}</option>
+          <option value="social">{TEXT.export.masteringSocial}</option>
+          <option value="broadcast">{TEXT.export.masteringBroadcast}</option>
+        </select>
+        <span className="hint">{TEXT.export.masteringHint}</span>
+      </label>
+
+      {/* 导出摘要 */}
+      <div className="export-summary" aria-label={TEXT.export.summary}>
+        <div className="export-summary__line export-summary__line--strong">{summaryLine1}</div>
+        <div className="export-summary__line">{summaryLine2}</div>
+        {project.watermark?.enabled ? (
+          <div className="export-summary__line export-summary__line--muted">台标：{project.watermark.name}（仅成片）</div>
+        ) : null}
+      </div>
+
+      <button
+        type="button"
+        className="btn btn--primary btn--block export-cta"
+        disabled={!canExport}
+        title={
+          gate.blocked
+            ? gate.reason ?? ''
+            : mediaMissing
+              ? TEXT.refVideoMissing.notice
+              : overlayDisabled
+                ? '叠加导出需要先把素材放入媒体轨'
+                : undefined
+        }
+        onClick={() => void runOverlay()}
+      >
+        {primaryLabel}
+      </button>
+
+      <button
+        type="button"
+        className="btn btn--block"
+        disabled={coverDisabled}
+        onClick={() => {
+          if (firstSelection) {
+            void exportCover({ outputDir, selection: firstSelection, baseName: currentBaseName() })
+          }
+        }}
+      >
+        导出封面（当前帧）
+      </button>
+
+      {batchRunning ? (
+        <button type="button" className="btn btn--block" onClick={() => void cancelBatch()}>
+          取消全部
+        </button>
+      ) : null}
 
       {statuses.length > 0 ? (
         <div className="kv" aria-label="批量导出状态">
@@ -509,116 +757,139 @@ export function ExportPanel({ spec, fontLoading, ffmpegAvailable }: ExportPanelP
         </div>
       ) : null}
 
-      <div className="stack stack--tight">
-        <span className="field__label">预览此画布</span>
-        <div className="segmented" role="group" aria-label="预览画布">
+      {/* 更多导出选项（透明素材 / 高级排障） */}
+      <Expander title={TEXT.export.moreOptions} summary={TRANSPARENT_SUMMARY}>
+        <div className="stack">
+          <p className="hint">{TEXT.export.transparentHint}</p>
+
+          <label className="field">
+            <span className="field__label">{TEXT.export.transparentFormat}</span>
+            <select
+              className="select"
+              aria-label={TEXT.export.transparentFormat}
+              value={codec}
+              onChange={(event) => setCodec(event.target.value as TransparentCodec)}
+            >
+              <option value="prores4444">ProRes 4444（高质量）</option>
+              <option value="qtrle">qtrle（无损）</option>
+            </select>
+          </label>
+
           <button
             type="button"
-            className={`segmented__item${previewCanvasKind === null ? ' segmented__item--active' : ''}`}
-            aria-pressed={previewCanvasKind === null}
-            onClick={() => {
-              setPreviewCanvas(null)
-              setPreviewFit('contain')
-            }}
+            className="btn btn--block"
+            disabled={baseDisabled || gate.blocked}
+            onClick={() => void run('transparentMov')}
           >
-            工程画布
+            导出透明 MOV
           </button>
-          {(['portrait', 'square'] as const).map((kind) => (
+
+          <button
+            type="button"
+            className="btn btn--block"
+            disabled={baseDisabled || gate.blocked}
+            onClick={() => void run('pngSequence')}
+          >
+            导出 PNG 序列
+          </button>
+
+          {uiMode === 'advanced' ? (
+            <>
+              <label className="field">
+                <span className="field__label">{TEXT.export.pipeTransport}</span>
+                <select
+                  className="select"
+                  aria-label={TEXT.export.pipeTransport}
+                  value={pipeTransport}
+                  onChange={(event) => setPipeTransport(event.target.value as 'raw' | 'png')}
+                >
+                  <option value="raw">{TEXT.export.pipeAuto}</option>
+                  <option value="png">{TEXT.export.pipePng}</option>
+                </select>
+                <span className="hint">{TEXT.export.pipeHint}</span>
+              </label>
+
+              <div className="kv">
+                <div className="kv__row">
+                  <span>编码</span>
+                  <span className="mono">{codecLabel}</span>
+                </div>
+                <div className="kv__row">
+                  <span>帧数</span>
+                  <span className="mono">{frames}</span>
+                </div>
+                {selections.map((selection) => {
+                  const target = resolveTarget(selection)
+                  return (
+                    <div className="kv__row" key={selection.kind}>
+                      <span>{CANVAS_LABELS[selection.kind]}</span>
+                      <span className="mono">
+                        {target.canvas.width}×{target.canvas.height} · {FIT_LABELS[target.canvas.fit]}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          ) : null}
+        </div>
+      </Expander>
+
+      {/* 预览导出画布（默认收起） */}
+      <Expander
+        title={TEXT.export.previewCanvas}
+        summary={
+          previewCanvasKind
+            ? `${CANVAS_LABELS[previewCanvasKind]} · ${FIT_LABELS[previewFit]}`
+            : '工程画布'
+        }
+      >
+        <div className="stack stack--tight">
+          <div className="segmented" role="group" aria-label="预览画布">
             <button
-              key={kind}
               type="button"
-              className={`segmented__item${previewCanvasKind === kind ? ' segmented__item--active' : ''}`}
-              aria-pressed={previewCanvasKind === kind}
+              className={`segmented__item${previewCanvasKind === null ? ' segmented__item--active' : ''}`}
+              aria-pressed={previewCanvasKind === null}
               onClick={() => {
-                setPreviewCanvas(kind)
-                setPreviewFit('cover')
+                setPreviewCanvas(null)
+                setPreviewFit('contain')
               }}
             >
-              {PREVIEW_LABELS[kind]}
+              工程画布
             </button>
-          ))}
-        </div>
-        <div className="segmented" role="group" aria-label="预览适配">
-          {(['contain', 'cover'] as const).map((fit) => (
-            <button
-              key={fit}
-              type="button"
-              className={`segmented__item${previewFit === fit ? ' segmented__item--active' : ''}`}
-              aria-pressed={previewFit === fit}
-              onClick={() => setPreviewFit(fit)}
-            >
-              {fit}
-            </button>
-          ))}
-        </div>
-        {previewCanvasKind ? (
-          <span className="chip chip--ok">
-            预览：{CANVAS_LABELS[previewCanvasKind]} · {previewFit}
-          </span>
-        ) : null}
-      </div>
-
-      <div className="stack stack--tight">
-        <button
-          type="button"
-          className="btn btn--primary btn--block"
-          disabled={baseDisabled || gate.blocked || exportRunning}
-          title={gate.blocked ? gate.reason ?? '' : undefined}
-          onClick={() => void run('transparentMov')}
-        >
-          {TEXT.export.startMov}
-        </button>
-      </div>
-
-      <Expander title="更多导出选项" summary={codec === 'prores4444' ? 'ProRes 4444' : 'qtrle'}>
-        <div className="stack">
-          <label className="field">
-            <span className="field__label">帧交付</span>
-            <select
-              className="select"
-              value={frameDelivery}
-              onChange={(event) => setFrameDelivery(event.target.value as 'pipe' | 'pngSequence')}
-            >
-              <option value="pipe" title="帧直接写入 FFmpeg stdin，不落盘">管道直送</option>
-              <option value="pngSequence" title="帧先落盘再编码，用于排查">PNG 序列落盘</option>
-            </select>
-          </label>
-
-          <label className="field">
-            <span className="field__label">管道帧形式</span>
-            <select
-              className="select"
-              value={pipeTransport}
-              disabled={frameDelivery !== 'pipe'}
-              onChange={(event) => setPipeTransport(event.target.value as 'raw' | 'png')}
-            >
-              <option value="raw" title="默认；1080p30/10s 约 7 秒">未压缩 RGBA</option>
-              <option value="png" title="字节少，但每帧多约 30ms 压缩">PNG（带 alpha）</option>
-            </select>
-          </label>
-
-          <label className="field">
-            <span className="field__label">透明出口编码</span>
-            <select className="select" value={codec} onChange={(event) => setCodec(event.target.value as TransparentCodec)}>
-              <option value="prores4444" title="yuva444p10le">ProRes 4444</option>
-              <option value="qtrle" title="无损 RGBA，兼容性最好">qtrle 无损</option>
-            </select>
-          </label>
-
-          {/* 计划 §6：直接管道合成是可选后端，只在中间 MOV 真的成问题时开放勾选 */}
-          <label className="switch" title={directPipeAllowed ? '跳过中间 MOV，直接管道交给 FFmpeg' : '默认关闭；磁盘不足或时长超 5 分钟时可勾选'}>
-            <input
-              type="checkbox"
-              checked={directPipe && directPipeAllowed}
-              disabled={!directPipeAllowed}
-              onChange={(event) => setDirectPipe(event.target.checked)}
-            />
-            <span>直接管道合成</span>
-          </label>
-
-          <button type="button" className="btn btn--block" disabled={baseDisabled || gate.blocked} onClick={() => void run('pngSequence')}>
-            {TEXT.export.startPng}
-          </button>
+            {(['portrait', 'square'] as const).map((kind) => (
+              <button
+                key={kind}
+                type="button"
+                className={`segmented__item${previewCanvasKind === kind ? ' segmented__item--active' : ''}`}
+                aria-pressed={previewCanvasKind === kind}
+                onClick={() => {
+                  setPreviewCanvas(kind)
+                  setPreviewFit('cover')
+                }}
+              >
+                {PREVIEW_LABELS[kind]}
+              </button>
+            ))}
+          </div>
+          <div className="segmented" role="group" aria-label="预览适配">
+            {(['contain', 'cover'] as const).map((fit) => (
+              <button
+                key={fit}
+                type="button"
+                className={`segmented__item${previewFit === fit ? ' segmented__item--active' : ''}`}
+                aria-pressed={previewFit === fit}
+                onClick={() => setPreviewFit(fit)}
+              >
+                {FIT_LABELS[fit]}
+              </button>
+            ))}
+          </div>
+          {previewCanvasKind ? (
+            <span className="chip chip--ok">
+              预览：{CANVAS_LABELS[previewCanvasKind]} · {FIT_LABELS[previewFit]}
+            </span>
+          ) : null}
         </div>
       </Expander>
 

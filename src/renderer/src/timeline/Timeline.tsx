@@ -9,13 +9,12 @@ import {
 } from 'react'
 import {
   LANE_GUTTER_PX,
-  MAX_AUDIO_TRACKS,
-  MAX_MEDIA_TRACKS,
   MAX_TRACK_SEC,
   TIMELINE_BASE_PX_PER_SEC,
   TIMELINE_MAX_ZOOM,
   TIMELINE_MIN_ZOOM,
   TRACK_MIN_SEC,
+  TRACK_SOFT_LIMIT,
   TRACK_TAIL_SEC
 } from '@shared/constants'
 import { snapTimeToFrame } from '@shared/fps'
@@ -23,14 +22,23 @@ import { collectSnapEdges, snapEdge, snapMove, snapWindowSec } from '@shared/tim
 import { secondsToTimecode } from '@shared/timecode'
 import { TEXT } from '@shared/i18n'
 import { timelineContentEndSec } from '@shared/presetResolver'
-import { clipsOnAudioTrack, clipsOnMediaTrack, isTrackLocked } from '@shared/tracks'
-import { TRANSITION_MAP, previousMediaClipOnTrack, resolveTransitionDuration, transitionMediaMetaOf } from '@shared/transitions'
+import { activeSequenceId, sequenceSummaries } from '@shared/sequence'
+import { clipsOnAudioTrack, clipsOnMediaTrack, isTrackLocked, trackById } from '@shared/tracks'
+import {
+  DEFAULT_TRANSITION_DURATION_SEC,
+  TRANSITION_MAP,
+  isTransitionAdjacent,
+  previousMediaClipOnTrack,
+  resolveTransitionDuration,
+  transitionMediaMetaOf
+} from '@shared/transitions'
 import type { AudioTrack, Fps, MediaClip, MediaTrack } from '@shared/types'
 import { useProjectStore } from '../state/projectStore'
 import { useHistoryStore } from '../state/projectHistory'
 import { useUiStore, type UiState } from '../state/uiStore'
 import { IconRedo, IconUndo } from '../components/ui/Icon'
 import { ClipCard } from './ClipCard'
+import { TextClipCard } from './TextClipCard'
 import { MediaClipCard } from './MediaClipCard'
 import { AudioClipCard } from './AudioClipCard'
 import { TrackHeader } from './TrackHeader'
@@ -55,6 +63,8 @@ type ScrubElement = HTMLDivElement
 
 /** 稳定的空音频轨引用（避免每次选择器返回新数组） */
 const EMPTY_AUDIO_CLIPS: never[] = []
+/** M7：文本元素列表的稳定空引用（避免选择器每次返回新数组） */
+const EMPTY_TEXT_CLIPS: never[] = []
 
 /** 刻度窗口两侧多渲染的像素：滚动时刻度不会贴边出现 */
 const TICK_OVERSCAN_PX = 320
@@ -65,6 +75,12 @@ const ZOOM_STEP = 1.15
 /** 跨轨命中查询用的属性选择器 */
 const MEDIA_ROW_SELECTOR = '.timeline__track--media[data-track-id]'
 const AUDIO_ROW_SELECTOR = '.timeline__track--audio[data-track-id]'
+/**
+ * v11：转场拖拽的缝隙命中半径（px）。
+ * 切点图标只有 20px 宽，指针离切点中心这个距离内都算「拖到缝隙上了」，
+ * 换算成秒后与片段时长无关（缩放到 800% 时仍然是同一条视觉缝隙）。
+ */
+const TRANSITION_JUNCTION_HIT_PX = 18
 
 export interface TimelineProps {
   seekTo: (sec: number) => void
@@ -98,6 +114,8 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const setClipTimes = useProjectStore((state) => state.setClipTimes)
   const selectedMediaClipId = useProjectStore((state) => state.selectedMediaClipId)
   const selectMediaClip = useProjectStore((state) => state.selectMediaClip)
+  const selectedTransitionClipId = useProjectStore((state) => state.selectedTransitionClipId)
+  const selectTransition = useProjectStore((state) => state.selectTransition)
   const moveMediaClip = useProjectStore((state) => state.moveMediaClip)
   const trimMediaClip = useProjectStore((state) => state.trimMediaClip)
   const splitTargetAt = useProjectStore((state) => state.splitTargetAt)
@@ -107,6 +125,16 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const selectedAudioClipId = useProjectStore((state) => state.selectedAudioClipId)
   const selectAudioClip = useProjectStore((state) => state.selectAudioClip)
   const insertAudioClip = useProjectStore((state) => state.insertAudioClip)
+  // M7：文本元素（固定一条文本轨；卡片可拖动/修剪，选中走 selectionKind='text'）
+  const textClips = useProjectStore((state) => state.project.textClips) ?? EMPTY_TEXT_CLIPS
+  const selectedTextClipId = useProjectStore((state) => state.selectedTextClipId)
+  const selectTextClip = useProjectStore((state) => state.selectTextClip)
+  const updateTextClip = useProjectStore((state) => state.updateTextClip)
+  const textTrackId = textClips[0]?.trackId ?? 'track-text'
+  // v4 多序列：切序列会重置选中态，动作都走 store（撤销照常可回）
+  const addSequence = useProjectStore((state) => state.addSequence)
+  const selectSequence = useProjectStore((state) => state.selectSequence)
+  const removeSequence = useProjectStore((state) => state.removeSequence)
   const moveAudioClip = useProjectStore((state) => state.moveAudioClip)
   const trimAudioClip = useProjectStore((state) => state.trimAudioClip)
   const compactTimeline = useProjectStore((state) => state.compactTimeline)
@@ -128,6 +156,10 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   const setNotice = useUiStore((state) => state.setNotice)
   const tools = useUiStore((state) => state.timelineTools)
   const toggleTimelineTool = useUiStore((state) => state.toggleTimelineTool)
+  // v11：转场拖拽态（从左侧「转场」Tab 长按拖出）与指针下的合法切点
+  const transitionDrag = useUiStore((state) => state.transitionDrag)
+  const transitionDropClipId = useUiStore((state) => state.transitionDropClipId)
+  const setTransitionDropTarget = useUiStore((state) => state.setTransitionDropTarget)
   const zoom = useUiStore((state) => state.timelineZoom)
   /** P1/P2：项目级撤销。新建与删除字幕条的入口已合并到左侧「字幕」Tab，这里只留撤销/重做 */
   const undoDepth = useHistoryStore((state) => state.past.length)
@@ -507,8 +539,62 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     endCardDrag()
   }
 
+  /**
+   * v11：转场手柄解析的输入（切点右侧片段 + 同轨前一段 + 素材元数据）。
+   * 渲染缝隙、拖拽命中、导出/预览用的是同一个 `resolveTransitionDuration`，
+   * 所以「面板上能拖进去的位置」与「真的能生效的位置」永远一致。
+   */
+  const transitionHandleInputOf = (clip: MediaClip) => {
+    const transition = clip.transitionIn
+    const prev = previousMediaClipOnTrack(project.mediaClips, clip)
+    return {
+      prev,
+      clip,
+      prevMeta: transitionMediaMetaOf(project, prev),
+      clipMeta: transitionMediaMetaOf(project, clip),
+      requestedSec: transition?.durationSec ?? DEFAULT_TRANSITION_DURATION_SEC,
+      fps: project.fps
+    }
+  }
+
+  /**
+   * 拖拽转场时：指针位置 → 最近的合法切点（像素阈值内）。
+   * 命中结果写进 uiStore，左侧面板松手时直接读，不重复算坐标；
+   * 空隙/轨道外/锁定轨/手柄不足都返回 null，面板据此给「拖到缝隙」提示。
+   */
+  const updateTransitionDropTarget = (clientX: number, clientY: number): void => {
+    const container = rootRef.current
+    let best: { clipId: string; distancePx: number } | null = null
+    const rows = container?.querySelectorAll<HTMLElement>(MEDIA_ROW_SELECTOR) ?? []
+    for (const row of rows) {
+      const trackId = row.dataset.trackId
+      if (!trackId) continue
+      if (isTrackLocked(trackById(project.mediaTracks, trackId))) continue
+      const rect = row.getBoundingClientRect()
+      if (clientY < rect.top || clientY > rect.bottom) continue
+      const box = laneBoxOf(row.querySelector<HTMLElement>('.timeline__lane'))
+      if (!box) continue
+      const sec = secAtClientX(clientX, box, spanSec)
+      for (const clip of clipsOnMediaTrack(project.mediaClips, trackId)) {
+        const input = transitionHandleInputOf(clip)
+        if (!input.prev || !isTransitionAdjacent(input.prev, clip, project.fps)) continue
+        const resolution = resolveTransitionDuration(input)
+        if (!resolution.ok) continue
+        const distancePx = Math.abs(sec - clip.timelineStartSec) * pxPerSec
+        if (distancePx > TRANSITION_JUNCTION_HIT_PX) continue
+        if (!best || distancePx < best.distancePx) best = { clipId: clip.id, distancePx }
+      }
+    }
+    setTransitionDropTarget(best?.clipId ?? null)
+  }
+
   /** 预览轴：鼠标所在帧（吸附到帧边界），并且不越过内容末尾。 */
   const onHoverMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    // v11：转场拖拽期间指针只用来命中缝隙，不再接管预览轴
+    if (useUiStore.getState().transitionDrag !== null) {
+      updateTransitionDropTarget(event.clientX, event.clientY)
+      return
+    }
     // 播放中不接管：黄线会与时钟抢画面，用户也看不清自己停在哪一帧
     if (!tools.hoverPreview || playing || event.pointerType !== 'mouse') return
     const box = laneBoxOf(rulerLaneRef.current)
@@ -518,6 +604,8 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
   }
 
   const endHover = (): void => {
+    // 转场拖拽离开轨道：清掉缝隙高亮，松手会按「非法位置」提示
+    if (useUiStore.getState().transitionDropClipId !== null) setTransitionDropTarget(null)
     if (useUiStore.getState().hoverPreviewSec === null) return
     setHoverPreview(null)
   }
@@ -557,46 +645,64 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
     />
   )
 
-  /** v10：切点转场标记——只画解析成功的（首段/空隙/手柄不足不出现） */
-  const transitionMarkerOf = (clip: MediaClip): ReactElement | null => {
-    const transition = clip.transitionIn
-    if (!transition) return null
-    const prev = previousMediaClipOnTrack(project.mediaClips, clip)
-    const resolution = resolveTransitionDuration({
-      prev,
-      clip,
-      prevMeta: transitionMediaMetaOf(project, prev),
-      clipMeta: transitionMediaMetaOf(project, clip),
-      requestedSec: transition.durationSec,
-      fps: project.fps
-    })
+  /**
+   * v11：切点转场「连接标识」。
+   *
+   * 每个合法缝隙都渲染一个命中区（`data-transition-junction`）：
+   * - 已有转场 → 里面是可点的图标（类型 + 时长），点击 = 选中转场（右侧进转场检查器）；
+   * - 还没有转场 → 只在转场拖拽期间显形（虚线小圆环），作为拖拽落点；
+   * - 首段 / 有空隙 / 手柄不足的切点不渲染（拖过去会被 store 拒绝并由面板提示）。
+   *
+   * 选中态与落点高亮分别读 `selectedTransitionClipId` / `transitionDropClipId`，
+   * 它们变化时才重渲染，拖拽期间不会把整条时间轴的其它部分带着重算。
+   */
+  const transitionJunctionOf = (clip: MediaClip): ReactElement | null => {
+    const input = transitionHandleInputOf(clip)
+    if (!input.prev) return null
+    if (!isTransitionAdjacent(input.prev, clip, project.fps)) return null
+    const resolution = resolveTransitionDuration(input)
     if (!resolution.ok) return null
-    const meta = TRANSITION_MAP[transition.type]
+    const transition = clip.transitionIn
+    const meta = transition ? TRANSITION_MAP[transition.type] : null
+    const selected = clip.id === selectedTransitionClipId
+    const dropTarget = clip.id === transitionDropClipId
     const secLabel = String(Math.round(resolution.durationSec * 100) / 100)
     return (
-      <button
-        key={`transition-${clip.id}`}
-        type="button"
-        className={`timeline__transition-marker${clip.id === selectedMediaClipId ? ' timeline__transition-marker--selected' : ''}`}
+      <div
+        key={`junction-${clip.id}`}
+        className={`timeline__transition-junction${meta ? ' timeline__transition-junction--active' : ''}${
+          selected ? ' timeline__transition-junction--selected' : ''
+        }${dropTarget ? ' timeline__transition-junction--drop' : ''}`}
         style={{ left: secToPx(clip.timelineStartSec, spanSec, widthPx) }}
-        aria-label={TEXT.transition.marker(meta.label, secLabel)}
-        title={`${meta.label} · ${secLabel}s`}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation()
-          selectMediaClip(clip.id)
-        }}
+        data-transition-junction=""
+        data-clip-id={clip.id}
       >
-        <span aria-hidden="true">◆</span>
-        {secLabel}
-      </button>
+        {meta ? (
+          <button
+            type="button"
+            className={`timeline__transition-marker${selected ? ' timeline__transition-marker--selected' : ''}`}
+            aria-label={TEXT.transition.marker(meta.label, secLabel)}
+            title={`${meta.label} · ${secLabel}s`}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation()
+              selectTransition(clip.id)
+            }}
+          >
+            <span aria-hidden="true">⇄</span>
+            <span className="timeline__transition-marker__label">{secLabel}</span>
+          </button>
+        ) : (
+          <span className="timeline__transition-junction__dot" aria-hidden="true" />
+        )}
+      </div>
     )
   }
 
   return (
     <div
       ref={rootRef}
-      className="timeline"
+      className={`timeline${transitionDrag !== null ? ' timeline--transition-dragging' : ''}`}
       onPointerMove={onHoverMove}
       onPointerLeave={endHover}
       onPointerUp={() => setSnapGuideSec(null)}
@@ -677,6 +783,15 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
           </button>
           <button
             type="button"
+            className={`btn btn--sm${tools.rippleDelete ? ' btn--primary' : ''}`}
+            aria-pressed={tools.rippleDelete}
+            title={TEXT.timeline.rippleDeleteToolHint}
+            onClick={() => toggleTimelineTool('rippleDelete')}
+          >
+            {TEXT.timeline.rippleDeleteTool}
+          </button>
+          <button
+            type="button"
             className={`btn btn--sm${tools.hoverPreview ? ' btn--primary' : ''}`}
             aria-pressed={tools.hoverPreview}
             title={TEXT.timeline.hoverPreviewHint}
@@ -686,6 +801,44 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
           </button>
         </div>
         <div className="timeline__meta mono">
+          <label className="timeline__sequence" title={TEXT.timeline.sequenceHint}>
+            <span className="muted">{TEXT.timeline.sequence}</span>
+            <select
+              className="select"
+              value={activeSequenceId(project)}
+              aria-label={TEXT.timeline.sequence}
+              onChange={(event) => {
+                if (!selectSequence(event.target.value)) setNotice(TEXT.timeline.sequenceHint)
+              }}
+            >
+              {sequenceSummaries(project).map((sequence) => (
+                <option key={sequence.id} value={sequence.id}>
+                  {sequence.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="btn btn--sm btn--subtle"
+            title={TEXT.timeline.sequenceAdd}
+            onClick={() => addSequence()}
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className="btn btn--sm btn--subtle"
+            disabled={sequenceSummaries(project).length <= 1}
+            title={
+              sequenceSummaries(project).length <= 1 ? TEXT.timeline.sequenceLastHint : TEXT.timeline.sequenceRemoveHint
+            }
+            onClick={() => {
+              if (!removeSequence(activeSequenceId(project))) setNotice(TEXT.timeline.sequenceLastHint)
+            }}
+          >
+            −
+          </button>
           <span className="timeline__timecode">{secondsToTimecode(displayTime, project.fps)}</span>
           <span className="muted">总时长 {contentEndSec.toFixed(2)}s</span>
           <span className="muted">缩放 {Math.round(zoom * 100)}%</span>
@@ -726,16 +879,16 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             <button
               type="button"
               className="btn btn--sm btn--subtle"
-              disabled={project.mediaTracks.length >= MAX_MEDIA_TRACKS}
-              title={`媒体轨最多 ${MAX_MEDIA_TRACKS} 条`}
+              disabled={project.mediaTracks.length >= TRACK_SOFT_LIMIT}
+              title={`媒体轨软上限 ${TRACK_SOFT_LIMIT} 条`}
               onClick={() => {
-                if (!addMediaTrack()) setNotice(`媒体轨最多 ${MAX_MEDIA_TRACKS} 条`)
+                if (!addMediaTrack()) setNotice(`已达软上限：媒体轨最多 ${TRACK_SOFT_LIMIT} 条`)
               }}
             >
               + 媒体轨
             </button>
             <span className="timeline__group-count mono">
-              {project.mediaTracks.length}/{MAX_MEDIA_TRACKS}
+              {project.mediaTracks.length}/{TRACK_SOFT_LIMIT}
             </span>
           </div>
 
@@ -793,9 +946,13 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
                       onTrim={(patch) => handleMediaTrim(clip.id, patch)}
                       onDragStart={() => beginCardDrag(clip.id)}
                       onCommit={commitMediaDrag}
+                      onSeekKeyframe={(atSec) => {
+                        if (playing) setPlaying(false)
+                        seekTo(snapTimeToFrame(atSec, project.fps))
+                      }}
                     />
                   ))}
-                  {trackClips.map(transitionMarkerOf)}
+                  {trackClips.map((clip) => transitionJunctionOf(clip))}
                   {drop?.kind === 'media' && drop.trackId === track.id ? dropIndicator(drop.sec) : null}
                 </div>
               </div>
@@ -843,6 +1000,42 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
                   onChangeTimes={(start, end) => handleClipTimes(clip.id, start, end)}
                   onDragStart={() => beginCardDrag(clip.id)}
                   onCommit={endCardDrag}
+                  onSeekKeyframe={(atSec) => {
+                    if (playing) setPlaying(false)
+                    seekTo(snapTimeToFrame(atSec, project.fps))
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* M7：文本轨（固定一条，画在媒体层之上、字幕条之下）；卡片支持拖动与修剪 */}
+          <div
+            className="timeline__track timeline__track--text"
+            data-track-id={textTrackId}
+            onPointerDown={beginScrub}
+            onPointerMove={moveScrub}
+            onPointerUp={endScrub}
+            onPointerCancel={endScrub}
+          >
+            <div className="timeline__track-header">
+              <span className="timeline__track-name">{TEXT.wrap.textElements}</span>
+            </div>
+            <div className="timeline__lane" style={{ width: widthPx }}>
+              {textClips.length === 0 ? <span className="timeline__empty">{TEXT.timeline.emptyText}</span> : null}
+              {textClips.map((clip) => (
+                <TextClipCard
+                  key={clip.id}
+                  clip={clip}
+                  durationSec={spanSec}
+                  widthPx={widthPx}
+                  fps={project.fps}
+                  selected={clip.id === selectedTextClipId}
+                  playheadSec={displayTime}
+                  onSelect={selectTextClip}
+                  onChangeTimes={(start, end) => updateTextClip(clip.id, { startTime: start, endTime: end })}
+                  onDragStart={() => beginCardDrag(clip.id)}
+                  onCommit={endCardDrag}
                 />
               ))}
             </div>
@@ -853,16 +1046,16 @@ export function Timeline({ seekTo }: TimelineProps): ReactElement {
             <button
               type="button"
               className="btn btn--sm btn--subtle"
-              disabled={project.audioTracks.length >= MAX_AUDIO_TRACKS}
-              title={`音频轨最多 ${MAX_AUDIO_TRACKS} 条`}
+              disabled={project.audioTracks.length >= TRACK_SOFT_LIMIT}
+              title={`音频轨软上限 ${TRACK_SOFT_LIMIT} 条`}
               onClick={() => {
-                if (!addAudioTrack()) setNotice(`音频轨最多 ${MAX_AUDIO_TRACKS} 条`)
+                if (!addAudioTrack()) setNotice(`已达软上限：音频轨最多 ${TRACK_SOFT_LIMIT} 条`)
               }}
             >
               + 音频轨
             </button>
             <span className="timeline__group-count mono">
-              {project.audioTracks.length}/{MAX_AUDIO_TRACKS}
+              {project.audioTracks.length}/{TRACK_SOFT_LIMIT}
             </span>
           </div>
 
