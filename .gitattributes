@@ -1,0 +1,3 @@
+# 许可全文按官方源保持 LF：Windows 检出默认 autocrlf 会转成 CRLF，
+# 会让字节数与 gnu.org 的 34,523 B 对不上（差的就是 661 个 CR），不利于逐字节核对。
+LICENSE text eol=lf
