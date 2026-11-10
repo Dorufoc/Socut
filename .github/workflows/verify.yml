@@ -28,7 +28,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22.12.0'
+          # 必须 ≥ 22.19（开发机与 Electron 45 自带的是 24）：
+          # jsdom 30 依赖的 undici 8.x 在模块加载期就用 node:zlib 的 zstd API
+          # （22.15 才引入）。钉 22.12 会让所有 dom 环境用例的 forks worker
+          # 起不来，表现成「node 池全绿、dom 池 68 个 error」。
+          node-version: '24'
           cache: 'npm'
 
       - name: Cache bundled resources (FFmpeg + fonts)
